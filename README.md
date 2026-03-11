@@ -4,6 +4,8 @@ Your command center for Claude Code sessions.
 
 Switchboard is a desktop app that gives you a unified view of all your Claude Code sessions across every project. Launch, resume, fork, and monitor sessions from a single window — no more juggling terminal tabs or digging through `~/.claude/projects` to find that one conversation from last week.
 
+![Switchboard](build/screenshot.jpeg)
+
 ### Key Features
 
 - **Session Browser** — All your Claude Code sessions, organized by project, searchable by content
