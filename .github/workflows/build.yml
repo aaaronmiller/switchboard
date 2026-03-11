@@ -30,14 +30,15 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Install setuptools (Windows node-gyp fix)
+        if: matrix.platform == 'win'
+        run: pip install setuptools
+
       - name: Install dependencies
         run: npm ci
 
       - name: Bundle CodeMirror
         run: npm run bundle:codemirror
-
-      - name: Generate icons
-        run: npm run generate-icons
 
       - name: Build (release)
         if: startsWith(github.ref, 'refs/tags/v')

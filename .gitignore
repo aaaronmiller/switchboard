@@ -8,7 +8,3 @@ public/codemirror-bundle.js
 *.pem
 .env
 .cache/
-build/icon.icns
-build/icon.ico
-build/dmg-background.png
-build/dmg-background@2x.png
