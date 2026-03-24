@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Switchboard Launcher - Shell wrapper script
+# Usage: switchboard [options]
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_SCRIPT="$SCRIPT_DIR/switchboard.py"
+
+# Check if Python 3 is available
+if ! command -v python3 &> /dev/null; then
+    echo "❌ Error: python3 is required but not installed"
+    exit 1
+fi
+
+# Check if the script exists
+if [[ ! -f "$PYTHON_SCRIPT" ]]; then
+    echo "❌ Error: switchboard.py not found at $PYTHON_SCRIPT"
+    exit 1
+fi
+
+# Run the Python script
+exec python3 "$PYTHON_SCRIPT" "$@"
