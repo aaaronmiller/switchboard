@@ -42,6 +42,7 @@ jobs:
             dist/*.dmg
             dist/*.exe
             dist/*.deb
+            dist/*.rpm
             dist/*.zip
 
   release:
@@ -66,6 +67,7 @@ jobs:
             --notes "Built from fork with auto-sync" \
             artifacts/linux-build/*.AppImage \
             artifacts/linux-build/*.deb \
+            artifacts/linux-build/*.rpm \
             artifacts/mac-build/*.dmg \
             artifacts/mac-build/*.zip \
             artifacts/win-build/*.exe \
