@@ -1,0 +1,45 @@
+app-id: ai.doctly.switchboard
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+base: org.electronjs.Electron2.BaseApp
+base-version: '23.08'
+command: switchboard
+separate-locales: false
+
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --share=network
+  - --device=dri
+  - --filesystem=home
+  - --filesystem=xdg-documents
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --own-name=org.kde.*
+  - --env=ELECTRON_OZONE_PLATFORM_HINT=auto
+  - --talk-name=org.freedesktop.secrets
+  - --filesystem=xdg-run/gnupg:ro
+
+modules:
+  - name: switchboard
+    buildsystem: simple
+    build-commands:
+      - cp -r . /app/switchboard
+      - install -Dm755 switchboard-wrapper.sh /app/bin/switchboard
+      - install -Dm644 ai.doctly.switchboard.desktop /app/share/applications/ai.doctly.switchboard.desktop
+      - install -Dm644 icon.png /app/share/icons/hicolor/256x256/apps/ai.doctly.switchboard.png
+    sources:
+      - type: dir
+        path: dist/linux-unpacked
+      - type: script
+        dest-filename: switchboard-wrapper.sh
+        commands:
+          - export TMPDIR="$XDG_RUNTIME_DIR/app/$FLATPAK_ID"
+          - exec zypper exec --app-with-native-bindings /app/switchboard/switchboard "$@"
+      - type: file
+        path: ai.doctly.switchboard.desktop
+      - type: file
+        path: build/icon.png

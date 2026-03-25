@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Switchboard
+Comment=A desktop app for browsing, searching, and managing CLI coding sessions
+Exec=switchboard %U
+Icon=ai.doctly.switchboard
+Terminal=false
+Type=Application
+Categories=Development;IDE;TextEditor;
+MimeType=text/plain;text/x-shellscript;application/x-sh;
+StartupNotify=true
+StartupWMClass=switchboard
+Keywords=cli;terminal;coding;session;manager;

@@ -1,0 +1,129 @@
+name: Sync Upstream & Release
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Daily at midnight
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      new_release: ${{ steps.check.outputs.new_release }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - name: Check upstream releases
+        id: check
+        run: |
+          UPSTREAM_TAG=$(curl -s https://api.github.com/repos/doctly/switchboard/releases/latest | jq -r '.tag_name // empty')
+          CURRENT_TAG=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r '.tag_name // empty')
+          
+          if [ "$UPSTREAM_TAG" != "$CURRENT_TAG" ] && [ -n "$UPSTREAM_TAG" ]; then
+            echo "new_release=true" >> $GITHUB_OUTPUT
+            echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+            echo "New upstream release: $UPSTREAM_TAG (current: $CURRENT_TAG)"
+          else
+            echo "new_release=false" >> $GITHUB_OUTPUT
+            echo "No new releases"
+          fi
+
+  sync-and-build:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.new_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/doctly/switchboard.git
+          git fetch upstream
+
+      - name: Check for merge conflicts
+        run: |
+          # Try merge and check for conflicts
+          git merge --no-commit --no-ff upstream/main || {
+            if git diff --check --quiet; then
+              echo "Merge completed without conflicts"
+              git commit -m "Merge upstream changes"
+            else
+              echo "CONFLICT_DETECTED=true" >> $GITHUB_ENV
+              git merge --abort
+              exit 1
+            fi
+          }
+
+      - name: Checkout conflict (no-op, just informational)
+        if: env.CONFLICT_DETECTED == 'true'
+        run: echo "Conflict detected - manual intervention needed"
+
+      - name: Install Node.js
+        if: env.CONFLICT_DETECTED != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        if: env.CONFLICT_DETECTED != 'true'
+        run: npm ci
+
+      - name: Build Linux AppImage
+        if: env.CONFLICT_DETECTED != 'true'
+        run: npm run build:linux
+
+      - name: Prepare AppImage with metadata
+        if: env.CONFLICT_DETECTED != 'true'
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          cp -r dist/linux-unpacked/* AppDir/
+          cp build/icon.png AppDir/switchboard.png
+          cp AppDir/switchboard.png AppDir/usr/share/icons/hicolor/256x256/apps/
+          cat > AppDir/switchboard.desktop << 'EOF'
+          [Desktop Entry]
+          Name=Switchboard
+          Comment=CLI coding session manager
+          Exec=AppRun %U
+          Icon=switchboard
+          Terminal=false
+          Type=Application
+          Categories=Development;IDE;
+          EOF
+          cp AppDir/switchboard.desktop AppDir/usr/share/applications/
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          export PATH="${HERE}/usr/bin:${PATH}"
+          export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+          exec "${HERE}/switchboard" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+      - name: Build AppImage
+        if: env.CONFLICT_DETECTED != 'true'
+        run: |
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          ./appimagetool -s AppDir Switchboard-${{ needs.check-upstream.outputs.tag }}.AppImage
+
+      - name: Create Release
+        if: env.CONFLICT_DETECTED != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ needs.check-upstream.outputs.tag }} \
+            --title "Switchboard ${{ needs.check-upstream.outputs.tag }}" \
+            --notes "Auto-synced from upstream doctly/switchboard" \
+            Switchboard-${{ needs.check-upstream.outputs.tag }}.AppImage
+
+      - name: Report conflict
+        if: env.CONFLICT_DETECTED == 'true'
+        run: |
+          echo "⚠️ Merge conflict detected with upstream"
+          echo "Manual intervention required at: https://github.com/${{ github.repository }}/actions"
+          exit 1
