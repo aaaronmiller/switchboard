@@ -1,3 +1,15 @@
+// Agent color map (matches CLI_AGENTS in main.js)
+const AGENT_COLORS = {
+  claude: '#d97757', codex: '#4ade80', qwen: '#60a5fa',
+  gemini: '#22d3ee', kimi: '#fb923c', aider: '#a78bfa',
+  opencode: '#f472b6', hermes: '#fbbf24', letta: '#34d399',
+};
+const AGENT_LABELS = {
+  claude: 'Claude', codex: 'Codex', qwen: 'Qwen',
+  gemini: 'Gemini', kimi: 'Kimi', aider: 'Aider',
+  opencode: 'OpenCode', hermes: 'Hermes', letta: 'Letta',
+};
+
 const statusBarInfo = document.getElementById('status-bar-info');
 const statusBarActivity = document.getElementById('status-bar-activity');
 const terminalsEl = document.getElementById('terminals');
@@ -88,6 +100,8 @@ let showTodayOnly = false;
 let cachedProjects = [];
 let cachedAllProjects = [];
 let activePtyIds = new Set();
+let sessionAgentMap = new Map(); // sessionId → cliAgent id
+let headlessState = new Map(); // sessionId → { events: [], lastAction: '', startTime }
 let sortedOrder = []; // [{ projectPath, itemIds: [itemId, ...] }, ...] — single source of truth for sidebar order
 let activeTab = 'sessions';
 let cachedPlans = [];
@@ -476,6 +490,310 @@ window.api.onCliBusyState((sessionId, busy) => {
   setActivity(sessionId, busy);
 });
 
+// --- Headless session events ---
+window.api.onHeadlessEvent((sessionId, event) => {
+  let state = headlessState.get(sessionId);
+  if (!state) {
+    state = { events: [], lastAction: '', startTime: Date.now() };
+    headlessState.set(sessionId, state);
+  }
+
+  state.events.push(event);
+  if (state.events.length > 50) state.events.shift();
+
+  // Update last action text
+  if (event.type === 'tool_start' || event.type === 'tool_use') {
+    state.lastAction = event.name || 'tool';
+    state.lastActionTime = event.ts;
+  } else if (event.type === 'text') {
+    state.lastAction = event.text?.slice(0, 40) || 'thinking...';
+    state.lastActionTime = event.ts;
+  } else if (event.type === 'error') {
+    state.lastAction = 'error: ' + (event.text || '').slice(0, 30);
+    state.lastActionTime = event.ts;
+  } else if (event.type === 'complete') {
+    state.lastAction = event.exitCode === 0 ? 'completed' : 'failed (exit ' + event.exitCode + ')';
+    state.lastActionTime = event.ts;
+    state.completed = true;
+  }
+
+  // Update the sparkline in the sidebar without full rebuild
+  updateHeadlessSparkline(sessionId, state);
+
+  // Live-update log panel if it's open for this session
+  if (window._headlessLogUpdater) {
+    window._headlessLogUpdater(sessionId, event);
+  }
+});
+
+function sparkColor(event) {
+  if (event.type === 'error') return '#ef4444';
+  if (event.type === 'complete') return event.exitCode === 0 ? '#22c55e' : '#ef4444';
+  if (event.type === 'tool_start' || event.type === 'tool_use') {
+    const name = (event.name || '').toLowerCase();
+    if (name.includes('read') || name.includes('glob') || name.includes('grep')) return '#60a5fa';
+    if (name.includes('write') || name.includes('edit')) return '#eab308';
+    if (name.includes('bash') || name.includes('exec')) return '#a855f7';
+    if (name.includes('agent') || name.includes('task')) return '#22d3ee';
+    return '#22c55e';
+  }
+  if (event.type === 'text') return '#64748b';
+  if (event.type === 'message_start') return '#334155';
+  return '#475569';
+}
+
+function updateHeadlessSparkline(sessionId, state) {
+  const sparkline = document.getElementById('sparkline-' + sessionId);
+  if (!sparkline) return;
+
+  // Only render tool-related events in the sparkline (skip text/message noise)
+  const toolEvents = state.events.filter(e =>
+    e.type === 'tool_start' || e.type === 'tool_use' || e.type === 'error' || e.type === 'complete'
+  ).slice(-30);
+
+  sparkline.innerHTML = '';
+  for (const ev of toolEvents) {
+    const block = document.createElement('span');
+    block.className = 'spark-block';
+    block.style.background = sparkColor(ev);
+    block.title = (ev.name || ev.type) + (ev.type === 'error' ? ': ' + (ev.text || '') : '');
+    sparkline.appendChild(block);
+  }
+
+  // Update the meta text
+  const metaEl = sparkline.parentElement?.querySelector('.session-meta');
+  if (metaEl && state.lastAction) {
+    const elapsed = state.lastActionTime ? formatElapsed(Date.now() - state.lastActionTime) : '';
+    metaEl.textContent = state.lastAction + (elapsed ? ' \u00b7 ' + elapsed : '');
+  }
+}
+
+function formatElapsed(ms) {
+  if (ms < 1000) return 'now';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's ago';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ago';
+  return Math.floor(m / 60) + 'h ago';
+}
+
+function buildLogEntry(ev) {
+  const entry = document.createElement('div');
+  entry.className = 'headless-log-entry';
+
+  const time = document.createElement('span');
+  time.className = 'headless-log-time';
+  const d = new Date(ev.ts || Date.now());
+  time.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  const typeEl = document.createElement('span');
+  typeEl.className = 'headless-log-type';
+  typeEl.style.color = sparkColor(ev);
+  typeEl.textContent = ev.type === 'tool_start' ? 'TOOL' : ev.type.toUpperCase();
+
+  const text = document.createElement('span');
+  text.className = 'headless-log-text';
+  if (ev.type === 'tool_start' || ev.type === 'tool_use') {
+    text.textContent = ev.name || 'unknown tool';
+  } else if (ev.type === 'text') {
+    text.textContent = ev.text || '';
+  } else if (ev.type === 'error') {
+    text.textContent = ev.text || 'error';
+    text.style.color = '#ef4444';
+  } else if (ev.type === 'complete') {
+    text.textContent = ev.exitCode === 0 ? 'Session completed successfully' : 'Exited with code ' + ev.exitCode;
+  } else if (ev.type === 'result') {
+    text.textContent = (ev.text || '').slice(0, 200);
+  } else {
+    text.textContent = ev.type;
+  }
+
+  entry.appendChild(time);
+  entry.appendChild(typeEl);
+  entry.appendChild(text);
+  return entry;
+}
+
+// ============================================================
+// PEERS — Cross-session messaging UI
+// ============================================================
+
+const activePeers = new Map(); // peerId -> peer data
+
+async function refreshPeers() {
+  try {
+    const peers = await window.api.peerList('machine');
+    activePeers.clear();
+    for (const p of peers) activePeers.set(p.id, p);
+  } catch {}
+}
+
+// Listen for peer changes
+window.api.onPeersChanged(() => refreshPeers());
+
+// Listen for incoming messages and show a toast
+window.api.onPeerMessage((msg) => {
+  const agentLabel = AGENT_LABELS[msg.fromAgent] || msg.fromAgent;
+  const agentColor = AGENT_COLORS[msg.fromAgent] || '#888';
+  showPeerMessageToast(msg, agentLabel, agentColor);
+});
+
+function showPeerMessageToast(msg, agentLabel, agentColor) {
+  // Remove existing toast if any
+  const existing = document.querySelector('.peer-toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'peer-toast';
+  toast.innerHTML = `
+    <div class="peer-toast-header">
+      <span class="peer-toast-agent" style="color:${agentColor}">${agentLabel}</span>
+      <span class="peer-toast-path">${msg.fromCwd ? msg.fromCwd.split('/').pop() : ''}</span>
+      <button class="peer-toast-close">&times;</button>
+    </div>
+    <div class="peer-toast-body">${escapeHtml(msg.text).slice(0, 300)}</div>
+    <div class="peer-toast-actions">
+      <button class="peer-toast-reply" data-from="${msg.fromPeerId}" data-to="${msg.toPeerId}">Reply</button>
+    </div>
+  `;
+
+  toast.querySelector('.peer-toast-close').onclick = () => toast.remove();
+  toast.querySelector('.peer-toast-reply').onclick = () => {
+    toast.remove();
+    showPeerMessageDialog(msg.fromPeerId, msg.toPeerId);
+  };
+
+  document.body.appendChild(toast);
+
+  // Auto-dismiss after 15s
+  setTimeout(() => { if (toast.parentElement) toast.remove(); }, 15000);
+}
+
+function showPeerMessageDialog(toPeerId, fromPeerId) {
+  const overlay = document.createElement('div');
+  overlay.className = 'headless-prompt-overlay';
+
+  const peer = activePeers.get(toPeerId);
+  const agentLabel = peer ? (AGENT_LABELS[peer.agent] || peer.agent) : 'Peer';
+  const agentColor = peer ? (AGENT_COLORS[peer.agent] || '#888') : '#888';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'headless-prompt-dialog';
+  dialog.innerHTML = `
+    <h3>
+      <span style="color:${agentColor}">Send to ${agentLabel}</span>
+      <span style="color:#555; font-size:11px; margin-left:8px">${peer?.cwd?.split('/').pop() || toPeerId}</span>
+    </h3>
+    <textarea placeholder="Type your message..." autofocus></textarea>
+    <div class="headless-prompt-actions">
+      <button class="headless-cancel-btn">Cancel</button>
+      <button class="headless-start-btn" style="background:rgba(${hexToRgb(agentColor)},0.15); color:${agentColor}; border-color:${agentColor}40 !important">Send</button>
+    </div>
+  `;
+
+  const textarea = dialog.querySelector('textarea');
+  const sendBtn = dialog.querySelector('.headless-start-btn');
+  const cancelBtn = dialog.querySelector('.headless-cancel-btn');
+
+  cancelBtn.onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  sendBtn.onclick = async () => {
+    const text = textarea.value.trim();
+    if (!text) return;
+    overlay.remove();
+    const result = await window.api.peerSendMessage(fromPeerId || 'ui', toPeerId, text);
+    if (!result.ok) {
+      statusBarActivity.textContent = `Message failed: ${result.error}`;
+      setTimeout(() => { statusBarActivity.textContent = ''; }, 5000);
+    }
+  };
+
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendBtn.click(); }
+    if (e.key === 'Escape') overlay.remove();
+  });
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+  setTimeout(() => textarea.focus(), 50);
+}
+
+function hexToRgb(hex) {
+  // Handle 3-char (#abc) and 6-char (#aabbcc) hex
+  let h = hex.replace('#', '');
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  const r = parseInt(h.slice(0, 2), 16) || 0;
+  const g = parseInt(h.slice(2, 4), 16) || 0;
+  const b = parseInt(h.slice(4, 6), 16) || 0;
+  return `${r},${g},${b}`;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function showPeersPopover(sessionId, anchorEl) {
+  // Remove any existing popover
+  document.querySelectorAll('.peers-popover').forEach(p => p.remove());
+
+  const popover = document.createElement('div');
+  popover.className = 'peers-popover';
+
+  // Get this session's peer ID
+  let myPeerId = null;
+  for (const [peerId, peer] of activePeers) {
+    if (peer.session_id === sessionId) { myPeerId = peerId; break; }
+  }
+
+  const otherPeers = [...activePeers.values()].filter(p => p.session_id !== sessionId);
+
+  if (otherPeers.length === 0) {
+    popover.innerHTML = '<div class="peers-popover-empty">No other active sessions</div>';
+  } else {
+    for (const peer of otherPeers) {
+      const agentColor = AGENT_COLORS[peer.agent] || '#888';
+      const agentLabel = AGENT_LABELS[peer.agent] || peer.agent;
+      const dirName = peer.cwd ? peer.cwd.split('/').pop() : '?';
+
+      const btn = document.createElement('button');
+      btn.className = 'popover-option peers-popover-peer';
+      btn.innerHTML = `
+        <span class="popover-agent-dot" style="background:${agentColor}"></span>
+        <span class="peers-peer-label">${agentLabel} <span style="color:#555">${dirName}</span></span>
+        ${peer.summary ? `<span class="peers-peer-summary">${escapeHtml(peer.summary).slice(0, 60)}</span>` : ''}
+      `;
+      btn.onclick = () => {
+        popover.remove();
+        showPeerMessageDialog(peer.id, myPeerId);
+      };
+      popover.appendChild(btn);
+    }
+  }
+
+  // Position near anchor
+  const rect = anchorEl.getBoundingClientRect();
+  popover.style.position = 'fixed';
+  popover.style.top = (rect.bottom + 4) + 'px';
+  popover.style.right = (window.innerWidth - rect.right) + 'px';
+
+  document.body.appendChild(popover);
+
+  // Close on outside click
+  const closeHandler = (e) => {
+    if (!popover.contains(e.target) && e.target !== anchorEl) {
+      popover.remove();
+      document.removeEventListener('mousedown', closeHandler);
+    }
+  };
+  setTimeout(() => document.addEventListener('mousedown', closeHandler), 0);
+}
+
+// Initial load
+refreshPeers();
+
 // --- Single entry point for all sidebar renders ---
 // resort=true: re-sort items by priority+time (use for user-initiated actions)
 // resort=false (default): preserve existing DOM order, new items go to top
@@ -617,8 +935,9 @@ terminalRestartBtn.addEventListener('click', () => {
 // --- Poll for active PTY sessions ---
 async function pollActiveSessions() {
   try {
-    const ids = await window.api.getActiveSessions();
-    activePtyIds = new Set(ids);
+    const sessions = await window.api.getActiveSessions();
+    activePtyIds = new Set(sessions.map(s => s.sessionId));
+    for (const s of sessions) sessionAgentMap.set(s.sessionId, s.cliAgent);
     updateRunningIndicators();
     updateTerminalHeader();
   } catch {}
@@ -1369,9 +1688,40 @@ function buildSessionItem(session) {
     badge.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>';
     summaryEl.prepend(badge);
   }
+
+  if (session.type === 'headless') {
+    item.classList.add('is-headless');
+    const badge = document.createElement('span');
+    badge.className = 'headless-badge';
+    badge.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>';
+    summaryEl.prepend(badge);
+  }
+
+  // Agent badge for non-claude sessions
+  const agentId = sessionAgentMap.get(session.sessionId);
+  if (agentId && agentId !== 'claude') {
+    const agentBadge = document.createElement('span');
+    agentBadge.className = 'agent-badge';
+    agentBadge.style.color = AGENT_COLORS[agentId] || '#8888a0';
+    agentBadge.style.borderColor = AGENT_COLORS[agentId] || '#8888a0';
+    agentBadge.textContent = AGENT_LABELS[agentId] || agentId;
+    summaryEl.appendChild(agentBadge);
+  }
   info.appendChild(summaryEl);
   info.appendChild(idEl);
   info.appendChild(metaEl);
+
+  // Headless sparkline row
+  if (session.type === 'headless') {
+    const sparkline = document.createElement('div');
+    sparkline.className = 'headless-sparkline';
+    sparkline.id = 'sparkline-' + session.sessionId;
+    const state = headlessState.get(session.sessionId);
+    if (state) {
+      updateHeadlessSparkline(session.sessionId, state);
+    }
+    info.appendChild(sparkline);
+  }
 
   // Action buttons container
   const actions = document.createElement('div');
@@ -1515,6 +1865,38 @@ async function showTerminalHeader(session) {
   terminalHeader.style.display = '';
   updateTerminalHeader();
 
+  // Show agent indicator in header
+  let agentTag = terminalHeader.querySelector('.terminal-header-agent');
+  const agentId = sessionAgentMap.get(session.sessionId);
+  if (agentId && agentId !== 'claude') {
+    if (!agentTag) {
+      agentTag = document.createElement('span');
+      agentTag.className = 'terminal-header-agent';
+      terminalHeaderId.parentElement.insertBefore(agentTag, terminalHeaderId.nextSibling);
+    }
+    agentTag.textContent = AGENT_LABELS[agentId] || agentId;
+    agentTag.style.color = AGENT_COLORS[agentId] || '#8888a0';
+    agentTag.style.borderColor = AGENT_COLORS[agentId] || '#8888a0';
+    agentTag.style.display = '';
+  } else if (agentTag) {
+    agentTag.style.display = 'none';
+  }
+
+  // Peers messaging button
+  let peersBtn = terminalHeader.querySelector('.terminal-header-peers-btn');
+  if (!peersBtn) {
+    peersBtn = document.createElement('button');
+    peersBtn.className = 'terminal-header-peers-btn';
+    peersBtn.title = 'Send message to peers';
+    peersBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+    const headerRight = terminalHeader.querySelector('.terminal-header-status')?.parentElement || terminalHeader;
+    headerRight.appendChild(peersBtn);
+  }
+  peersBtn.onclick = async () => {
+    await refreshPeers();
+    showPeersPopover(session.sessionId, peersBtn);
+  };
+
   // Show active shell profile
   try {
     const effective = await window.api.getEffectiveSettings(session.projectPath);
@@ -1641,11 +2023,44 @@ function showSession(sessionId) {
     document.querySelectorAll('.terminal-container').forEach(el => el.classList.remove('visible'));
     placeholder.style.display = 'none';
     hidePlanViewer();
-    if (session) showTerminalHeader(session);
-    if (entry) {
-      entry.element.classList.add('visible');
-      entry.terminal.focus();
-      fitAndScroll(entry);
+
+    // Remove any existing headless log panel
+    const oldLog = document.getElementById('headless-log-panel');
+    if (oldLog) oldLog.remove();
+
+    if (session && session.type === 'headless') {
+      // Show headless event log instead of terminal
+      if (session) showTerminalHeader(session);
+      const logPanel = document.createElement('div');
+      logPanel.id = 'headless-log-panel';
+      logPanel.className = 'headless-log terminal-container visible';
+      const state = headlessState.get(sessionId);
+      if (state) {
+        for (const ev of state.events) {
+          logPanel.appendChild(buildLogEntry(ev));
+        }
+        logPanel.scrollTop = logPanel.scrollHeight;
+      }
+      terminalsEl.appendChild(logPanel);
+
+      // Live-update the log as events come in
+      if (!logPanel._listener) {
+        logPanel._listener = true;
+        window._headlessLogUpdater = (sid, ev) => {
+          if (sid !== sessionId) return;
+          const panel = document.getElementById('headless-log-panel');
+          if (!panel) return;
+          panel.appendChild(buildLogEntry(ev));
+          panel.scrollTop = panel.scrollHeight;
+        };
+      }
+    } else {
+      if (session) showTerminalHeader(session);
+      if (entry) {
+        entry.element.classList.add('visible');
+        entry.terminal.focus();
+        fitAndScroll(entry);
+      }
     }
   }
 }
@@ -1654,6 +2069,12 @@ function showSession(sessionId) {
 
 async function openSession(session) {
   const { sessionId, projectPath } = session;
+
+  // Headless sessions don't need a terminal — just show the log panel
+  if (session.type === 'headless') {
+    showSession(sessionId);
+    return;
+  }
 
   // If already open, handle closed-session cleanup or just show it
   if (openSessions.has(sessionId)) {
@@ -1720,12 +2141,6 @@ function formatDate(date) {
   if (hours < 24) return `${hours}h ago`;
   if (days < 7) return `${days}d ago`;
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
 }
 
 function shellEscape(path) {
@@ -2039,6 +2454,16 @@ function wrapInGridCard(sessionId) {
   project.className = 'grid-card-project';
   project.textContent = shortProject;
   header.appendChild(project);
+
+  // Agent label in grid card header (for non-claude sessions)
+  const cardAgentId = sessionAgentMap.get(sessionId);
+  if (cardAgentId && cardAgentId !== 'claude') {
+    const agentLabel = document.createElement('span');
+    agentLabel.className = 'grid-card-agent';
+    agentLabel.textContent = AGENT_LABELS[cardAgentId] || cardAgentId;
+    agentLabel.style.color = AGENT_COLORS[cardAgentId] || '#8888a0';
+    header.appendChild(agentLabel);
+  }
 
   // Footer
   const footer = document.createElement('div');
@@ -2500,6 +2925,14 @@ async function loadStats() {
     buildUsageSection(usage);
   }
 
+  // Multi-agent usage breakdown
+  try {
+    const agentStats = await window.api.getAgentStats();
+    if (agentStats && Object.keys(agentStats).length) {
+      buildAgentStatsSection(agentStats);
+    }
+  } catch {}
+
   if (stats) {
     const notice = document.createElement('div');
     notice.className = 'stats-notice';
@@ -2854,6 +3287,74 @@ function buildStatsSummary(stats, dailyMap) {
   statsViewerBody.appendChild(summaryEl);
 }
 
+function buildAgentStatsSection(agentStats) {
+  const container = document.createElement('div');
+  container.className = 'agent-stats-container';
+
+  const title = document.createElement('div');
+  title.className = 'daily-chart-title';
+  title.textContent = 'AI Agent Usage (All CLIs)';
+  container.appendChild(title);
+
+  const sorted = Object.entries(agentStats)
+    .filter(([, s]) => !s.error && s.totalSessions > 0)
+    .sort((a, b) => b[1].last30Days - a[1].last30Days);
+
+  if (!sorted.length) {
+    container.innerHTML += '<div class="plans-empty">No agent history found.</div>';
+    statsViewerBody.appendChild(container);
+    return;
+  }
+
+  const maxSessions = Math.max(...sorted.map(([, s]) => s.last30Days), 1);
+
+  for (const [agentId, s] of sorted) {
+    const row = document.createElement('div');
+    row.className = 'agent-stat-row';
+
+    const barWidth = Math.max(2, (s.last30Days / maxSessions) * 100);
+    const sizeStr = s.totalSizeBytes >= 1e6
+      ? (s.totalSizeBytes / 1e6).toFixed(1) + ' MB'
+      : (s.totalSizeBytes / 1e3).toFixed(0) + ' KB';
+
+    const lastUsedStr = s.lastUsed
+      ? new Date(s.lastUsed).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      : 'never';
+
+    row.innerHTML = `
+      <div class="agent-stat-label">
+        <span class="agent-stat-dot" style="background:${s.color}"></span>
+        <span class="agent-stat-name">${escapeHtml(s.name)}</span>
+      </div>
+      <div class="agent-stat-bar-wrap">
+        <div class="agent-stat-bar" style="width:${barWidth}%;background:${s.color}"></div>
+      </div>
+      <div class="agent-stat-meta">
+        <span>${s.last30Days} / 30d</span>
+        <span>${s.last7Days} / 7d</span>
+        <span>${s.totalSessions} total</span>
+        <span>${sizeStr}</span>
+        <span>Last: ${lastUsedStr}</span>
+      </div>
+    `;
+    container.appendChild(row);
+  }
+
+  const totalMsgs = sorted.reduce((sum, [, s]) => sum + (s.estimatedMessages || 0), 0);
+  const totalTools = sorted.reduce((sum, [, s]) => sum + (s.estimatedToolUses || 0), 0);
+  if (totalMsgs > 0) {
+    const summary = document.createElement('div');
+    summary.className = 'agent-stats-summary';
+    summary.innerHTML = `
+      <span>Est. messages (recent): ${totalMsgs.toLocaleString()}</span>
+      ${totalTools > 0 ? `<span>Tool uses: ${totalTools.toLocaleString()}</span>` : ''}
+    `;
+    container.appendChild(summary);
+  }
+
+  statsViewerBody.appendChild(container);
+}
+
 // --- Memory ---
 let cachedMemoryData = { global: { files: [] }, projects: [] };
 let memoryEditorView = null;
@@ -3072,39 +3573,76 @@ async function resolveDefaultSessionOptions(project) {
   if (effective.preLaunchCmd) options.preLaunchCmd = effective.preLaunchCmd;
   if (effective.addDirs) options.addDirs = effective.addDirs;
   if (effective.mcpEmulation === false) options.mcpEmulation = false;
+  if (effective.cliAgent) options.cliAgent = effective.cliAgent;
   return options;
 }
 
 async function forkSession(session, project) {
   const options = await resolveDefaultSessionOptions(project);
   options.forkFrom = session.sessionId;
+  // Carry parent session's agent (e.g. forking a Codex session should fork as Codex)
+  const parentAgent = sessionAgentMap.get(session.sessionId);
+  if (parentAgent) options.cliAgent = parentAgent;
   launchNewSession(project, options);
 }
 
-function showNewSessionPopover(project, anchorEl) {
+async function showNewSessionPopover(project, anchorEl) {
   // Remove any existing popover
   document.querySelectorAll('.new-session-popover').forEach(el => el.remove());
 
   const popover = document.createElement('div');
   popover.className = 'new-session-popover';
 
-  const claudeBtn = document.createElement('button');
-  claudeBtn.className = 'popover-option';
-  claudeBtn.innerHTML = '<svg class="popover-option-icon claude-icon" width="16" height="16" viewBox="0 0 1200 1200" fill="#d97757" stroke="none"><path d="M 233.959793 800.214905 L 468.644287 668.536987 L 472.590637 657.100647 L 468.644287 650.738403 L 457.208069 650.738403 L 417.986633 648.322144 L 283.892639 644.69812 L 167.597321 639.865845 L 54.926208 633.825623 L 26.577238 627.785339 L 3.3e-05 592.751709 L 2.73832 575.27533 L 26.577238 559.248352 L 60.724873 562.228149 L 136.187973 567.382629 L 249.422867 575.194763 L 331.570496 580.026978 L 453.261841 592.671082 L 472.590637 592.671082 L 475.328857 584.859009 L 468.724915 580.026978 L 463.570557 575.194763 L 346.389313 495.785217 L 219.543671 411.865906 L 153.100723 363.543762 L 117.181267 339.060425 L 99.060455 316.107361 L 91.248367 266.01355 L 123.865784 230.093994 L 167.677887 233.073853 L 178.872513 236.053772 L 223.248367 270.201477 L 318.040283 343.570496 L 441.825592 434.738342 L 459.946411 449.798706 L 467.194672 444.64447 L 468.080597 441.020203 L 459.946411 427.409485 L 392.617493 305.718323 L 320.778564 181.932983 L 288.80542 130.630859 L 280.348999 99.865845 C 277.369171 87.221436 275.194641 76.590698 275.194641 63.624268 L 312.322174 13.20813 L 332.8591 6.604126 L 382.389313 13.20813 L 403.248352 31.328979 L 434.013519 101.71814 L 483.865753 212.537048 L 561.181274 363.221497 L 583.812134 407.919434 L 595.892639 449.315491 L 600.40271 461.959839 L 608.214783 461.959839 L 608.214783 454.711609 L 614.577271 369.825623 L 626.335632 265.61084 L 637.771851 131.516846 L 641.718201 93.745117 L 660.402832 48.483276 L 697.530334 24.000122 L 726.52356 37.852417 L 750.362549 72 L 747.060486 94.067139 L 732.886047 186.201416 L 705.100708 330.52356 L 686.979919 427.167847 L 697.530334 427.167847 L 709.61084 415.087341 L 758.496704 350.174561 L 840.644348 247.490051 L 876.885925 206.738342 L 919.167847 161.71814 L 946.308838 140.29541 L 997.61084 140.29541 L 1035.38269 196.429626 L 1018.469849 254.416199 L 965.637634 321.422852 L 921.825562 378.201538 L 859.006714 462.765259 L 819.785278 530.41626 L 823.409424 535.812073 L 832.75177 534.92627 L 974.657776 504.724915 L 1051.328979 490.872559 L 1142.818848 475.167786 L 1184.214844 494.496582 L 1188.724854 514.147644 L 1172.456421 554.335693 L 1074.604126 578.496765 L 959.838989 601.449829 L 788.939636 641.879272 L 786.845764 643.409485 L 789.261841 646.389343 L 866.255127 653.637634 L 899.194702 655.409424 L 979.812134 655.409424 L 1129.932861 666.604187 L 1169.154419 692.537109 L 1192.671265 724.268677 L 1188.724854 748.429688 L 1128.322144 779.194641 L 1046.818848 759.865845 L 856.590759 714.604126 L 791.355774 698.335754 L 782.335693 698.335754 L 782.335693 703.731567 L 836.69812 756.885986 L 936.322205 846.845581 L 1061.073975 962.81897 L 1067.436279 991.490112 L 1051.409424 1014.120911 L 1034.496704 1011.704712 L 924.885986 929.234924 L 882.604126 892.107544 L 786.845764 811.48999 L 780.483276 811.48999 L 780.483276 819.946289 L 802.550415 852.241699 L 919.087341 1027.409424 L 925.127625 1081.127686 L 916.671204 1098.604126 L 886.469849 1109.154419 L 853.288696 1103.114136 L 785.073914 1007.355835 L 714.684631 899.516785 L 657.906067 802.872498 L 650.979858 806.81897 L 617.476624 1167.704834 L 601.771851 1186.147705 L 565.530212 1200 L 535.328857 1177.046997 L 519.302124 1139.919556 L 535.328857 1066.550537 L 554.657776 970.792053 L 570.362488 894.68457 L 584.536926 800.134277 L 592.993347 768.724976 L 592.429626 766.630859 L 585.503479 767.516968 L 514.22821 865.369263 L 405.825531 1011.865906 L 320.053711 1103.677979 L 299.516815 1111.812256 L 263.919525 1093.369263 L 267.221497 1060.429688 L 287.114136 1031.114136 L 405.825531 880.107361 L 477.422913 786.52356 L 523.651062 732.483276 L 523.328918 724.671265 L 520.590698 724.671265 L 205.288605 929.395935 L 149.154434 936.644409 L 124.993355 914.01355 L 127.973183 876.885986 L 139.409409 864.80542 L 234.201385 799.570435 L 233.879227 799.8927 Z"/></svg> Claude';
-  claudeBtn.onclick = async () => { popover.remove(); launchNewSession(project, await resolveDefaultSessionOptions(project)); };
+  // Detect installed agents and build buttons dynamically
+  let agents;
+  try { agents = await window.api.detectAgents(); } catch { agents = {}; }
 
-  const claudeOptsBtn = document.createElement('button');
-  claudeOptsBtn.className = 'popover-option';
-  claudeOptsBtn.innerHTML = '<svg class="popover-option-icon claude-icon" width="16" height="16" viewBox="0 0 1200 1200" fill="#d97757" stroke="none"><path d="M 233.959793 800.214905 L 468.644287 668.536987 L 472.590637 657.100647 L 468.644287 650.738403 L 457.208069 650.738403 L 417.986633 648.322144 L 283.892639 644.69812 L 167.597321 639.865845 L 54.926208 633.825623 L 26.577238 627.785339 L 3.3e-05 592.751709 L 2.73832 575.27533 L 26.577238 559.248352 L 60.724873 562.228149 L 136.187973 567.382629 L 249.422867 575.194763 L 331.570496 580.026978 L 453.261841 592.671082 L 472.590637 592.671082 L 475.328857 584.859009 L 468.724915 580.026978 L 463.570557 575.194763 L 346.389313 495.785217 L 219.543671 411.865906 L 153.100723 363.543762 L 117.181267 339.060425 L 99.060455 316.107361 L 91.248367 266.01355 L 123.865784 230.093994 L 167.677887 233.073853 L 178.872513 236.053772 L 223.248367 270.201477 L 318.040283 343.570496 L 441.825592 434.738342 L 459.946411 449.798706 L 467.194672 444.64447 L 468.080597 441.020203 L 459.946411 427.409485 L 392.617493 305.718323 L 320.778564 181.932983 L 288.80542 130.630859 L 280.348999 99.865845 C 277.369171 87.221436 275.194641 76.590698 275.194641 63.624268 L 312.322174 13.20813 L 332.8591 6.604126 L 382.389313 13.20813 L 403.248352 31.328979 L 434.013519 101.71814 L 483.865753 212.537048 L 561.181274 363.221497 L 583.812134 407.919434 L 595.892639 449.315491 L 600.40271 461.959839 L 608.214783 461.959839 L 608.214783 454.711609 L 614.577271 369.825623 L 626.335632 265.61084 L 637.771851 131.516846 L 641.718201 93.745117 L 660.402832 48.483276 L 697.530334 24.000122 L 726.52356 37.852417 L 750.362549 72 L 747.060486 94.067139 L 732.886047 186.201416 L 705.100708 330.52356 L 686.979919 427.167847 L 697.530334 427.167847 L 709.61084 415.087341 L 758.496704 350.174561 L 840.644348 247.490051 L 876.885925 206.738342 L 919.167847 161.71814 L 946.308838 140.29541 L 997.61084 140.29541 L 1035.38269 196.429626 L 1018.469849 254.416199 L 965.637634 321.422852 L 921.825562 378.201538 L 859.006714 462.765259 L 819.785278 530.41626 L 823.409424 535.812073 L 832.75177 534.92627 L 974.657776 504.724915 L 1051.328979 490.872559 L 1142.818848 475.167786 L 1184.214844 494.496582 L 1188.724854 514.147644 L 1172.456421 554.335693 L 1074.604126 578.496765 L 959.838989 601.449829 L 788.939636 641.879272 L 786.845764 643.409485 L 789.261841 646.389343 L 866.255127 653.637634 L 899.194702 655.409424 L 979.812134 655.409424 L 1129.932861 666.604187 L 1169.154419 692.537109 L 1192.671265 724.268677 L 1188.724854 748.429688 L 1128.322144 779.194641 L 1046.818848 759.865845 L 856.590759 714.604126 L 791.355774 698.335754 L 782.335693 698.335754 L 782.335693 703.731567 L 836.69812 756.885986 L 936.322205 846.845581 L 1061.073975 962.81897 L 1067.436279 991.490112 L 1051.409424 1014.120911 L 1034.496704 1011.704712 L 924.885986 929.234924 L 882.604126 892.107544 L 786.845764 811.48999 L 780.483276 811.48999 L 780.483276 819.946289 L 802.550415 852.241699 L 919.087341 1027.409424 L 925.127625 1081.127686 L 916.671204 1098.604126 L 886.469849 1109.154419 L 853.288696 1103.114136 L 785.073914 1007.355835 L 714.684631 899.516785 L 657.906067 802.872498 L 650.979858 806.81897 L 617.476624 1167.704834 L 601.771851 1186.147705 L 565.530212 1200 L 535.328857 1177.046997 L 519.302124 1139.919556 L 535.328857 1066.550537 L 554.657776 970.792053 L 570.362488 894.68457 L 584.536926 800.134277 L 592.993347 768.724976 L 592.429626 766.630859 L 585.503479 767.516968 L 514.22821 865.369263 L 405.825531 1011.865906 L 320.053711 1103.677979 L 299.516815 1111.812256 L 263.919525 1093.369263 L 267.221497 1060.429688 L 287.114136 1031.114136 L 405.825531 880.107361 L 477.422913 786.52356 L 523.651062 732.483276 L 523.328918 724.671265 L 520.590698 724.671265 L 205.288605 929.395935 L 149.154434 936.644409 L 124.993355 914.01355 L 127.973183 876.885986 L 139.409409 864.80542 L 234.201385 799.570435 L 233.879227 799.8927 Z"/></svg> Claude (Configure...)';
-  claudeOptsBtn.onclick = () => { popover.remove(); showNewSessionDialog(project); };
+  for (const [id, agent] of Object.entries(agents)) {
+    const btn = document.createElement('button');
+    btn.className = 'popover-option' + (agent.installed ? '' : ' popover-option-disabled');
+    btn.innerHTML = `<span class="popover-agent-dot" style="background:${agent.installed ? agent.color : '#555'}"></span> ${escapeHtml(agent.name)}${agent.installed ? '' : ' <span class="popover-not-installed">not installed</span>'}`;
+    if (agent.installed) {
+      btn.onclick = async () => {
+        popover.remove();
+        const options = await resolveDefaultSessionOptions(project);
+        options.cliAgent = id;
+        launchNewSession(project, options);
+      };
+    } else {
+      btn.disabled = true;
+    }
+    popover.appendChild(btn);
+  }
+
+  // Headless button (Claude-only for now)
+  const headlessBtn = document.createElement('button');
+  headlessBtn.className = 'popover-option popover-option-headless';
+  headlessBtn.innerHTML = '<svg class="popover-option-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg> Headless...';
+  const claudeAgent = agents['claude'];
+  if (claudeAgent && claudeAgent.installed) {
+    headlessBtn.onclick = () => { popover.remove(); showHeadlessPromptDialog(project); };
+  } else {
+    headlessBtn.disabled = true;
+    headlessBtn.classList.add('popover-option-disabled');
+  }
+  popover.appendChild(headlessBtn);
+
+  // Configure button (opens full dialog with permission modes etc)
+  const configBtn = document.createElement('button');
+  configBtn.className = 'popover-option popover-option-config';
+  configBtn.innerHTML = '<svg class="popover-option-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> Configure...';
+  configBtn.onclick = () => { popover.remove(); showNewSessionDialog(project); };
+  popover.appendChild(configBtn);
+
+  // Separator + Terminal
+  const sep = document.createElement('div');
+  sep.className = 'popover-separator';
+  popover.appendChild(sep);
 
   const termBtn = document.createElement('button');
   termBtn.className = 'popover-option popover-option-terminal';
   termBtn.innerHTML = '<svg class="popover-option-icon terminal-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg> Terminal';
   termBtn.onclick = () => { popover.remove(); launchTerminalSession(project); };
-
-  popover.appendChild(claudeBtn);
-  popover.appendChild(claudeOptsBtn);
   popover.appendChild(termBtn);
 
   // Position relative to anchor, flip upward if it would overflow
@@ -3174,8 +3712,109 @@ async function launchTerminalSession(project) {
   pollActiveSessions();
 }
 
+// --- Headless session support ---
+
+function showHeadlessPromptDialog(project) {
+  const overlay = document.createElement('div');
+  overlay.className = 'headless-prompt-overlay';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'headless-prompt-dialog';
+  dialog.innerHTML = `
+    <h3>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+      Headless Session
+    </h3>
+    <textarea placeholder="Enter your prompt for Claude..." autofocus></textarea>
+    <div class="headless-prompt-actions">
+      <button class="headless-cancel-btn">Cancel</button>
+      <button class="headless-start-btn">Start</button>
+    </div>
+  `;
+
+  const textarea = dialog.querySelector('textarea');
+  const startBtn = dialog.querySelector('.headless-start-btn');
+  const cancelBtn = dialog.querySelector('.headless-cancel-btn');
+
+  cancelBtn.onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  startBtn.onclick = async () => {
+    const prompt = textarea.value.trim();
+    if (!prompt) return;
+    overlay.remove();
+    await launchHeadlessSession(project, prompt);
+  };
+
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      startBtn.click();
+    }
+    if (e.key === 'Escape') overlay.remove();
+  });
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+  setTimeout(() => textarea.focus(), 50);
+}
+
+async function launchHeadlessSession(project, prompt) {
+  const sessionId = crypto.randomUUID();
+  const projectPath = project.projectPath;
+  const options = await resolveDefaultSessionOptions(project);
+
+  const session = {
+    sessionId,
+    summary: prompt.slice(0, 60) + (prompt.length > 60 ? '...' : ''),
+    firstPrompt: prompt,
+    projectPath,
+    name: null,
+    starred: 0,
+    archived: 0,
+    messageCount: 0,
+    modified: new Date().toISOString(),
+    created: new Date().toISOString(),
+    type: 'headless',
+  };
+
+  // Initialize headless state
+  headlessState.set(sessionId, { events: [], lastAction: 'starting...', startTime: Date.now() });
+
+  // Track agent
+  sessionAgentMap.set(sessionId, 'claude');
+
+  // Inject into cached project data
+  sessionMap.set(sessionId, session);
+  const folder = projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
+  for (const projList of [cachedProjects, cachedAllProjects]) {
+    let proj = projList.find(p => p.projectPath === projectPath);
+    if (!proj) {
+      proj = { folder, projectPath, sessions: [] };
+      projList.unshift(proj);
+    }
+    proj.sessions.unshift(session);
+  }
+  refreshSidebar();
+
+  // Launch headless in main process
+  const result = await window.api.launchHeadless(sessionId, projectPath, prompt, options);
+  if (!result.ok) {
+    const state = headlessState.get(sessionId);
+    if (state) {
+      state.lastAction = 'failed: ' + (result.error || 'unknown');
+      state.events.push({ type: 'error', text: result.error, ts: Date.now() });
+      updateHeadlessSparkline(sessionId, state);
+    }
+  }
+
+  showSession(sessionId);
+  pollActiveSessions();
+}
+
 async function showNewSessionDialog(project) {
   const effective = await window.api.getEffectiveSettings(project.projectPath);
+  const agents = await window.api.detectAgents();
 
   const overlay = document.createElement('div');
   overlay.className = 'new-session-overlay';
@@ -3183,6 +3822,7 @@ async function showNewSessionDialog(project) {
   const dialog = document.createElement('div');
   dialog.className = 'new-session-dialog';
 
+  let selectedAgent = effective.cliAgent || 'claude';
   let selectedMode = effective.permissionMode || null;
   let dangerousSkip = effective.dangerouslySkipPermissions || false;
 
@@ -3194,6 +3834,14 @@ async function showNewSessionDialog(project) {
     { value: 'bypassPermissions', label: 'Bypass', desc: 'Auto-accept all tool calls' },
   ];
 
+  function renderAgentGrid() {
+    return Object.entries(agents).map(([id, agent]) => {
+      const isSelected = selectedAgent === id;
+      const notInstalled = !agent.installed;
+      return `<button class="agent-option${isSelected ? ' selected' : ''}${notInstalled ? ' disabled' : ''}" data-agent="${id}" ${notInstalled ? 'disabled' : ''} style="--agent-color: ${agent.color}"><span class="agent-dot" style="background:${agent.color}"></span><span class="agent-name">${agent.name}</span>${notInstalled ? '<span class="agent-missing">not installed</span>' : ''}</button>`;
+    }).join('');
+  }
+
   function renderModeGrid() {
     return modes.map(m => {
       const isSelected = !dangerousSkip && selectedMode === m.value;
@@ -3204,6 +3852,10 @@ async function showNewSessionDialog(project) {
 
   dialog.innerHTML = `
     <h3>New Session — ${escapeHtml(project.projectPath.split('/').filter(Boolean).slice(-2).join('/'))}</h3>
+    <div class="settings-field">
+      <div class="settings-label">AI Agent</div>
+      <div class="agent-grid" id="nsd-agent-grid">${renderAgentGrid()}</div>
+    </div>
     <div class="settings-field">
       <div class="settings-label">Permission Mode</div>
       <div class="permission-grid" id="nsd-mode-grid">${renderModeGrid()}</div>
@@ -3238,6 +3890,15 @@ async function showNewSessionDialog(project) {
   overlay.appendChild(dialog);
   document.body.appendChild(overlay);
 
+  // Bind agent grid clicks
+  const agentGrid = dialog.querySelector('#nsd-agent-grid');
+  agentGrid.addEventListener('click', (e) => {
+    const btn = e.target.closest('.agent-option:not(.disabled)');
+    if (!btn) return;
+    selectedAgent = btn.dataset.agent;
+    agentGrid.innerHTML = renderAgentGrid();
+  });
+
   // Bind mode grid clicks
   const modeGrid = dialog.querySelector('#nsd-mode-grid');
   modeGrid.addEventListener('click', (e) => {
@@ -3260,6 +3921,7 @@ async function showNewSessionDialog(project) {
 
   function start() {
     const options = {};
+    options.cliAgent = selectedAgent;
     if (dangerousSkip) {
       options.dangerouslySkipPermissions = true;
     } else if (selectedMode) {
@@ -3342,16 +4004,19 @@ async function openSettingsViewer(scope, projectPath) {
   const themeValue = fieldValue('terminalTheme', 'switchboard');
   const mcpEmulationValue = fieldValue('mcpEmulation', true);
   const shellProfileValue = fieldValue('shellProfile', 'auto');
+  const cliAgentValue = fieldValue('cliAgent', 'claude');
 
-  // Discover available shell profiles
+  // Discover available shell profiles and agents
   let shellProfiles = [];
   try { shellProfiles = await window.api.getShellProfiles(); } catch {};
+  let detectedAgents = {};
+  try { detectedAgents = await window.api.detectAgents(); } catch {};
 
   settingsViewerBody.innerHTML = `
     <div class="settings-form">
       <div class="settings-section">
-        <div class="settings-section-title">Claude CLI Options</div>
-        <div class="settings-hint">These options are passed to the <code>claude</code> command when launching sessions.</div>
+        <div class="settings-section-title">CLI Agent Options</div>
+        <div class="settings-hint">Options passed to the selected CLI agent when launching sessions.</div>
 
         <div class="settings-field">
           <div class="settings-field-header">
@@ -3412,10 +4077,23 @@ async function openSettingsViewer(scope, projectPath) {
 
         <div class="settings-field">
           <div class="settings-field-header">
+            <span class="settings-label">Default AI Agent</span>
+            ${useGlobalCheckbox('cliAgent')}
+          </div>
+          <div class="settings-hint">Which CLI tool to launch for new sessions in this project.</div>
+          <select class="settings-select" id="sv-cli-agent" ${fieldDisabled('cliAgent')}>
+            ${Object.entries(detectedAgents).map(([id, a]) =>
+              `<option value="${escapeHtml(id)}" ${cliAgentValue === id ? 'selected' : ''} ${!a.installed ? 'disabled' : ''}>${escapeHtml(a.name)}${!a.installed ? ' (not installed)' : ''}</option>`
+            ).join('')}
+          </select>
+        </div>
+
+        <div class="settings-field">
+          <div class="settings-field-header">
             <span class="settings-label">Pre-launch Command</span>
             ${useGlobalCheckbox('preLaunchCmd')}
           </div>
-          <div class="settings-hint">Prepended to the claude command (e.g. "aws-vault exec profile --" or "source .env &&")</div>
+          <div class="settings-hint">Prepended to the CLI command (e.g. "aws-vault exec profile --" or "source .env &&")</div>
           <input type="text" class="settings-input" id="sv-pre-launch" placeholder="e.g. aws-vault exec profile --" value="${escapeHtml(preLaunchValue)}" ${fieldDisabled('preLaunchCmd')}>
         </div>
       </div>
@@ -3503,6 +4181,7 @@ async function openSettingsViewer(scope, projectPath) {
         worktree: 'sv-worktree',
         worktreeName: 'sv-worktree-name',
         chrome: 'sv-chrome',
+        cliAgent: 'sv-cli-agent',
         preLaunchCmd: 'sv-pre-launch',
         addDirs: 'sv-add-dirs',
         visibleSessionCount: 'sv-visible-count',
@@ -3524,6 +4203,7 @@ async function openSettingsViewer(scope, projectPath) {
           const field = cb.dataset.field;
           const fieldMap = {
             permissionMode: () => settingsViewerBody.querySelector('#sv-perm-mode').value || null,
+            cliAgent: () => settingsViewerBody.querySelector('#sv-cli-agent').value || 'claude',
             worktree: () => settingsViewerBody.querySelector('#sv-worktree').checked,
             worktreeName: () => settingsViewerBody.querySelector('#sv-worktree-name').value.trim(),
             chrome: () => settingsViewerBody.querySelector('#sv-chrome').checked,
@@ -3537,6 +4217,7 @@ async function openSettingsViewer(scope, projectPath) {
       });
     } else {
       settings.permissionMode = settingsViewerBody.querySelector('#sv-perm-mode').value || null;
+      settings.cliAgent = settingsViewerBody.querySelector('#sv-cli-agent').value || 'claude';
       settings.worktree = settingsViewerBody.querySelector('#sv-worktree').checked;
       settings.worktreeName = settingsViewerBody.querySelector('#sv-worktree-name').value.trim();
       settings.chrome = settingsViewerBody.querySelector('#sv-chrome').checked;

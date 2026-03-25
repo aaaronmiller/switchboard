@@ -323,6 +323,135 @@ function deleteSetting(key) {
   stmts.settingsDelete.run(key);
 }
 
+// --- Peers broker tables ---
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS peers (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    pid INTEGER NOT NULL,
+    cwd TEXT NOT NULL,
+    git_root TEXT,
+    agent TEXT NOT NULL DEFAULT 'claude',
+    summary TEXT NOT NULL DEFAULT '',
+    registered_at TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS peer_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_id TEXT NOT NULL,
+    to_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    delivered INTEGER NOT NULL DEFAULT 0
+  )
+`);
+
+const peerStmts = {
+  insertPeer: db.prepare(`INSERT OR REPLACE INTO peers (id, session_id, pid, cwd, git_root, agent, summary, registered_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  updateLastSeen: db.prepare(`UPDATE peers SET last_seen = ? WHERE id = ?`),
+  updateSummary: db.prepare(`UPDATE peers SET summary = ? WHERE id = ?`),
+  deletePeer: db.prepare(`DELETE FROM peers WHERE id = ?`),
+  deletePeerBySession: db.prepare(`DELETE FROM peers WHERE session_id = ?`),
+  selectAllPeers: db.prepare(`SELECT * FROM peers`),
+  selectPeersByDir: db.prepare(`SELECT * FROM peers WHERE cwd = ?`),
+  selectPeersByGitRoot: db.prepare(`SELECT * FROM peers WHERE git_root = ?`),
+  selectPeerById: db.prepare(`SELECT * FROM peers WHERE id = ?`),
+  insertMessage: db.prepare(`INSERT INTO peer_messages (from_id, to_id, text, sent_at, delivered) VALUES (?, ?, ?, ?, 0)`),
+  selectUndelivered: db.prepare(`SELECT * FROM peer_messages WHERE to_id = ? AND delivered = 0 ORDER BY sent_at ASC`),
+  markDelivered: db.prepare(`UPDATE peer_messages SET delivered = 1 WHERE id = ?`),
+  cleanMessages: db.prepare(`DELETE FROM peer_messages WHERE to_id = ? AND delivered = 0`),
+};
+
+function generatePeerId() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = '';
+  for (let i = 0; i < 8; i++) id += chars[Math.floor(Math.random() * chars.length)];
+  return id;
+}
+
+function peerRegister({ sessionId, pid, cwd, gitRoot, agent, summary }) {
+  const id = generatePeerId();
+  const now = new Date().toISOString();
+  // Remove existing registration for this session (clean messages too)
+  if (sessionId) {
+    const existing = peerStmts.selectAllPeers.all().filter(p => p.session_id === sessionId);
+    for (const p of existing) peerStmts.cleanMessages.run(p.id);
+    peerStmts.deletePeerBySession.run(sessionId);
+  }
+  peerStmts.insertPeer.run(id, sessionId || null, pid, cwd, gitRoot || null, agent || 'claude', summary || '', now, now);
+  return { id };
+}
+
+function peerHeartbeat(peerId) {
+  peerStmts.updateLastSeen.run(new Date().toISOString(), peerId);
+}
+
+function peerSetSummary(peerId, summary) {
+  peerStmts.updateSummary.run(summary, peerId);
+}
+
+function peerUnregister(peerId) {
+  peerStmts.cleanMessages.run(peerId);
+  peerStmts.deletePeer.run(peerId);
+}
+
+function peerUnregisterBySession(sessionId) {
+  // Clean up messages for the peer before deleting
+  const peers = peerStmts.selectAllPeers.all().filter(p => p.session_id === sessionId);
+  for (const peer of peers) peerStmts.cleanMessages.run(peer.id);
+  peerStmts.deletePeerBySession.run(sessionId);
+}
+
+function peerListAll(excludeId) {
+  const peers = peerStmts.selectAllPeers.all();
+  return excludeId ? peers.filter(p => p.id !== excludeId) : peers;
+}
+
+function peerListByDir(cwd, excludeId) {
+  const peers = peerStmts.selectPeersByDir.all(cwd);
+  return excludeId ? peers.filter(p => p.id !== excludeId) : peers;
+}
+
+function peerListByRepo(gitRoot, excludeId) {
+  if (!gitRoot) return [];
+  const peers = peerStmts.selectPeersByGitRoot.all(gitRoot);
+  return excludeId ? peers.filter(p => p.id !== excludeId) : peers;
+}
+
+function peerGetById(peerId) {
+  return peerStmts.selectPeerById.get(peerId) || null;
+}
+
+function peerSendMessage(fromId, toId, text) {
+  const target = peerStmts.selectPeerById.get(toId);
+  if (!target) return { ok: false, error: `Peer ${toId} not found` };
+  peerStmts.insertMessage.run(fromId, toId, text, new Date().toISOString());
+  return { ok: true };
+}
+
+function peerPollMessages(peerId) {
+  const messages = peerStmts.selectUndelivered.all(peerId);
+  for (const msg of messages) peerStmts.markDelivered.run(msg.id);
+  return messages;
+}
+
+function peerCleanStale(activePids) {
+  const all = peerStmts.selectAllPeers.all();
+  let cleaned = 0;
+  for (const peer of all) {
+    if (!activePids.has(peer.pid)) {
+      peerStmts.cleanMessages.run(peer.id);
+      peerStmts.deletePeer.run(peer.id);
+      cleaned++;
+    }
+  }
+  return cleaned;
+}
+
 function closeDb() {
   try { db.close(); } catch {}
 }
@@ -336,4 +465,8 @@ module.exports = {
   searchByType, isSearchIndexPopulated,
   getSetting, setSetting, deleteSetting,
   closeDb,
+  // Peers broker
+  peerRegister, peerHeartbeat, peerSetSummary, peerUnregister, peerUnregisterBySession,
+  peerListAll, peerListByDir, peerListByRepo, peerGetById,
+  peerSendMessage, peerPollMessages, peerCleanStale,
 };

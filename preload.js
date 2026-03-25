@@ -27,6 +27,13 @@ contextBridge.exposeInMainWorld('api', {
   deleteSetting: (key) => ipcRenderer.invoke('delete-setting', key),
   getEffectiveSettings: (projectPath) => ipcRenderer.invoke('get-effective-settings', projectPath),
   getShellProfiles: () => ipcRenderer.invoke('get-shell-profiles'),
+  detectAgents: () => ipcRenderer.invoke('detect-agents'),
+  getAgentStats: () => ipcRenderer.invoke('get-agent-stats'),
+  launchHeadless: (sessionId, projectPath, prompt, sessionOptions) =>
+    ipcRenderer.invoke('launch-headless', sessionId, projectPath, prompt, sessionOptions),
+  onHeadlessEvent: (callback) => {
+    ipcRenderer.on('headless-event', (_event, sessionId, eventData) => callback(sessionId, eventData));
+  },
 
   browseFolder: () => ipcRenderer.invoke('browse-folder'),
   addProject: (projectPath) => ipcRenderer.invoke('add-project', projectPath),
@@ -100,4 +107,16 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.send('mcp-diff-response', sessionId, diffId, action, editedContent);
   },
   readFileForPanel: (filePath) => ipcRenderer.invoke('read-file-for-panel', filePath),
+
+  // Peers broker
+  peerList: (scope, cwd, gitRoot, excludeId) => ipcRenderer.invoke('peer-list', scope, cwd, gitRoot, excludeId),
+  peerSendMessage: (fromId, toId, text) => ipcRenderer.invoke('peer-send-message', fromId, toId, text),
+  peerSetSummary: (peerId, summary) => ipcRenderer.invoke('peer-set-summary', peerId, summary),
+  peerGetSessionPeer: (sessionId) => ipcRenderer.invoke('peer-get-session-peer', sessionId),
+  onPeerMessage: (callback) => {
+    ipcRenderer.on('peer-message', (_event, msg) => callback(msg));
+  },
+  onPeersChanged: (callback) => {
+    ipcRenderer.on('peers-changed', () => callback());
+  },
 });

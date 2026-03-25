@@ -242,6 +242,10 @@ const {
   searchByType, isSearchIndexPopulated,
   getSetting, setSetting, deleteSetting,
   closeDb,
+  // Peers broker
+  peerRegister, peerHeartbeat, peerSetSummary, peerUnregister, peerUnregisterBySession,
+  peerListAll, peerListByDir, peerListByRepo, peerGetById,
+  peerSendMessage, peerPollMessages, peerCleanStale,
 } = require('./db');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -1314,11 +1318,471 @@ const SETTING_DEFAULTS = {
   terminalTheme: 'switchboard',
   mcpEmulation: false,
   shellProfile: 'auto',
+  cliAgent: 'claude',
 };
+
+// --- CLI Agent Definitions ---
+const CLI_AGENTS = {
+  claude:   { name: 'Claude Code',  cmd: 'claude',   color: '#d97757', sessionFlag: '--session-id', resumeFlag: '--resume', forkFlag: '--fork-session', supportsPermissions: true,  supportsMcp: true  },
+  codex:    { name: 'Codex',        cmd: 'codex',    color: '#4ade80', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  qwen:     { name: 'Qwen Code',    cmd: 'qwen',     color: '#60a5fa', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  gemini:   { name: 'Gemini CLI',   cmd: 'gemini',   color: '#22d3ee', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  kimi:     { name: 'Kimi Code',    cmd: 'kimi',     color: '#fb923c', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  aider:    { name: 'Aider',        cmd: 'aider',    color: '#a78bfa', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  opencode: { name: 'OpenCode',     cmd: 'opencode', color: '#f472b6', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  hermes:   { name: 'Hermes Agent', cmd: 'hermes',   color: '#fbbf24', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  letta:    { name: 'Letta Code',   cmd: 'letta',    color: '#34d399', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+};
+
+// Session history discovery per agent
+// Each returns { sessions: [...], stats: { totalSessions, totalMessages, ... } }
+const AGENT_HISTORY = {
+  // Claude Code: ~/.claude/projects/{project-hash}/{uuid}.jsonl + ~/.claude/history.jsonl
+  claude: {
+    historyDir: () => path.join(os.homedir(), '.claude'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.claude', 'projects');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      for (const projectDir of fs.readdirSync(baseDir)) {
+        const projPath = path.join(baseDir, projectDir);
+        try {
+          const stat = fs.statSync(projPath);
+          if (!stat.isDirectory()) continue;
+          for (const file of fs.readdirSync(projPath)) {
+            if (!file.endsWith('.jsonl')) continue;
+            const fp = path.join(projPath, file);
+            const fstat = fs.statSync(fp);
+            sessions.push({
+              id: file.replace('.jsonl', ''),
+              file: fp,
+              project: projectDir,
+              modified: fstat.mtime,
+              size: fstat.size,
+              agent: 'claude',
+            });
+          }
+        } catch {}
+      }
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === 'human' || obj.role === 'user') userMsgs++;
+            else if (obj.type === 'assistant' || obj.role === 'assistant') assistantMsgs++;
+            if (obj.type === 'tool_use' || obj.type === 'tool_result') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+
+  // Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl + ~/.codex/history.jsonl
+  codex: {
+    historyDir: () => path.join(os.homedir(), '.codex'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.codex', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      function walk(dir) {
+        try {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const fp = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(fp);
+            else if (entry.name.endsWith('.jsonl')) {
+              const fstat = fs.statSync(fp);
+              const idMatch = entry.name.match(/([0-9a-f-]{36})/);
+              sessions.push({
+                id: idMatch ? idMatch[1] : entry.name.replace('.jsonl', ''),
+                file: fp,
+                modified: fstat.mtime,
+                size: fstat.size,
+                agent: 'codex',
+              });
+            }
+          }
+        } catch {}
+      }
+      walk(baseDir);
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, model = null, cwd = null;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === 'session_meta' && obj.payload) {
+              model = obj.payload.model_provider;
+              cwd = obj.payload.cwd;
+            }
+            if (obj.type === 'response_item' && obj.payload?.role === 'developer') userMsgs++;
+            if (obj.type === 'response_item' && obj.payload?.role === 'assistant') assistantMsgs++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, model, cwd, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+
+  // Qwen Code: ~/.qwen/projects/{project-hash}/chats/{uuid}.jsonl (same structure as Claude)
+  qwen: {
+    historyDir: () => path.join(os.homedir(), '.qwen'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.qwen', 'projects');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      for (const projectDir of fs.readdirSync(baseDir)) {
+        const chatsDir = path.join(baseDir, projectDir, 'chats');
+        try {
+          if (!fs.existsSync(chatsDir) || !fs.statSync(chatsDir).isDirectory()) continue;
+          for (const file of fs.readdirSync(chatsDir)) {
+            if (!file.endsWith('.jsonl')) continue;
+            const fp = path.join(chatsDir, file);
+            const fstat = fs.statSync(fp);
+            sessions.push({
+              id: file.replace('.jsonl', ''),
+              file: fp,
+              project: projectDir,
+              modified: fstat.mtime,
+              size: fstat.size,
+              agent: 'qwen',
+            });
+          }
+        } catch {}
+      }
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === 'user') userMsgs++;
+            else if (obj.type === 'assistant') assistantMsgs++;
+            if (obj.message?.parts) {
+              for (const part of obj.message.parts) {
+                if (part.functionCall) toolUses++;
+              }
+            }
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+
+  // Gemini CLI: ~/.gemini/tmp/{project-hash}/chats/session-*.json or .jsonl
+  gemini: {
+    historyDir: () => path.join(os.homedir(), '.gemini'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.gemini', 'tmp');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      for (const projectDir of fs.readdirSync(baseDir)) {
+        const chatsDir = path.join(baseDir, projectDir, 'chats');
+        try {
+          if (!fs.existsSync(chatsDir) || !fs.statSync(chatsDir).isDirectory()) continue;
+          for (const file of fs.readdirSync(chatsDir)) {
+            if (!file.startsWith('session-')) continue;
+            if (!file.endsWith('.json') && !file.endsWith('.jsonl')) continue;
+            const fp = path.join(chatsDir, file);
+            const fstat = fs.statSync(fp);
+            const idMatch = file.match(/session-([0-9a-f-]{36})/);
+            sessions.push({
+              id: idMatch ? idMatch[1] : file.replace(/\.(json|jsonl)$/, ''),
+              file: fp,
+              project: projectDir,
+              modified: fstat.mtime,
+              size: fstat.size,
+              agent: 'gemini',
+              format: file.endsWith('.jsonl') ? 'jsonl' : 'json',
+            });
+          }
+        } catch {}
+      }
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const isJsonl = filePath.endsWith('.jsonl');
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0, totalLines = 0;
+        if (isJsonl) {
+          const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+          totalLines = lines.length;
+          for (const line of lines) {
+            try {
+              const obj = JSON.parse(line);
+              if (obj.type === 'user') userMsgs++;
+              else if (obj.type === 'gemini' || obj.type === 'assistant') assistantMsgs++;
+            } catch {}
+          }
+        } else {
+          const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          const messages = data.messages || data.history || (Array.isArray(data) ? data : []);
+          totalLines = messages.length;
+          for (const msg of messages) {
+            if (msg.role === 'user') userMsgs++;
+            else if (msg.role === 'model' || msg.role === 'assistant') assistantMsgs++;
+            if (msg.parts) {
+              for (const part of msg.parts) {
+                if (part.functionCall) toolUses++;
+              }
+            }
+          }
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines };
+      } catch { return null; }
+    },
+  },
+
+  // Kimi Code: ~/.kimi/sessions/{dir-hash}/{session-id}/context.jsonl
+  kimi: {
+    historyDir: () => path.join(os.homedir(), '.kimi'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.kimi', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      function walk(dir) {
+        try {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const fp = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              // Check for context.jsonl inside
+              const ctxFile = path.join(fp, 'context.jsonl');
+              if (fs.existsSync(ctxFile)) {
+                const fstat = fs.statSync(ctxFile);
+                sessions.push({
+                  id: entry.name,
+                  file: ctxFile,
+                  modified: fstat.mtime,
+                  size: fstat.size,
+                  agent: 'kimi',
+                });
+              } else {
+                walk(fp); // recurse into dir-hash level
+              }
+            }
+          }
+        } catch {}
+      }
+      walk(baseDir);
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user') userMsgs++;
+            else if (obj.role === 'assistant') assistantMsgs++;
+            else if (obj.role === 'tool') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+
+  // Aider: project-level .aider.chat.history.md files (no centralized store)
+  aider: {
+    historyDir: () => null,
+    getSessions: () => {
+      // Aider uses per-project markdown files — scan known project directories
+      const sessions = [];
+      // Check all known Switchboard project paths for .aider files
+      try {
+        const allCached = getAllCached();
+        const projectPaths = new Set();
+        for (const s of allCached) {
+          if (s.projectPath) projectPaths.add(s.projectPath);
+        }
+        for (const projPath of projectPaths) {
+          const histFile = path.join(projPath, '.aider.chat.history.md');
+          if (fs.existsSync(histFile)) {
+            const fstat = fs.statSync(histFile);
+            sessions.push({
+              id: projPath.replace(/[/\\]/g, '-'),
+              file: histFile,
+              project: path.basename(projPath),
+              modified: fstat.mtime,
+              size: fstat.size,
+              agent: 'aider',
+            });
+          }
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        // Count #### headings as user messages (aider uses h4 for user turns)
+        const userMsgs = (content.match(/^####\s/gm) || []).length;
+        // Rough estimate: assistant blocks between user turns
+        const assistantMsgs = userMsgs; // approximate 1:1 ratio
+        const totalLines = content.split('\n').length;
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses: 0, totalLines };
+      } catch { return null; }
+    },
+  },
+
+  // OpenCode: ~/.local/share/opencode/opencode.db (SQLite)
+  opencode: {
+    historyDir: () => path.join(os.homedir(), '.local', 'share', 'opencode'),
+    getSessions: () => {
+      const dbPath = path.join(os.homedir(), '.local', 'share', 'opencode', 'opencode.db');
+      const sessions = [];
+      if (!fs.existsSync(dbPath)) return sessions;
+      try {
+        const Database = require('better-sqlite3');
+        const ocDb = new Database(dbPath, { readonly: true });
+        const rows = ocDb.prepare('SELECT id, title, directory, time_created, time_updated FROM session ORDER BY time_updated DESC').all();
+        for (const row of rows) {
+          sessions.push({
+            id: row.id,
+            file: dbPath,
+            project: row.directory ? path.basename(row.directory) : '',
+            modified: new Date(row.time_updated),
+            size: 0,
+            agent: 'opencode',
+            title: row.title,
+          });
+        }
+        ocDb.close();
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath, sessionId) => {
+      try {
+        const Database = require('better-sqlite3');
+        const ocDb = new Database(filePath, { readonly: true });
+        const msgs = ocDb.prepare("SELECT json_extract(data, '$.role') as role FROM message WHERE session_id = ?").all(sessionId);
+        let userMsgs = 0, assistantMsgs = 0;
+        for (const m of msgs) {
+          if (m.role === 'user') userMsgs++;
+          else if (m.role === 'assistant') assistantMsgs++;
+        }
+        const toolParts = ocDb.prepare("SELECT count(*) as cnt FROM part WHERE session_id = ? AND json_extract(data, '$.type') IN ('tool-call', 'tool-result')").get(sessionId);
+        ocDb.close();
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses: toolParts?.cnt || 0, totalLines: msgs.length };
+      } catch { return null; }
+    },
+  },
+
+  // Hermes Agent: ~/.hermes/sessions/YYYYMMDD_HHMMSS_*.jsonl
+  hermes: {
+    historyDir: () => path.join(os.homedir(), '.hermes'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.hermes', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          const dateMatch = file.match(/^(\d{8})_(\d{6})/);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'hermes',
+            date: dateMatch ? `${dateMatch[1].slice(0,4)}-${dateMatch[1].slice(4,6)}-${dateMatch[1].slice(6,8)}` : null,
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user') userMsgs++;
+            else if (obj.role === 'assistant') assistantMsgs++;
+            else if (obj.role === 'tool') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+};
+
+// IPC: get-agent-stats — aggregate session history across all agents
+ipcMain.handle('get-agent-stats', () => {
+  const stats = {};
+  for (const [agentId, history] of Object.entries(AGENT_HISTORY)) {
+    try {
+      const sessions = history.getSessions();
+      const now = Date.now();
+      const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+      const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+
+      const recentSessions = sessions.filter(s => s.modified.getTime() > thirtyDaysAgo);
+      const weekSessions = sessions.filter(s => s.modified.getTime() > sevenDaysAgo);
+
+      // Parse a sample of recent sessions for message counts (limit to avoid slow reads)
+      let totalMessages = 0, totalToolUses = 0;
+      const sampled = recentSessions.slice(-10);
+      for (const s of sampled) {
+        const parsed = history.parseSession(s.file, s.id);
+        if (parsed) {
+          totalMessages += (parsed.userMessages || 0) + (parsed.assistantMessages || 0);
+          totalToolUses += parsed.toolUses || 0;
+        }
+      }
+
+      stats[agentId] = {
+        name: CLI_AGENTS[agentId]?.name || agentId,
+        color: CLI_AGENTS[agentId]?.color || '#888',
+        totalSessions: sessions.length,
+        last30Days: recentSessions.length,
+        last7Days: weekSessions.length,
+        estimatedMessages: totalMessages,
+        estimatedToolUses: totalToolUses,
+        lastUsed: sessions.length ? sessions.sort((a, b) => b.modified - a.modified)[0].modified.toISOString() : null,
+        totalSizeBytes: sessions.reduce((sum, s) => sum + s.size, 0),
+      };
+    } catch {
+      stats[agentId] = { name: CLI_AGENTS[agentId]?.name || agentId, error: true };
+    }
+  }
+  return stats;
+});
 
 ipcMain.handle('get-shell-profiles', () => {
   _shellProfiles = null; // refresh on each request
   return getShellProfiles();
+});
+
+ipcMain.handle('detect-agents', () => {
+  const { execFileSync } = require('child_process');
+  const results = {};
+  for (const [id, agent] of Object.entries(CLI_AGENTS)) {
+    let installed = false;
+    try {
+      execFileSync('which', [agent.cmd], { timeout: 2000, stdio: 'pipe' });
+      installed = true;
+    } catch {}
+    results[id] = { ...agent, id, installed };
+  }
+  return results;
 });
 
 ipcMain.handle('get-effective-settings', (_event, projectPath) => {
@@ -1340,7 +1804,7 @@ ipcMain.handle('get-effective-settings', (_event, projectPath) => {
 ipcMain.handle('get-active-sessions', () => {
   const active = [];
   for (const [sessionId, session] of activeSessions) {
-    if (!session.exited) active.push(sessionId);
+    if (!session.exited) active.push({ sessionId, cliAgent: session.cliAgent || 'claude' });
   }
   return active;
 });
@@ -1360,8 +1824,407 @@ ipcMain.handle('get-active-terminals', () => {
 ipcMain.handle('stop-session', (_event, sessionId) => {
   const session = activeSessions.get(sessionId);
   if (!session || session.exited) return { ok: false, error: 'not running' };
-  session.pty.kill();
+  if (session.isHeadless && session.childProcess) {
+    session.childProcess.kill('SIGTERM');
+  } else if (session.pty) {
+    session.pty.kill();
+  }
   return { ok: true };
+});
+
+// --- IPC: launch-headless --- (Claude -p with stream-json output, no terminal UI)
+ipcMain.handle('launch-headless', async (_event, sessionId, projectPath, prompt, sessionOptions) => {
+  const { spawn } = require('child_process');
+  const readline = require('readline');
+
+  const agentId = sessionOptions?.cliAgent || 'claude';
+  const agent = CLI_AGENTS[agentId] || CLI_AGENTS.claude;
+
+  // Build command args
+  const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
+  if (agent.sessionFlag) args.push(agent.sessionFlag, sessionId);
+
+  // Permission flags (claude-specific)
+  if (agent.supportsPermissions) {
+    if (sessionOptions?.dangerouslySkipPermissions) {
+      args.push('--dangerously-skip-permissions');
+    } else if (sessionOptions?.permissionMode) {
+      args.push('--permission-mode', sessionOptions.permissionMode);
+    }
+  }
+
+  log.info(`[headless] Launching: ${agent.cmd} ${args.join(' ')} in ${projectPath}`);
+
+  const env = { ...process.env, TERM: 'dumb', FORCE_COLOR: '0' };
+  if (sessionOptions?.envOverrides) Object.assign(env, sessionOptions.envOverrides);
+
+  const child = spawn(agent.cmd, args, {
+    cwd: projectPath,
+    env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  const session = {
+    childProcess: child,
+    isHeadless: true,
+    isPlainTerminal: false,
+    exited: false,
+    rendererAttached: true,
+    projectPath,
+    prompt,
+    cliAgent: agentId,
+    events: [],
+    _openedAt: Date.now(),
+  };
+  activeSessions.set(sessionId, session);
+
+  // Register headless session as a peer
+  if (child.pid) {
+    try {
+      session.peerId = registerSessionAsPeer(sessionId, child.pid, projectPath, agentId);
+    } catch (err) {
+      log.warn(`[peers] Failed to register headless session ${sessionId}: ${err.message}`);
+    }
+  }
+
+  // Parse stdout line-by-line for stream-json events
+  const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+  rl.on('line', (line) => {
+    if (!line.trim()) return;
+    try {
+      const event = JSON.parse(line);
+      // Classify event for the sparkline
+      const classified = classifyHeadlessEvent(event);
+      if (classified) {
+        session.events.push(classified);
+        // Keep buffer bounded
+        if (session.events.length > 100) session.events.shift();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('headless-event', sessionId, classified);
+        }
+      }
+    } catch {
+      // Non-JSON line (progress indicators, warnings) — skip
+    }
+  });
+
+  // Capture stderr as error events
+  child.stderr.on('data', (data) => {
+    const text = data.toString().trim();
+    if (!text) return;
+    const errEvent = { type: 'error', text, ts: Date.now() };
+    session.events.push(errEvent);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('headless-event', sessionId, errEvent);
+    }
+  });
+
+  // On exit, send process-exited (reuses existing renderer handler)
+  child.on('close', (code) => {
+    session.exited = true;
+    // Unregister from peers broker
+    if (session.peerId) {
+      try { peerUnregister(session.peerId); peerSessionMap.delete(session.peerId); } catch {}
+      notifyPeersChanged();
+    }
+    log.info(`[headless] Session ${sessionId} exited with code ${code}`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('process-exited', sessionId, code);
+      // Send final completion event
+      mainWindow.webContents.send('headless-event', sessionId, {
+        type: 'complete', exitCode: code, ts: Date.now(),
+      });
+    }
+  });
+
+  child.on('error', (err) => {
+    session.exited = true;
+    // Unregister from peers broker
+    if (session.peerId) {
+      try { peerUnregister(session.peerId); peerSessionMap.delete(session.peerId); } catch {}
+      notifyPeersChanged();
+    }
+    log.error(`[headless] Spawn error for ${sessionId}: ${err.message}`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('process-exited', sessionId, 1);
+      mainWindow.webContents.send('headless-event', sessionId, {
+        type: 'error', text: err.message, ts: Date.now(),
+      });
+    }
+  });
+
+  return { ok: true, sessionId };
+});
+
+// Classify a stream-json event into a sparkline-friendly format
+function classifyHeadlessEvent(event) {
+  const ts = Date.now();
+
+  // Assistant message with tool_use
+  if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+    for (const block of event.message.content) {
+      if (block.type === 'tool_use') {
+        return { type: 'tool_use', name: block.name, id: block.id, ts };
+      }
+    }
+    // Text content
+    for (const block of event.message.content) {
+      if (block.type === 'text' && block.text) {
+        return { type: 'text', text: block.text.slice(0, 120), ts };
+      }
+    }
+  }
+
+  // Content block delta (streaming text)
+  if (event.type === 'content_block_delta') {
+    return null; // Skip deltas, too noisy
+  }
+
+  // Content block start (tool_use start)
+  if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+    return { type: 'tool_start', name: event.content_block.name, id: event.content_block.id, ts };
+  }
+
+  // Tool result
+  if (event.type === 'result') {
+    return { type: 'result', text: (event.result || '').slice(0, 200), ts };
+  }
+
+  // System/error
+  if (event.type === 'error') {
+    return { type: 'error', text: event.error?.message || 'unknown error', ts };
+  }
+
+  // Message start/stop
+  if (event.type === 'message_start') {
+    return { type: 'message_start', ts };
+  }
+  if (event.type === 'message_stop') {
+    return { type: 'message_stop', ts };
+  }
+
+  return null;
+}
+
+// ============================================================
+// PEERS BROKER — HTTP server + IPC handlers for cross-session messaging
+// ============================================================
+
+const PEERS_PORT = parseInt(process.env.SWITCHBOARD_PEERS_PORT || '7899', 10);
+let peersHttpServer = null;
+let peersCleanupTimer = null;
+
+// Map peerId -> sessionId for delivering messages via IPC
+const peerSessionMap = new Map();
+
+function startPeersBroker() {
+  const http = require('http');
+
+  peersHttpServer = http.createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+
+    if (req.method === 'GET') {
+      if (req.url === '/health') {
+        const peers = peerListAll();
+        res.end(JSON.stringify({ status: 'ok', peers: peers.length }));
+        return;
+      }
+      res.end(JSON.stringify({ name: 'switchboard-peers-broker' }));
+      return;
+    }
+
+    if (req.method !== 'POST') {
+      res.statusCode = 405;
+      res.end(JSON.stringify({ error: 'method not allowed' }));
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const url = new URL(req.url, `http://localhost:${PEERS_PORT}`);
+
+        switch (url.pathname) {
+          case '/register': {
+            const result = peerRegister(data);
+            if (data.sessionId) peerSessionMap.set(result.id, data.sessionId);
+            res.end(JSON.stringify(result));
+            notifyPeersChanged();
+            break;
+          }
+          case '/heartbeat':
+            peerHeartbeat(data.id);
+            res.end(JSON.stringify({ ok: true }));
+            break;
+          case '/set-summary':
+            peerSetSummary(data.id, data.summary);
+            res.end(JSON.stringify({ ok: true }));
+            notifyPeersChanged();
+            break;
+          case '/list-peers': {
+            let peers;
+            switch (data.scope) {
+              case 'directory': peers = peerListByDir(data.cwd, data.exclude_id); break;
+              case 'repo': peers = data.git_root ? peerListByRepo(data.git_root, data.exclude_id) : peerListByDir(data.cwd, data.exclude_id); break;
+              default: peers = peerListAll(data.exclude_id);
+            }
+            // Verify PIDs are alive
+            peers = peers.filter(p => {
+              try { process.kill(p.pid, 0); return true; } catch { peerUnregister(p.id); return false; }
+            });
+            res.end(JSON.stringify(peers));
+            break;
+          }
+          case '/send-message': {
+            const result = peerSendMessage(data.from_id, data.to_id, data.text);
+            res.end(JSON.stringify(result));
+            if (result.ok) deliverPeerMessage(data.to_id, data.from_id, data.text);
+            break;
+          }
+          case '/poll-messages': {
+            const messages = peerPollMessages(data.id);
+            res.end(JSON.stringify({ messages }));
+            break;
+          }
+          case '/unregister':
+            peerSessionMap.delete(data.id);
+            peerUnregister(data.id);
+            res.end(JSON.stringify({ ok: true }));
+            notifyPeersChanged();
+            break;
+          default:
+            res.statusCode = 404;
+            res.end(JSON.stringify({ error: 'not found' }));
+        }
+      } catch (e) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  });
+
+  peersHttpServer.listen(PEERS_PORT, '127.0.0.1', () => {
+    log.info(`[peers-broker] Listening on 127.0.0.1:${PEERS_PORT}`);
+  });
+
+  peersHttpServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      log.warn(`[peers-broker] Port ${PEERS_PORT} in use — external broker may be running, skipping embedded broker`);
+      peersHttpServer = null;
+    } else {
+      log.error('[peers-broker] Server error:', err.message);
+    }
+  });
+
+  // Clean stale peers every 30s
+  peersCleanupTimer = setInterval(() => {
+    const activePids = new Set();
+    // Our own managed sessions
+    for (const [, session] of activeSessions) {
+      if (session.pty?.pid) activePids.add(session.pty.pid);
+      if (session.childProcess?.pid) activePids.add(session.childProcess.pid);
+    }
+    // Also check OS-level
+    const allPeers = peerListAll();
+    for (const peer of allPeers) {
+      try { process.kill(peer.pid, 0); activePids.add(peer.pid); } catch {}
+    }
+    peerCleanStale(activePids);
+  }, 30000);
+}
+
+function stopPeersBroker() {
+  if (peersCleanupTimer) { clearInterval(peersCleanupTimer); peersCleanupTimer = null; }
+  if (peersHttpServer) { peersHttpServer.close(); peersHttpServer = null; }
+}
+
+function deliverPeerMessage(toPeerId, fromPeerId, text) {
+  // Try to deliver via IPC to the renderer (for UI notification)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const sender = peerGetById(fromPeerId);
+    mainWindow.webContents.send('peer-message', {
+      toPeerId,
+      fromPeerId,
+      fromAgent: sender?.agent || 'unknown',
+      fromSummary: sender?.summary || '',
+      fromCwd: sender?.cwd || '',
+      text,
+      sentAt: new Date().toISOString(),
+    });
+  }
+
+  // For Claude sessions with the MCP channel: the MCP server handles this via polling
+  // For non-Claude sessions managed by Switchboard: inject via terminal if active
+  const toSessionId = peerSessionMap.get(toPeerId);
+  if (toSessionId) {
+    const session = activeSessions.get(toSessionId);
+    if (session && !session.isHeadless && !session.exited) {
+      const agent = CLI_AGENTS[session.cliAgent || 'claude'];
+      // For non-MCP agents, we can inject a notification comment via terminal
+      if (!agent?.supportsMcp && session.pty) {
+        // Don't auto-inject — let the UI handle it. User decides when to paste.
+      }
+    }
+  }
+}
+
+function notifyPeersChanged() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('peers-changed');
+  }
+}
+
+// Auto-register sessions as peers when they spawn
+function registerSessionAsPeer(sessionId, pid, projectPath, agentId) {
+  const { execSync } = require('child_process');
+  let gitRoot = null;
+  try {
+    gitRoot = execSync('git rev-parse --show-toplevel', { cwd: projectPath, encoding: 'utf-8', timeout: 3000 }).trim();
+  } catch {}
+
+  const result = peerRegister({
+    sessionId,
+    pid,
+    cwd: projectPath,
+    gitRoot,
+    agent: agentId || 'claude',
+    summary: '',
+  });
+  peerSessionMap.set(result.id, sessionId);
+  log.info(`[peers] Registered session ${sessionId} as peer ${result.id} (${agentId})`);
+  return result.id;
+}
+
+// --- IPC: peers ---
+
+ipcMain.handle('peer-list', (_event, scope, cwd, gitRoot, excludeId) => {
+  switch (scope) {
+    case 'directory': return peerListByDir(cwd, excludeId);
+    case 'repo': return gitRoot ? peerListByRepo(gitRoot, excludeId) : peerListByDir(cwd, excludeId);
+    default: return peerListAll(excludeId);
+  }
+});
+
+ipcMain.handle('peer-send-message', (_event, fromPeerId, toPeerId, text) => {
+  const result = peerSendMessage(fromPeerId, toPeerId, text);
+  if (result.ok) deliverPeerMessage(toPeerId, fromPeerId, text);
+  return result;
+});
+
+ipcMain.handle('peer-set-summary', (_event, peerId, summary) => {
+  peerSetSummary(peerId, summary);
+  notifyPeersChanged();
+  return { ok: true };
+});
+
+ipcMain.handle('peer-get-session-peer', (_event, sessionId) => {
+  // Find the peer ID for a given session
+  for (const [peerId, sid] of peerSessionMap) {
+    if (sid === sessionId) return peerGetById(peerId);
+  }
+  return null;
 });
 
 // --- IPC: toggle-star ---
@@ -1527,49 +2390,55 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
         }
       }, 300);
     } else {
-      // Build claude command with session options
-      let claudeCmd;
-      if (sessionOptions?.forkFrom) {
-        claudeCmd = `claude --resume "${sessionOptions.forkFrom}" --fork-session`;
-      } else if (isNew) {
-        claudeCmd = `claude --session-id "${sessionId}"`;
+      // Build CLI command with session options
+      const agentId = sessionOptions?.cliAgent || 'claude';
+      const agent = CLI_AGENTS[agentId] || CLI_AGENTS.claude;
+      let cliCmd;
+
+      if (sessionOptions?.forkFrom && agent.forkFlag) {
+        cliCmd = `${agent.cmd} ${agent.resumeFlag} "${sessionOptions.forkFrom}" ${agent.forkFlag}`;
+      } else if (isNew && agent.sessionFlag) {
+        cliCmd = `${agent.cmd} ${agent.sessionFlag} "${sessionId}"`;
+      } else if (!isNew && agent.resumeFlag) {
+        cliCmd = `${agent.cmd} ${agent.resumeFlag} "${sessionId}"`;
       } else {
-        claudeCmd = `claude --resume "${sessionId}"`;
+        // Agent doesn't support session management — just launch it
+        cliCmd = agent.cmd;
       }
 
-      if (sessionOptions) {
+      if (sessionOptions && agent.supportsPermissions) {
         if (sessionOptions.dangerouslySkipPermissions) {
-          claudeCmd += ' --dangerously-skip-permissions';
+          cliCmd += ' --dangerously-skip-permissions';
         } else if (sessionOptions.permissionMode) {
-          claudeCmd += ` --permission-mode "${sessionOptions.permissionMode}"`;
+          cliCmd += ` --permission-mode "${sessionOptions.permissionMode}"`;
         }
         if (sessionOptions.worktree) {
-          claudeCmd += ' --worktree';
+          cliCmd += ' --worktree';
           if (sessionOptions.worktreeName) {
-            claudeCmd += ` "${sessionOptions.worktreeName}"`;
+            cliCmd += ` "${sessionOptions.worktreeName}"`;
           }
         }
         if (sessionOptions.chrome) {
-          claudeCmd += ' --chrome';
+          cliCmd += ' --chrome';
         }
         if (sessionOptions.addDirs) {
           const dirs = sessionOptions.addDirs.split(',').map(d => d.trim()).filter(Boolean);
           for (const dir of dirs) {
-            claudeCmd += ` --add-dir "${dir}"`;
+            cliCmd += ` --add-dir "${dir}"`;
           }
         }
       }
 
       if (sessionOptions?.preLaunchCmd) {
-        claudeCmd = sessionOptions.preLaunchCmd + ' ' + claudeCmd;
+        cliCmd = sessionOptions.preLaunchCmd + ' ' + cliCmd;
       }
 
       // Start MCP server for this session so Claude CLI sends diffs/file opens to Switchboard
       // (skip if user disabled IDE emulation in global settings)
-      if (sessionOptions?.mcpEmulation !== false) {
+      if (sessionOptions?.mcpEmulation !== false && agent.supportsMcp) {
         try {
           mcpServer = await startMcpServer(sessionId, [projectPath], mainWindow, log);
-          claudeCmd += ' --ide';
+          cliCmd += ' --ide';
         } catch (err) {
           log.error(`[mcp] Failed to start MCP server for ${sessionId}: ${err.message}`);
         }
@@ -1583,15 +2452,18 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       if (mcpServer) {
         ptyEnv.CLAUDE_CODE_SSE_PORT = String(mcpServer.port);
       }
+      // Proxy env overrides (e.g. for ccproxy routing)
+      if (sessionOptions?.envOverrides) {
+        Object.assign(ptyEnv, sessionOptions.envOverrides);
+      }
 
-      ptyProcess = pty.spawn(shell, shellArgs(shell, claudeCmd, shellExtraArgs), {
+      log.info(`[agent] Launching ${agent.name} (${agentId}): ${cliCmd}`);
+
+      ptyProcess = pty.spawn(shell, shellArgs(shell, cliCmd, shellExtraArgs), {
         name: 'xterm-256color',
         cols: 120,
         rows: 30,
         cwd: isWsl ? os.homedir() : projectPath,
-        // TERM_PROGRAM=iTerm.app: Claude Code checks this to decide whether to emit
-        // OSC 9 notifications (e.g. "needs your attention"). Without it, the packaged
-        // app's minimal Electron environment won't trigger those sequences.
         env: ptyEnv,
       });
 
@@ -1606,9 +2478,19 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
     projectPath, firstResize: true,
     projectFolder, knownJsonlFiles, sessionSlug,
     isPlainTerminal, forkFrom: sessionOptions?.forkFrom || null,
+    cliAgent: sessionOptions?.cliAgent || 'claude',
     mcpServer, _openedAt: Date.now(),
   };
   activeSessions.set(sessionId, session);
+
+  // Register this session as a peer for cross-session messaging
+  if (ptyProcess.pid) {
+    try {
+      session.peerId = registerSessionAsPeer(sessionId, ptyProcess.pid, projectPath, session.cliAgent);
+    } catch (err) {
+      log.warn(`[peers] Failed to register session ${sessionId}: ${err.message}`);
+    }
+  }
 
   ptyProcess.onData(data => {
     const currentId = session.realSessionId || sessionId;
@@ -1702,6 +2584,11 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
 
   ptyProcess.onExit(({ exitCode }) => {
     session.exited = true;
+    // Unregister from peers broker
+    if (session.peerId) {
+      try { peerUnregister(session.peerId); peerSessionMap.delete(session.peerId); } catch {}
+      notifyPeersChanged();
+    }
     // Clean up MCP server
     const mcpId = session.realSessionId || sessionId;
     shutdownMcpServer(mcpId);
@@ -2039,6 +2926,7 @@ app.whenReady().then(() => {
   buildMenu();
   createWindow();
   startProjectsWatcher();
+  startPeersBroker();
 
   // Check for updates after launch
   if (autoUpdater) {
@@ -2057,6 +2945,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  // Shut down peers broker
+  stopPeersBroker();
+
   // Shut down all MCP servers
   shutdownAllMcp();
 
@@ -2066,10 +2957,16 @@ app.on('before-quit', () => {
     projectsWatcher = null;
   }
 
-  // Kill all PTY processes on quit
+  // Unregister all peers and kill all processes on quit
   for (const [, session] of activeSessions) {
+    if (session.peerId) {
+      try { peerUnregister(session.peerId); } catch {}
+    }
     if (!session.exited) {
-      try { session.pty.kill(); } catch {}
+      try {
+        if (session.isHeadless && session.childProcess) session.childProcess.kill('SIGTERM');
+        else if (session.pty) session.pty.kill();
+      } catch {}
     }
   }
 });
