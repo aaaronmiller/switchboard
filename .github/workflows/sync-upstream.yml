@@ -2,11 +2,11 @@ name: Sync Upstream & Release
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Daily at midnight
+    - cron: '0 0 * * *'  # Daily at midnight UTC
   workflow_dispatch:
-  push:
-    branches:
-      - main
+
+permissions:
+  contents: write
 
 jobs:
   check-upstream:
@@ -15,115 +15,118 @@ jobs:
       new_release: ${{ steps.check.outputs.new_release }}
       tag: ${{ steps.check.outputs.tag }}
     steps:
-      - name: Check upstream releases
+      - name: Check upstream for new release
         id: check
         run: |
-          UPSTREAM_TAG=$(curl -s https://api.github.com/repos/doctly/switchboard/releases/latest | jq -r '.tag_name // empty')
-          CURRENT_TAG=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r '.tag_name // empty')
-          
-          if [ "$UPSTREAM_TAG" != "$CURRENT_TAG" ] && [ -n "$UPSTREAM_TAG" ]; then
-            echo "new_release=true" >> $GITHUB_OUTPUT
-            echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
-            echo "New upstream release: $UPSTREAM_TAG (current: $CURRENT_TAG)"
+          UPSTREAM_TAG=$(curl -s https://api.github.com/repos/doctly/switchboard/releases/latest \
+            | jq -r '.tag_name // empty')
+          CURRENT_TAG=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
+            | jq -r '.tag_name // empty')
+
+          echo "Upstream: ${UPSTREAM_TAG:-none}  |  Fork latest: ${CURRENT_TAG:-none}"
+
+          if [ -n "$UPSTREAM_TAG" ] && [ "$UPSTREAM_TAG" != "$CURRENT_TAG" ]; then
+            echo "new_release=true"  >> "$GITHUB_OUTPUT"
+            echo "tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
           else
-            echo "new_release=false" >> $GITHUB_OUTPUT
-            echo "No new releases"
+            echo "new_release=false" >> "$GITHUB_OUTPUT"
+            echo "No new release to sync."
           fi
 
   sync-and-build:
     needs: check-upstream
     if: needs.check-upstream.outputs.new_release == 'true'
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Add upstream remote
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/doctly/switchboard.git
-          git fetch upstream
+          git fetch upstream --tags
 
-      - name: Check for merge conflicts
+      - name: Merge upstream into main
+        id: merge
         run: |
-          # Try merge and check for conflicts
-          git merge --no-commit --no-ff upstream/main || {
-            if git diff --check --quiet; then
-              echo "Merge completed without conflicts"
-              git commit -m "Merge upstream changes"
-            else
-              echo "CONFLICT_DETECTED=true" >> $GITHUB_ENV
-              git merge --abort
-              exit 1
-            fi
-          }
+          # Attempt merge without auto-committing
+          git merge --no-commit --no-ff upstream/main || true
 
-      - name: Checkout conflict (no-op, just informational)
-        if: env.CONFLICT_DETECTED == 'true'
-        run: echo "Conflict detected - manual intervention needed"
+          # Check for unresolved conflicts (staged with both-modified status)
+          CONFLICTS=$(git diff --name-only --diff-filter=U)
+          if [ -n "$CONFLICTS" ]; then
+            echo "::error::Merge conflicts in: $CONFLICTS"
+            git merge --abort
+            echo "has_conflict=true" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: sync upstream ${{ needs.check-upstream.outputs.tag }}" \
+              || echo "Nothing new to commit."
+            git push origin main
+            echo "has_conflict=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Install Node.js
-        if: env.CONFLICT_DETECTED != 'true'
+      - name: Fail on unresolvable conflict
+        if: steps.merge.outputs.has_conflict == 'true'
+        run: |
+          echo "Manual merge resolution required."
+          exit 1
+
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+
+      - name: Install setuptools (node-gyp distutils fix)
+        run: python3 -m pip install setuptools
+
+      - name: Install rpm-build (for RPM target)
+        run: sudo apt-get install -y rpm
 
       - name: Install dependencies
-        if: env.CONFLICT_DETECTED != 'true'
         run: npm ci
 
-      - name: Build Linux AppImage
-        if: env.CONFLICT_DETECTED != 'true'
-        run: npm run build:linux
+      - name: Bundle CodeMirror
+        run: npm run bundle:codemirror
 
-      - name: Prepare AppImage with metadata
-        if: env.CONFLICT_DETECTED != 'true'
-        run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
-          cp -r dist/linux-unpacked/* AppDir/
-          cp build/icon.png AppDir/switchboard.png
-          cp AppDir/switchboard.png AppDir/usr/share/icons/hicolor/256x256/apps/
-          cat > AppDir/switchboard.desktop << 'EOF'
-          [Desktop Entry]
-          Name=Switchboard
-          Comment=CLI coding session manager
-          Exec=AppRun %U
-          Icon=switchboard
-          Terminal=false
-          Type=Application
-          Categories=Development;IDE;
-          EOF
-          cp AppDir/switchboard.desktop AppDir/usr/share/applications/
-          cat > AppDir/AppRun << 'EOF'
-          #!/bin/bash
-          HERE="$(dirname "$(readlink -f "${0}")")"
-          export PATH="${HERE}/usr/bin:${PATH}"
-          export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-          exec "${HERE}/switchboard" "$@"
-          EOF
-          chmod +x AppDir/AppRun
+      - name: Build Linux packages
+        run: npx electron-builder --linux
+        env:
+          # Prevent electron-builder from auto-publishing on this step
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build AppImage
-        if: env.CONFLICT_DETECTED != 'true'
-        run: |
-          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
-          chmod +x appimagetool
-          ./appimagetool -s AppDir Switchboard-${{ needs.check-upstream.outputs.tag }}.AppImage
+      - name: List build artifacts
+        run: ls -lh dist/*.AppImage dist/*.deb dist/*.rpm 2>/dev/null || ls -lh dist/
 
-      - name: Create Release
-        if: env.CONFLICT_DETECTED != 'true'
+      - name: Create GitHub Release with Linux artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create ${{ needs.check-upstream.outputs.tag }} \
-            --title "Switchboard ${{ needs.check-upstream.outputs.tag }}" \
-            --notes "Auto-synced from upstream doctly/switchboard" \
-            Switchboard-${{ needs.check-upstream.outputs.tag }}.AppImage
+          TAG="${{ needs.check-upstream.outputs.tag }}"
 
-      - name: Report conflict
-        if: env.CONFLICT_DETECTED == 'true'
-        run: |
-          echo "⚠️ Merge conflict detected with upstream"
-          echo "Manual intervention required at: https://github.com/${{ github.repository }}/actions"
-          exit 1
+          # Collect artifacts; tolerate missing rpm/deb
+          ARTIFACTS=""
+          for f in dist/*.AppImage dist/*.deb dist/*.rpm; do
+            [ -f "$f" ] && ARTIFACTS="$ARTIFACTS $f"
+          done
+
+          if [ -z "$ARTIFACTS" ]; then
+            echo "::error::No build artifacts found in dist/"
+            ls dist/ || true
+            exit 1
+          fi
+
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "Switchboard $TAG (Linux)" \
+            --notes "Auto-synced from upstream [doctly/switchboard@$TAG](https://github.com/doctly/switchboard/releases/tag/$TAG) — Linux builds (AppImage + deb)" \
+            $ARTIFACTS

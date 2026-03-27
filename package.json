@@ -16,6 +16,9 @@
     "build:mac:arm64": "electron-builder --mac --arm64 2>/dev/null; true",
     "build:win": "npm run bundle:codemirror && electron-builder --win",
     "build:linux": "npm run bundle:codemirror && electron-builder --linux",
+    "install:linux": "bash scripts/install-linux.sh",
+    "install:linux:binary": "bash scripts/install-linux.sh --binary dist/linux-unpacked/switchboard",
+    "uninstall:linux": "bash scripts/install-linux.sh --uninstall",
     "release": "npm run bundle:codemirror && electron-builder --publish always",
     "postinstall": "node scripts/postinstall.js"
   },
@@ -128,7 +131,14 @@
           ]
         }
       ],
-      "category": "Development"
+      "category": "Development",
+      "icon": "build/icon.png",
+      "desktop": {
+        "Name": "Switchboard",
+        "Comment": "Browse, search, and manage CLI coding sessions",
+        "Keywords": "claude;ai;terminal;sessions;coding;",
+        "StartupWMClass": "Switchboard"
+      }
     },
     "dmg": {
       "background": "build/dmg-background.png",
