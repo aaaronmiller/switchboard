@@ -7,6 +7,7 @@ const pty = require('node-pty');
 const log = require('electron-log');
 const { getFolderIndexMtimeMs } = require('./folder-index-state');
 const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolvePendingDiff, rekeyMcpServer, cleanStaleLockFiles } = require('./mcp-bridge');
+const { fetchAndTransformUsage } = require('./claude-auth');
 log.transports.file.level = app.isPackaged ? 'info' : 'debug';
 log.transports.console.level = app.isPackaged ? 'info' : 'debug';
 
@@ -689,6 +690,26 @@ function buildProjectsFromCache(showArchived) {
     }
   } catch {}
 
+  // Inject active plain terminal sessions so they participate in sorting
+  for (const [sessionId, session] of activeSessions) {
+    if (session.exited || !session.isPlainTerminal) continue;
+    const folder = session.projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
+    if (hiddenProjects.has(session.projectPath)) continue;
+    if (!folderMap.has(folder)) {
+      folderMap.set(folder, { folder, projectPath: session.projectPath, sessions: [] });
+    }
+    const proj = folderMap.get(folder);
+    if (!proj.sessions.some(s => s.sessionId === sessionId)) {
+      proj.sessions.push({
+        sessionId, summary: 'Terminal', firstPrompt: '', projectPath: session.projectPath,
+        name: null, starred: 0, archived: 0, messageCount: 0,
+        modified: new Date(session._openedAt).toISOString(),
+        created: new Date(session._openedAt).toISOString(),
+        type: 'terminal',
+      });
+    }
+  }
+
   const projects = [];
   for (const proj of folderMap.values()) {
     proj.sessions.sort((a, b) => new Date(b.modified) - new Date(a.modified));
@@ -1070,10 +1091,10 @@ ipcMain.handle('refresh-stats', async () => {
   }
 
   try {
-    // Run both commands — each passed as initial arg, runs automatically
-    const [, usageRaw] = await Promise.all([
+    // Run /stats via PTY (for heatmap/chart data) and fetch usage via API in parallel
+    const [, usage] = await Promise.all([
       runClaude('"/stats"', { waitFor: /streak/i, timeoutMs: 10000 }),
-      runClaude('"/usage"', { waitFor: /current\s*week/i, timeoutMs: 25000 }),
+      fetchAndTransformUsage().catch(() => ({})),
     ]);
 
     // Read refreshed stats cache
@@ -1084,36 +1105,20 @@ ipcMain.handle('refresh-stats', async () => {
       }
     } catch {}
 
-    // Parse usage output — strip ANSI codes and control chars
-    const plain = usageRaw
-      .replace(/\x1b\[[^@-~]*[@-~]/g, '')   // CSI sequences (including [?2026h etc)
-      .replace(/\x1b\][^\x07]*\x07/g, '')    // OSC sequences
-      .replace(/\x1b[^[\]].?/g, '')          // other escapes
-      .replace(/[\x00-\x09\x0b-\x1f]/g, '');
-
-    const usage = {};
-    const lines = plain.split('\n').map(l => l.trim()).filter(Boolean);
-    let currentSection = '';
-    for (const line of lines) {
-      // Space-tolerant section matching (TUI strips spaces)
-      if (/current\s*session/i.test(line)) currentSection = 'session';
-      else if (/current\s*week.*all\s*models/i.test(line)) currentSection = 'weekAll';
-      else if (/current\s*week.*sonnet/i.test(line)) currentSection = 'weekSonnet';
-      else if (/current\s*week.*opus/i.test(line)) currentSection = 'weekOpus';
-      const pctMatch = line.match(/(\d+)\s*%\s*used/i);
-      if (pctMatch && currentSection) {
-        usage[currentSection] = parseInt(pctMatch[1], 10);
-      }
-      const resetLine = line.match(/Resets?\s*(.+)/i);
-      if (resetLine && currentSection) {
-        usage[currentSection + 'Reset'] = resetLine[1].trim();
-      }
-    }
-
-    return { stats, usage };
+    return { stats, usage: usage || {} };
   } catch (err) {
     log.error('Error refreshing stats:', err);
     return { stats: null, usage: {} };
+  }
+});
+
+// --- IPC: get-usage (lightweight, API-only, no PTY) ---
+ipcMain.handle('get-usage', async () => {
+  try {
+    return await fetchAndTransformUsage() || {};
+  } catch (err) {
+    log.error('Error fetching usage:', err);
+    return {};
   }
 });
 
@@ -2502,7 +2507,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
         const code = m[1];
         const payload = m[2].slice(0, 120);
         // Detect Claude CLI busy state from OSC 0 title (spinner chars = busy, ✳ = idle)
-        if (code === '0' && payload.includes('Claude Code')) {
+        if (code === '0') {
           const firstChar = payload.charAt(0);
           const isBusy = firstChar.charCodeAt(0) >= 0x2800 && firstChar.charCodeAt(0) <= 0x28FF;
           const isIdle = firstChar === '\u2733'; // ✳
@@ -2531,7 +2536,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
         // OSC 9;4 progress: 4;0; = clear/done, 4;1;N = running at N%, 4;2;N = error, 4;3; = indeterminate
         if (payload.startsWith('4;')) {
           const level = payload.split(';')[1];
-          if (level === '0') continue; // 4;0 is unreliable, skip
+          if (level === '0') continue; // 4;0 is also used for clearing, making it unreliable as an idle signal
           log.debug(`[OSC 9;4] session=${currentId} level=${level} payload="${payload}" wasBusy=${!!session._cliBusy}`);
           if ((level === '1' || level === '2' || level === '3') && !session._cliBusy) {
             session._cliBusy = true;

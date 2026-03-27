@@ -294,55 +294,96 @@ function isAtBottom(terminal) {
   return buf.viewportY >= buf.baseY;
 }
 
+// Fit terminal to container, subtracting 1 row to avoid partial-row clipping.
+function safeFit(entry) {
+  const dims = entry.fitAddon.proposeDimensions();
+  if (dims && dims.rows > 1) {
+    entry.terminal.resize(dims.cols, dims.rows);
+  } else {
+    entry.fitAddon.fit();
+  }
+}
+
 // Fit a terminal that just became visible (from display:none or reparent).
-// Defers to requestAnimationFrame so the container has dimensions, forces a
-// resize cycle to re-sync xterm's viewport scroll-area, then scrolls to bottom.
+// Defers to requestAnimationFrame so the container has dimensions.
 function fitAndScroll(entry) {
-  // Capture scroll position before any layout changes
   const wasAtBottom = isAtBottom(entry.terminal);
   requestAnimationFrame(() => {
-    const prevCols = entry.terminal.cols;
-    const prevRows = entry.terminal.rows;
-    entry.fitAddon.fit();
-    // Force resize cycle to re-sync viewport when dimensions didn't change
-    if (entry.terminal.cols === prevCols && entry.terminal.rows === prevRows && prevRows > 1) {
-      entry.terminal.resize(prevCols, prevRows - 1);
-      entry.terminal.resize(prevCols, prevRows);
-    }
+    safeFit(entry);
     if (wasAtBottom) {
-      requestAnimationFrame(() => entry.terminal.scrollToBottom());
+      entry.terminal.scrollToBottom();
     }
   });
 }
 
 // --- IPC listeners from main process ---
 
-// Screen-clear / alt-screen escape sequences.
-const ESC_SCREEN_CLEAR = '\x1b[2J';
-const ESC_ALT_SCREEN_ON = '\x1b[?1049h';
+// Batch incoming terminal data to coalesce IPC chunks into fewer write() calls.
+// PTY output arrives in ~1KB IPC chunks which can split synchronized update
+// markers (ESC[?2026h / ESC[?2026l) across calls. We hold data until the sync
+// end marker arrives so xterm can process the complete update atomically.
+// A safety timeout ensures we never hold data indefinitely.
+const ESC_SYNC_START = '\x1b[?2026h';
+const ESC_SYNC_END = '\x1b[?2026l';
+const SYNC_BUFFER_TIMEOUT = 500; // max ms to hold data waiting for sync end
+const terminalWriteBuffers = new Map(); // sessionId → { chunks, syncDepth, rafId, timerId }
 
-// After a screen redraw the content may arrive across multiple data chunks.
-// Keep scrolling to bottom for a short window after detecting a clear.
-let redrawScrollUntil = 0;
+function flushTerminalBuffer(sessionId) {
+  const buf = terminalWriteBuffers.get(sessionId);
+  if (!buf) return;
+  clearTimeout(buf.timerId);
+  cancelAnimationFrame(buf.rafId);
+  terminalWriteBuffers.delete(sessionId);
+
+  const entry = openSessions.get(sessionId);
+  if (!entry) return;
+
+  const data = buf.chunks.join('');
+  const wasAtBottom = isAtBottom(entry.terminal);
+  const savedViewportY = entry.terminal.buffer.active.viewportY;
+  entry.terminal.write(data, () => {
+    if (sessionId !== activeSessionId) return;
+    if (wasAtBottom) {
+      entry.terminal.scrollToBottom();
+    } else {
+      // Restore scroll position so redraws don't yank the user away
+      entry.terminal.scrollLines(savedViewportY - entry.terminal.buffer.active.viewportY);
+    }
+  });
+}
+
+function scheduleFlush(sessionId, buf) {
+  cancelAnimationFrame(buf.rafId);
+  buf.rafId = requestAnimationFrame(() => flushTerminalBuffer(sessionId));
+}
 
 window.api.onTerminalData((sessionId, data) => {
   const entry = openSessions.get(sessionId);
   if (entry) {
-    // Check scroll position *before* writing — the write may change scrollHeight
-    // and cause a DOM scroll event that would give a stale answer.
-    const wasAtBottom = isAtBottom(entry.terminal);
-    // Screen clears push content into scrollback, moving baseY away from
-    // viewportY, so isAtBottom would return false during the redraw.
-    if (data.includes(ESC_SCREEN_CLEAR) || data.includes(ESC_ALT_SCREEN_ON)) {
-      redrawScrollUntil = Date.now() + 1000;
+    let buf = terminalWriteBuffers.get(sessionId);
+    if (!buf) {
+      buf = { chunks: [], syncDepth: 0, rafId: 0, timerId: 0 };
+      terminalWriteBuffers.set(sessionId, buf);
     }
-    const forceScroll = Date.now() < redrawScrollUntil;
-    entry.terminal.write(data, () => {
-      if (sessionId !== activeSessionId) return;
-      if (wasAtBottom || forceScroll) {
-        entry.terminal.scrollToBottom();
+    buf.chunks.push(data);
+
+    // Track sync start/end nesting
+    if (data.includes(ESC_SYNC_START)) buf.syncDepth++;
+    if (data.includes(ESC_SYNC_END)) buf.syncDepth = Math.max(0, buf.syncDepth - 1);
+
+    if (buf.syncDepth > 0) {
+      // Inside a synchronized update — keep buffering.
+      // Set a safety timeout so we never hold data forever.
+      cancelAnimationFrame(buf.rafId);
+      if (!buf.timerId) {
+        buf.timerId = setTimeout(() => flushTerminalBuffer(sessionId), SYNC_BUFFER_TIMEOUT);
       }
-    });
+    } else {
+      // Not in a sync block (or sync just ended) — flush on next frame.
+      clearTimeout(buf.timerId);
+      buf.timerId = 0;
+      scheduleFlush(sessionId, buf);
+    }
   }
   // Update last activity time (noise-filtered)
   trackActivity(sessionId, data);
@@ -909,16 +950,22 @@ searchInput.addEventListener('input', () => {
   }, 200);
 });
 
-// --- Terminal header controls ---
-terminalStopBtn.addEventListener('click', async () => {
-  if (!activeSessionId) return;
-  const sid = activeSessionId;
-  await window.api.stopSession(sid);
-  activePtyIds.delete(sid);
-  setActiveSession(null);
-  terminalHeader.style.display = 'none';
-  placeholder.style.display = '';
+// --- Stop session helper ---
+async function confirmAndStopSession(sessionId) {
+  if (!confirm('Stop this session?')) return;
+  await window.api.stopSession(sessionId);
+  activePtyIds.delete(sessionId);
+  if (!gridViewActive && activeSessionId === sessionId) {
+    setActiveSession(null);
+    terminalHeader.style.display = 'none';
+    placeholder.style.display = '';
+  }
   refreshSidebar();
+}
+
+// --- Terminal header controls ---
+terminalStopBtn.addEventListener('click', () => {
+  if (activeSessionId) confirmAndStopSession(activeSessionId);
 });
 
 terminalRestartBtn.addEventListener('click', () => {
@@ -971,6 +1018,8 @@ function updateRunningIndicators() {
     if (dot) dot.className = 'grid-card-dot ' + (busy ? 'busy' : (running ? 'running' : 'stopped'));
     const footer = card.querySelector('.grid-card-footer');
     if (footer) footer.children[0].textContent = running ? 'Running' : 'Stopped';
+    const stopBtn = card.querySelector('.grid-card-stop-btn');
+    if (stopBtn) stopBtn.style.display = running ? '' : 'none';
   }
 }
 
@@ -1066,30 +1115,21 @@ async function loadProjects({ resort = false } = {}) {
     }
   }
 
-  // Restore active plain terminals from main process (survives renderer reload)
+  // Track active plain terminals in pendingSessions/sessionMap (data now comes from backend)
   try {
     const activeTerminals = await window.api.getActiveTerminals();
     for (const { sessionId, projectPath } of activeTerminals) {
       if (pendingSessions.has(sessionId)) continue; // already tracked
       const folder = projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
-      const session = {
-        sessionId, summary: 'Terminal', firstPrompt: '', projectPath,
-        name: null, starred: 0, archived: 0, messageCount: 0,
-        modified: new Date().toISOString(), created: new Date().toISOString(),
-        type: 'terminal',
-      };
+      // Find the session object already injected by the backend
+      let session;
+      for (const proj of cachedAllProjects) {
+        session = proj.sessions.find(s => s.sessionId === sessionId);
+        if (session) break;
+      }
+      if (!session) continue;
       pendingSessions.set(sessionId, { session, projectPath, folder });
       sessionMap.set(sessionId, session);
-      for (const projList of [cachedProjects, cachedAllProjects]) {
-        let proj = projList.find(p => p.projectPath === projectPath);
-        if (!proj) {
-          proj = { folder, projectPath, sessions: [] };
-          projList.push(proj);
-        }
-        if (!proj.sessions.some(s => s.sessionId === sessionId)) {
-          proj.sessions.unshift(session);
-        }
-      }
     }
   } catch {}
 
@@ -1351,13 +1391,13 @@ function renderProjects(projects, resort) {
     const settingsBtn = document.createElement('button');
     settingsBtn.className = 'project-settings-btn';
     settingsBtn.title = 'Project settings';
-    settingsBtn.innerHTML = ICONS.gear(12);
+    settingsBtn.innerHTML = ICONS.gear(16);
     header.appendChild(settingsBtn);
 
     const archiveGroupBtn = document.createElement('button');
     archiveGroupBtn.className = 'project-archive-btn';
     archiveGroupBtn.title = 'Archive all sessions';
-    archiveGroupBtn.innerHTML = ICONS.archive(16);
+    archiveGroupBtn.innerHTML = ICONS.archive(18);
     header.appendChild(archiveGroupBtn);
 
     const newBtn = document.createElement('button');
@@ -1574,16 +1614,9 @@ function rebindSidebarEvents(projects) {
 
     const stopBtn = item.querySelector('.session-stop-btn');
     if (stopBtn) {
-      stopBtn.onclick = async (e) => {
+      stopBtn.onclick = (e) => {
         e.stopPropagation();
-        await window.api.stopSession(session.sessionId);
-        activePtyIds.delete(session.sessionId);
-        if (!gridViewActive && activeSessionId === session.sessionId) {
-          setActiveSession(null);
-          terminalHeader.style.display = 'none';
-          placeholder.style.display = '';
-        }
-        refreshSidebar();
+        confirmAndStopSession(session.sessionId);
       };
     }
 
@@ -1953,6 +1986,7 @@ function createTerminalEntry(session) {
     }
   }));
   terminal.open(container);
+  container.style.backgroundColor = TERMINAL_THEME.background;
 
   const entry = { terminal, element: container, fitAddon, session, closed: false };
   openSessions.set(sessionId, entry);
@@ -2118,7 +2152,7 @@ window.addEventListener('resize', () => {
   }
   if (activeSessionId && openSessions.has(activeSessionId)) {
     const entry = openSessions.get(activeSessionId);
-    entry.fitAddon.fit();
+    safeFit(entry);
   }
 });
 
@@ -2464,6 +2498,17 @@ function wrapInGridCard(sessionId) {
     agentLabel.style.color = AGENT_COLORS[cardAgentId] || '#8888a0';
     header.appendChild(agentLabel);
   }
+
+  const stopBtn = document.createElement('button');
+  stopBtn.className = 'grid-card-stop-btn';
+  stopBtn.title = 'Stop session';
+  stopBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="2" width="8" height="8" rx="1"/></svg>';
+  stopBtn.style.display = activePtyIds.has(sessionId) ? '' : 'none';
+  stopBtn.onclick = (e) => {
+    e.stopPropagation();
+    confirmAndStopSession(sessionId);
+  };
+  header.appendChild(stopBtn);
 
   // Footer
   const footer = document.createElement('div');
@@ -2943,13 +2988,59 @@ async function loadStats() {
 }
 
 function buildUsageSection(usage) {
+  // Remove existing usage container if present (for refresh)
+  const existing = statsViewerBody.querySelector('.usage-container');
+  if (existing) existing.remove();
+
   const container = document.createElement('div');
   container.className = 'usage-container';
 
+  const titleRow = document.createElement('div');
+  titleRow.className = 'usage-title-row';
   const title = document.createElement('div');
   title.className = 'daily-chart-title';
   title.textContent = 'Rate Limits';
-  container.appendChild(title);
+  titleRow.appendChild(title);
+
+  const refreshBtn = document.createElement('button');
+  refreshBtn.className = 'usage-refresh-btn';
+  refreshBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>';
+  refreshBtn.title = 'Refresh usage';
+  refreshBtn.onclick = async () => {
+    refreshBtn.classList.add('usage-refresh-spinning');
+    refreshBtn.disabled = true;
+    try {
+      const freshUsage = await window.api.getUsage();
+      if (freshUsage && Object.keys(freshUsage).length) {
+        cachedUsage = freshUsage;
+        buildUsageSection(freshUsage);
+      }
+    } catch {}
+    refreshBtn.classList.remove('usage-refresh-spinning');
+    refreshBtn.disabled = false;
+  };
+  titleRow.appendChild(refreshBtn);
+  container.appendChild(titleRow);
+
+  // Show rate limit or error notice
+  if (usage._rateLimited || usage._error) {
+    const notice = document.createElement('div');
+    notice.className = 'usage-rate-limited';
+    if (usage._rateLimited) {
+      const secs = usage.retryAfterSeconds || 0;
+      const mins = Math.ceil(secs / 60);
+      notice.textContent = secs > 0
+        ? `Usage API rate limited. Try again in ~${mins} min${mins !== 1 ? 's' : ''}.`
+        : 'Usage API rate limited. Try again later.';
+    } else {
+      notice.textContent = usage.message || 'Could not fetch usage data.';
+    }
+    container.appendChild(notice);
+    const statsNotice = statsViewerBody.querySelector('.stats-notice');
+    if (statsNotice) statsViewerBody.insertBefore(container, statsNotice);
+    else statsViewerBody.appendChild(container);
+    return;
+  }
 
   const grid = document.createElement('div');
   grid.className = 'usage-grid';
@@ -2998,7 +3089,10 @@ function buildUsageSection(usage) {
   }
 
   container.appendChild(grid);
-  statsViewerBody.appendChild(container);
+  // Insert before the stats notice footer if it exists, otherwise append
+  const statsNotice = statsViewerBody.querySelector('.stats-notice');
+  if (statsNotice) statsViewerBody.insertBefore(container, statsNotice);
+  else statsViewerBody.appendChild(container);
 }
 
 function buildDailyBarChart(stats) {
@@ -3955,6 +4049,18 @@ async function showNewSessionDialog(project) {
 }
 
 // --- Settings viewer ---
+function closeSettingsViewer() {
+  settingsViewer.style.display = 'none';
+  if (activeSessionId && openSessions.has(activeSessionId)) {
+    terminalArea.style.display = '';
+    terminalHeader.style.display = '';
+  } else if (gridViewActive) {
+    terminalArea.style.display = '';
+  } else {
+    placeholder.style.display = '';
+  }
+}
+
 async function openSettingsViewer(scope, projectPath) {
   const isProject = scope === 'project';
   const settingsKey = isProject ? 'project:' + projectPath : 'global';
@@ -4165,7 +4271,10 @@ async function openSettingsViewer(scope, projectPath) {
         </div>
       </div>` : ''}
 
-      <button class="settings-save-btn" id="sv-save-btn">Save Settings</button>
+      <div class="settings-btn-row">
+        <button class="settings-cancel-btn" id="sv-cancel-btn">Cancel</button>
+        <button class="settings-save-btn" id="sv-save-btn">Save Settings</button>
+      </div>
       ${isProject ? '<button class="settings-remove-btn" id="sv-remove-btn">Remove Project</button>' : ''}
     </div>
   `;
@@ -4249,6 +4358,7 @@ async function openSettingsViewer(scope, projectPath) {
         // Apply to all open terminals
         for (const [, entry] of openSessions) {
           entry.terminal.options.theme = TERMINAL_THEME;
+          entry.element.style.backgroundColor = TERMINAL_THEME.background;
         }
       }
       refreshSidebar();
@@ -4264,11 +4374,12 @@ async function openSettingsViewer(scope, projectPath) {
       setTimeout(() => notice.remove(), 8000);
     }
 
-    // Flash save confirmation
-    const btn = settingsViewerBody.querySelector('#sv-save-btn');
-    btn.classList.add('saved');
-    btn.textContent = 'Saved!';
-    setTimeout(() => { btn.classList.remove('saved'); btn.textContent = 'Save Settings'; }, 1500);
+    closeSettingsViewer();
+  });
+
+  // Cancel button
+  settingsViewerBody.querySelector('#sv-cancel-btn').addEventListener('click', () => {
+    closeSettingsViewer();
   });
 
   // Check for updates button + current version + inline status
@@ -4417,7 +4528,7 @@ function showAddProjectDialog() {
     // Refit active terminal
     if (!gridViewActive && activeSessionId && openSessions.has(activeSessionId)) {
       const entry = openSessions.get(activeSessionId);
-      entry.fitAddon.fit();
+      safeFit(entry);
     }
     // Save sidebar width to settings
     const width = parseInt(sidebar.style.width);
