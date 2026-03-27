@@ -117,10 +117,11 @@
       "category": "Development",
       "icon": "build/icon.png",
       "desktop": {
-        "Name": "Switchboard",
-        "Comment": "Browse, search, and manage CLI coding sessions",
-        "Keywords": "claude;ai;terminal;sessions;coding;",
-        "StartupWMClass": "Switchboard"
+        "entry": {
+          "Comment": "Browse, search, and manage CLI coding sessions",
+          "Keywords": "claude;ai;terminal;sessions;coding;",
+          "StartupWMClass": "Switchboard"
+        }
       }
     },
     "dmg": {
