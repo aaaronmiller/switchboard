@@ -58,62 +58,94 @@ jobs:
       - name: Merge upstream into main
         id: merge
         run: |
-          # Attempt merge without auto-committing
+          TAG="${{ needs.check-upstream.outputs.tag }}"
+
+          # Try clean merge first
           git merge --no-commit --no-ff upstream/main || true
 
-          # Check for unresolved conflicts (staged with both-modified status)
           CONFLICTS=$(git diff --name-only --diff-filter=U)
-          if [ -n "$CONFLICTS" ]; then
-            echo "::error::Merge conflicts in: $CONFLICTS"
-            git merge --abort
-            echo "has_conflict=true" >> "$GITHUB_OUTPUT"
-          else
-            git commit -m "chore: sync upstream ${{ needs.check-upstream.outputs.tag }}" \
-              || echo "Nothing new to commit."
+
+          if [ -z "$CONFLICTS" ]; then
+            # Clean merge — commit and push directly to main
+            git commit -m "chore: sync upstream $TAG" || echo "Nothing new to commit."
             git push origin main
-            echo "has_conflict=false" >> "$GITHUB_OUTPUT"
+            echo "mode=direct" >> "$GITHUB_OUTPUT"
+          else
+            # Conflicts — create a review PR with theirs-strategy resolution
+            echo "::warning::Conflicts in: $(echo $CONFLICTS | tr '\n' ' ')"
+            git merge --abort
+
+            BRANCH="sync/upstream-$TAG"
+            git checkout -b "$BRANCH"
+
+            # Force-resolve all conflicts in upstream's favour so the branch is clean
+            git merge -X theirs upstream/main \
+              -m "chore: sync upstream $TAG (conflicts resolved: theirs)"
+
+            git push origin "$BRANCH"
+            echo "mode=pr" >> "$GITHUB_OUTPUT"
+            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fail on unresolvable conflict
-        if: steps.merge.outputs.has_conflict == 'true'
+      - name: Open PR for conflict review
+        if: steps.merge.outputs.mode == 'pr'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Manual merge resolution required."
-          exit 1
+          TAG="${{ needs.check-upstream.outputs.tag }}"
+          BRANCH="${{ steps.merge.outputs.branch }}"
+          gh pr create \
+            --repo "${{ github.repository }}" \
+            --head "$BRANCH" \
+            --base main \
+            --title "sync: upstream $TAG (review required)" \
+            --body "Upstream released **$TAG**. Auto-merge had conflicts — resolved with upstream's version. Review before merging:
+          - Verify fork-specific features in \`public/app.js\`, \`package.json\` scripts, and \`main.js\` are preserved or intentionally updated.
+          - After merge, the build job below will run automatically.
+
+          [Upstream release notes](https://github.com/doctly/switchboard/releases/tag/$TAG)"
+          echo "::notice::PR created for upstream $TAG — review at https://github.com/${{ github.repository }}/pulls"
 
       - name: Setup Node.js
+        if: steps.merge.outputs.mode == 'direct'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
 
       - name: Install setuptools (node-gyp distutils fix)
+        if: steps.merge.outputs.mode == 'direct'
         run: python3 -m pip install setuptools
 
       - name: Install rpm-build (for RPM target)
+        if: steps.merge.outputs.mode == 'direct'
         run: sudo apt-get install -y rpm
 
       - name: Install dependencies
+        if: steps.merge.outputs.mode == 'direct'
         run: npm ci
 
       - name: Bundle CodeMirror
+        if: steps.merge.outputs.mode == 'direct'
         run: npm run bundle:codemirror
 
       - name: Build Linux packages
+        if: steps.merge.outputs.mode == 'direct'
         run: npx electron-builder --linux
         env:
-          # Prevent electron-builder from auto-publishing on this step
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: List build artifacts
+        if: steps.merge.outputs.mode == 'direct'
         run: ls -lh dist/*.AppImage dist/*.deb dist/*.rpm 2>/dev/null || ls -lh dist/
 
       - name: Create GitHub Release with Linux artifacts
+        if: steps.merge.outputs.mode == 'direct'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ needs.check-upstream.outputs.tag }}"
 
-          # Collect artifacts; tolerate missing rpm/deb
           ARTIFACTS=""
           for f in dist/*.AppImage dist/*.deb dist/*.rpm; do
             [ -f "$f" ] && ARTIFACTS="$ARTIFACTS $f"
