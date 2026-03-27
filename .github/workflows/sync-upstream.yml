@@ -53,7 +53,7 @@ jobs:
       - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/doctly/switchboard.git
-          git fetch upstream --tags
+          git fetch upstream main
 
       - name: Merge upstream into main
         id: merge
