@@ -46,8 +46,8 @@
   },
   "devDependencies": {
     "@napi-rs/canvas": "^0.1.62",
-    "electron": "^33.0.0",
-    "electron-builder": "^25.0.0",
+    "electron": "^35.7.5",
+    "electron-builder": "^26.8.1",
     "electron-reloader": "^1.2.3",
     "esbuild": "^0.27.3",
     "png2icons": "^2.0.1"
