@@ -108,22 +108,19 @@ Monitor all sessions in the background with status indicators.
 
 | Platform | Download |
 |----------|----------|
-| **Linux** | [Switchboard-0.0.17.AppImage](https://github.com/aaaronmiller/switchboard/releases/latest) |
-| **macOS** | `.dmg` (Apple Silicon & Intel) — *coming soon* |
-| **Windows** | `.exe` installer — *coming soon* |
+| **Linux** | [AppImage + .deb](https://github.com/aaaronmiller/switchboard/releases/latest) (x64 + arm64) |
+| **macOS** | [.dmg](https://github.com/aaaronmiller/switchboard/releases/latest) (Apple Silicon + Intel) |
+| **Windows** | [.exe installer](https://github.com/aaaronmiller/switchboard/releases/latest) (x64 + arm64) |
 
 ### Linux Installation
 
 ```bash
-# Download
+# Download latest AppImage
 curl -L -o Switchboard.AppImage \
-  https://github.com/aaaronmiller/switchboard/releases/download/v0.0.17/Switchboard-0.0.17-fixed.AppImage
+  "$(gh release view --repo aaaronmiller/switchboard --json assets -q '.assets[] | select(.name | endswith(".AppImage")) | .url' 2>/dev/null || echo https://github.com/aaaronmiller/switchboard/releases/latest)"
 
-# Make executable
-chmod +x Switchboard.AppImage
-
-# Run (or double-click)
-./Switchboard.AppImage
+# Make executable & run
+chmod +x Switchboard.AppImage && ./Switchboard.AppImage
 ```
 
 ### Auto-Update
