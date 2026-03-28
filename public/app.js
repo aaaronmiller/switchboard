@@ -387,6 +387,8 @@ window.api.onTerminalData((sessionId, data) => {
   }
   // Update last activity time (noise-filtered)
   trackActivity(sessionId, data);
+  // Feed terminal output to scheduler (wait-for-output, condition checks)
+  if (typeof schedulerOnTerminalData === 'function') schedulerOnTerminalData(sessionId, data);
 });
 
 window.api.onSessionDetected((tempId, realId) => {
@@ -1915,6 +1917,22 @@ async function showTerminalHeader(session) {
     agentTag.style.display = 'none';
   }
 
+  // Scheduler button
+  let schedBtn = terminalHeader.querySelector('.scheduler-btn');
+  if (!schedBtn) {
+    schedBtn = document.createElement('button');
+    schedBtn.className = 'scheduler-btn';
+    schedBtn.title = 'Command Scheduler';
+    schedBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+    const headerRight = terminalHeader.querySelector('.terminal-header-status')?.parentElement || terminalHeader;
+    headerRight.appendChild(schedBtn);
+  }
+  schedBtn.onclick = () => {
+    if (typeof openScheduler === 'function') openScheduler(session.sessionId);
+  };
+  // Update running dot
+  if (typeof updateSchedulerBtnState === 'function') updateSchedulerBtnState(session.sessionId, schedBtn);
+
   // Peers messaging button
   let peersBtn = terminalHeader.querySelector('.terminal-header-peers-btn');
   if (!peersBtn) {
@@ -1995,6 +2013,13 @@ function createTerminalEntry(session) {
   terminal.onData(data => {
     if (data === '\x1b[I' || data === '\x1b[O') return;
     window.api.sendInput(entry.session.sessionId, data);
+    // Scheduler: broadcast mode — mirror input to all broadcast targets
+    if (typeof schedulerGetBroadcastTargets === 'function') {
+      const targets = schedulerGetBroadcastTargets();
+      if (targets) { for (const sid of targets) { if (sid !== entry.session.sessionId) window.api.sendInput(sid, data); } }
+    }
+    // Scheduler: macro recording — capture keystrokes
+    if (typeof recordMacroInput === 'function') recordMacroInput(data);
   });
   setupTerminalKeyBindings(terminal, container, () => entry.session.sessionId);
   setupDragAndDrop(container, () => entry.session.sessionId);
@@ -2498,6 +2523,16 @@ function wrapInGridCard(sessionId) {
     agentLabel.style.color = AGENT_COLORS[cardAgentId] || '#8888a0';
     header.appendChild(agentLabel);
   }
+
+  const gridSchedBtn = document.createElement('button');
+  gridSchedBtn.className = 'grid-card-scheduler-btn';
+  gridSchedBtn.title = 'Command Scheduler';
+  gridSchedBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+  gridSchedBtn.onclick = (e) => {
+    e.stopPropagation();
+    if (typeof openScheduler === 'function') openScheduler(sessionId);
+  };
+  header.appendChild(gridSchedBtn);
 
   const stopBtn = document.createElement('button');
   stopBtn.className = 'grid-card-stop-btn';
@@ -4693,3 +4728,9 @@ window.api.onUpdaterEvent(updaterHandler);
 
 // --- Initialize file panel (MCP bridge UI) ---
 if (typeof initFilePanel === 'function') initFilePanel();
+
+// ========== COMMAND SCHEDULER (bridge to scheduler.js) ==========
+// openScheduler, updateSchedulerBtnState, schedulerOnTerminalData,
+// schedulerToggleBroadcast, schedulerGetBroadcastTargets, recordMacroInput
+// are all defined in scheduler.js (loaded after app.js)
+

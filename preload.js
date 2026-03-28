@@ -72,6 +72,13 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('status-update', (_event, text, type) => callback(text, type));
   },
 
+  // Scheduler
+  schedulerSave: (jsonData) => ipcRenderer.invoke('scheduler-save', jsonData),
+  schedulerLoad: () => ipcRenderer.invoke('scheduler-load'),
+  schedulerListPatterns: () => ipcRenderer.invoke('scheduler-list-patterns'),
+  schedulerSaveToLibrary: (name, jsonData) => ipcRenderer.invoke('scheduler-save-to-library', name, jsonData),
+  schedulerDeletePattern: (filename) => ipcRenderer.invoke('scheduler-delete-pattern', filename),
+
   // File drag-and-drop
   getPathForFile: (file) => webUtils.getPathForFile(file),
 

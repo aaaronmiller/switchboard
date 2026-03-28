@@ -2976,6 +2976,83 @@ app.on('before-quit', () => {
   }
 });
 
+// --- IPC: scheduler-save (save scheduler pattern to JSON file) ---
+ipcMain.handle('scheduler-save', async (_event, jsonData) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Scheduler Pattern',
+    defaultPath: `scheduler-pattern.json`,
+    filters: [
+      { name: 'JSON Files', extensions: ['json'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  if (result.canceled || !result.filePath) return { ok: false };
+  try {
+    fs.writeFileSync(result.filePath, JSON.stringify(JSON.parse(jsonData), null, 2), 'utf-8');
+    return { ok: true, filePath: result.filePath };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// --- IPC: scheduler-load (load scheduler pattern from JSON file) ---
+ipcMain.handle('scheduler-load', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Load Scheduler Pattern',
+    filters: [
+      { name: 'JSON Files', extensions: ['json'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths.length) return { ok: false };
+  try {
+    const data = fs.readFileSync(result.filePaths[0], 'utf-8');
+    const parsed = JSON.parse(data);
+    return { ok: true, data: parsed, filePath: result.filePaths[0] };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// --- IPC: scheduler-list-patterns (list user pattern files from ~/.switchboard/patterns/) ---
+ipcMain.handle('scheduler-list-patterns', async () => {
+  const dir = path.join(os.homedir(), '.switchboard', 'patterns');
+  try {
+    if (!fs.existsSync(dir)) return { ok: true, patterns: [] };
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+    const patterns = [];
+    for (const f of files) {
+      try {
+        const data = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8'));
+        patterns.push({ filename: f, ...data });
+      } catch {}
+    }
+    return { ok: true, patterns };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+
+// --- IPC: scheduler-save-to-library (save pattern to user library) ---
+ipcMain.handle('scheduler-save-to-library', async (_event, name, jsonData) => {
+  const dir = path.join(os.homedir(), '.switchboard', 'patterns');
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const filename = name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase() + '.json';
+    fs.writeFileSync(path.join(dir, filename), JSON.stringify(JSON.parse(jsonData), null, 2), 'utf-8');
+    return { ok: true, filename };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+
+// --- IPC: scheduler-delete-pattern (delete pattern from user library) ---
+ipcMain.handle('scheduler-delete-pattern', async (_event, filename) => {
+  const dir = path.join(os.homedir(), '.switchboard', 'patterns');
+  try {
+    const filepath = path.join(dir, path.basename(filename));
+    if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+    return { ok: true };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+
 // Close SQLite after all windows are closed to avoid "connection is not open" errors
 app.on('will-quit', () => {
   closeDb();

@@ -3739,3 +3739,560 @@ body { display: flex; flex-direction: column; }
   color: #b0b0ff;
   border-color: rgba(100,100,255,0.2);
 }
+
+/* ========== COMMAND SCHEDULER ========== */
+.scheduler-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 5px;
+  color: #8888a0;
+  cursor: pointer;
+  padding: 3px 6px;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  transition: all 0.15s;
+  position: relative;
+}
+.scheduler-btn:hover {
+  background: rgba(128,136,255,0.1);
+  color: #b0b0ff;
+  border-color: rgba(128,136,255,0.2);
+}
+.scheduler-btn.active {
+  color: #8088ff;
+  border-color: rgba(128,136,255,0.3);
+}
+.scheduler-btn .scheduler-running-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3ecf5a;
+  animation: scheduler-pulse 1.5s ease-in-out infinite;
+}
+@keyframes scheduler-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.7); }
+}
+
+/* Overlay */
+.scheduler-overlay {
+  position: fixed;
+  top: 0;
+  bottom: 24px; /* leave status bar visible */
+  right: 0;
+  left: var(--sidebar-width, 260px);
+  background: rgba(11, 11, 18, 0.82);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: scheduler-fade-in 0.2s ease-out;
+}
+@keyframes scheduler-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.scheduler-panel {
+  background: rgba(26, 26, 36, 0.95);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 14px;
+  width: 580px;
+  max-width: 95%;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 72px rgba(0,0,0,0.5), 0 0 0 1px rgba(128,136,255,0.05);
+  overflow: hidden;
+}
+
+.scheduler-header {
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.scheduler-header h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #d0d0e8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.scheduler-header h3 svg { color: #8088ff; flex-shrink: 0; }
+.scheduler-close-btn {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all 0.15s;
+  display: flex;
+}
+.scheduler-close-btn:hover { background: rgba(255,255,255,0.06); color: #aaa; }
+
+/* Target selector */
+.scheduler-targets {
+  padding: 12px 20px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.scheduler-targets-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #7a7a90;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+.scheduler-target-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.scheduler-target-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+  color: #8888a0;
+  transition: all 0.15s;
+  user-select: none;
+}
+.scheduler-target-chip:hover {
+  background: rgba(128,136,255,0.08);
+  border-color: rgba(128,136,255,0.2);
+}
+.scheduler-target-chip.selected {
+  background: rgba(128,136,255,0.12);
+  border-color: rgba(128,136,255,0.3);
+  color: #b0b8ff;
+}
+.scheduler-target-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #555;
+}
+.scheduler-target-chip.selected .scheduler-target-dot { background: #8088ff; }
+
+/* Steps list */
+.scheduler-steps {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 20px;
+  min-height: 120px;
+  max-height: 45vh;
+}
+.scheduler-steps::-webkit-scrollbar { width: 5px; }
+.scheduler-steps::-webkit-scrollbar-track { background: transparent; }
+.scheduler-steps::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+
+.scheduler-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.02);
+  transition: all 0.15s;
+  position: relative;
+}
+.scheduler-step:hover { border-color: rgba(255,255,255,0.1); }
+.scheduler-step.active-step {
+  border-color: rgba(128,136,255,0.4);
+  background: rgba(128,136,255,0.06);
+  box-shadow: 0 0 12px rgba(128,136,255,0.08);
+}
+.scheduler-step.is-wait { border-left: 3px solid rgba(234,179,8,0.5); }
+.scheduler-step.is-command { border-left: 3px solid rgba(128,136,255,0.3); }
+
+.scheduler-step-badge {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.scheduler-step.is-command .scheduler-step-badge {
+  background: rgba(128,136,255,0.12);
+  color: #8088ff;
+}
+.scheduler-step.is-wait .scheduler-step-badge {
+  background: rgba(234,179,8,0.12);
+  color: #eab308;
+}
+
+.scheduler-step-input {
+  flex: 1;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 5px;
+  color: #d0d0e0;
+  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
+  font-size: 12px;
+  padding: 6px 8px;
+  outline: none;
+  min-width: 0;
+}
+.scheduler-step-input:focus {
+  border-color: rgba(128,136,255,0.3);
+}
+.scheduler-step-input::placeholder { color: #555; }
+
+/* Wait duration inputs */
+.scheduler-wait-inputs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+}
+.scheduler-wait-num {
+  width: 52px;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 5px;
+  color: #eab308;
+  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
+  font-size: 12px;
+  padding: 6px 6px;
+  outline: none;
+  text-align: center;
+}
+.scheduler-wait-num:focus { border-color: rgba(234,179,8,0.3); }
+.scheduler-wait-unit {
+  font-size: 10px;
+  color: #7a7a90;
+  font-weight: 500;
+  width: 16px;
+}
+
+/* Step action buttons */
+.scheduler-step-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.scheduler-step-btn {
+  background: none;
+  border: none;
+  color: #555;
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 4px;
+  display: flex;
+  transition: all 0.15s;
+}
+.scheduler-step-btn:hover { background: rgba(255,255,255,0.06); color: #999; }
+.scheduler-step-btn.remove-btn:hover { color: #e05070; }
+
+/* Add step buttons */
+.scheduler-add-row {
+  display: flex;
+  gap: 8px;
+  padding: 8px 20px 4px;
+}
+.scheduler-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px dashed rgba(255,255,255,0.1);
+  background: transparent;
+  color: #7a7a90;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+.scheduler-add-btn:hover {
+  border-color: rgba(128,136,255,0.3);
+  color: #b0b8ff;
+  background: rgba(128,136,255,0.05);
+}
+.scheduler-add-btn.add-wait:hover {
+  border-color: rgba(234,179,8,0.3);
+  color: #eab308;
+  background: rgba(234,179,8,0.05);
+}
+
+/* Repeat config */
+.scheduler-repeat {
+  padding: 12px 20px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.scheduler-repeat label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #8888a0;
+  cursor: pointer;
+  user-select: none;
+}
+.scheduler-repeat input[type="checkbox"] {
+  accent-color: #8088ff;
+  width: 14px;
+  height: 14px;
+}
+.scheduler-repeat-config {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #7a7a90;
+}
+.scheduler-repeat-input {
+  width: 48px;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 5px;
+  color: #d0d0e0;
+  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
+  font-size: 11px;
+  padding: 4px 6px;
+  outline: none;
+  text-align: center;
+}
+.scheduler-repeat-input:focus { border-color: rgba(128,136,255,0.3); }
+.scheduler-repeat-select {
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 5px;
+  color: #d0d0e0;
+  font-size: 11px;
+  padding: 4px 6px;
+  outline: none;
+  font-family: inherit;
+}
+
+/* Footer actions */
+.scheduler-footer {
+  padding: 14px 20px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.scheduler-footer-left {
+  display: flex;
+  gap: 6px;
+}
+.scheduler-footer-right {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.scheduler-footer button {
+  padding: 7px 16px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  border: 1px solid rgba(255,255,255,0.08);
+  transition: all 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.scheduler-save-btn, .scheduler-load-btn {
+  background: transparent;
+  color: #7a7a90;
+}
+.scheduler-save-btn:hover, .scheduler-load-btn:hover {
+  background: rgba(255,255,255,0.05);
+  color: #b0b0c4;
+}
+.scheduler-cancel-btn {
+  background: transparent;
+  color: #8888a0;
+}
+.scheduler-cancel-btn:hover {
+  background: rgba(255,255,255,0.05);
+  color: #b0b0c4;
+}
+.scheduler-run-btn {
+  background: rgba(62,207,90,0.1);
+  color: #3ecf5a;
+  border-color: rgba(62,207,90,0.25) !important;
+}
+.scheduler-run-btn:hover {
+  background: rgba(62,207,90,0.18);
+}
+.scheduler-run-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.scheduler-stop-run-btn {
+  background: rgba(224,80,112,0.1);
+  color: #e05070;
+  border-color: rgba(224,80,112,0.25) !important;
+}
+.scheduler-stop-run-btn:hover {
+  background: rgba(224,80,112,0.18);
+}
+
+/* Progress indicator */
+.scheduler-progress {
+  padding: 8px 20px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: #7a7a90;
+}
+.scheduler-progress-bar {
+  flex: 1;
+  height: 3px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.scheduler-progress-fill {
+  height: 100%;
+  background: #8088ff;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+.scheduler-progress-text { white-space: nowrap; }
+.scheduler-countdown {
+  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
+  color: #eab308;
+}
+
+/* Empty state */
+.scheduler-empty {
+  text-align: center;
+  padding: 32px 20px;
+  color: #555;
+  font-size: 12px;
+}
+.scheduler-empty svg { margin-bottom: 8px; opacity: 0.3; }
+
+/* Grid card scheduler button */
+.grid-card-scheduler-btn {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  display: inline-flex;
+  transition: all 0.15s;
+  margin-left: 4px;
+}
+.grid-card-scheduler-btn:hover { color: #8088ff; background: rgba(128,136,255,0.1); }
+
+/* New step type colors */
+.scheduler-step.is-watch { border-left: 3px solid rgba(62,207,90,0.5); }
+.scheduler-step.is-gate { border-left: 3px solid rgba(192,132,252,0.5); }
+.scheduler-step.is-parallel { border-left: 3px solid rgba(34,211,238,0.5); }
+.scheduler-step.is-comment { border-left: 3px solid rgba(85,85,85,0.5); opacity: 0.7; }
+.scheduler-step.is-condition { border-left: 3px solid rgba(251,146,60,0.5); }
+.scheduler-step.is-peer-msg { border-left: 3px solid rgba(96,165,250,0.5); }
+.scheduler-step.is-launch { border-left: 3px solid rgba(244,114,182,0.5); }
+
+.scheduler-step.is-watch .scheduler-step-badge { background: rgba(62,207,90,0.12); color: #3ecf5a; }
+.scheduler-step.is-gate .scheduler-step-badge { background: rgba(192,132,252,0.12); color: #c084fc; }
+.scheduler-step.is-parallel .scheduler-step-badge { background: rgba(34,211,238,0.12); color: #22d3ee; }
+.scheduler-step.is-comment .scheduler-step-badge { background: rgba(85,85,85,0.15); color: #666; }
+.scheduler-step.is-condition .scheduler-step-badge { background: rgba(251,146,60,0.12); color: #fb923c; }
+.scheduler-step.is-peer-msg .scheduler-step-badge { background: rgba(96,165,250,0.12); color: #60a5fa; }
+.scheduler-step.is-launch .scheduler-step-badge { background: rgba(244,114,182,0.12); color: #f472b6; }
+
+/* Comment input styling */
+.scheduler-comment-input {
+  font-style: italic;
+  color: #777 !important;
+  background: transparent !important;
+  border-color: transparent !important;
+}
+.scheduler-comment-input::placeholder { color: #444; font-style: italic; }
+
+/* Breakpoint dot */
+.scheduler-bp-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255,255,255,0.08);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.scheduler-bp-dot:hover { border-color: rgba(224,80,112,0.5); }
+.scheduler-bp-dot.active {
+  background: #e05070;
+  border-color: #e05070;
+  box-shadow: 0 0 6px rgba(224,80,112,0.4);
+}
+
+/* Per-step target badge */
+.scheduler-step-target-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(128,136,255,0.08);
+  color: #8088ff;
+  border: 1px solid rgba(128,136,255,0.15);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.scheduler-step-target-badge:hover {
+  background: rgba(128,136,255,0.15);
+  border-color: rgba(128,136,255,0.3);
+}
+
+/* Broadcast active indicator */
+.scheduler-add-btn.broadcast-active {
+  color: #3ecf5a !important;
+  border-color: rgba(62,207,90,0.4) !important;
+  background: rgba(62,207,90,0.06) !important;
+}
+
+/* Macro recording active */
+.scheduler-add-btn.macro-active {
+  color: #e05070 !important;
+  border-color: rgba(224,80,112,0.4) !important;
+  background: rgba(224,80,112,0.06) !important;
+  animation: scheduler-pulse 1.5s ease-in-out infinite;
+}
+
+/* Add button type-specific hover colors */
+.scheduler-add-btn.add-watch:hover { border-color: rgba(62,207,90,0.3); color: #3ecf5a; background: rgba(62,207,90,0.05); }
+.scheduler-add-btn.add-gate:hover { border-color: rgba(192,132,252,0.3); color: #c084fc; background: rgba(192,132,252,0.05); }
+.scheduler-add-btn.add-parallel:hover { border-color: rgba(34,211,238,0.3); color: #22d3ee; background: rgba(34,211,238,0.05); }
+.scheduler-add-btn.add-comment:hover { border-color: rgba(85,85,85,0.3); color: #888; background: rgba(85,85,85,0.05); }
+.scheduler-add-btn.add-condition:hover { border-color: rgba(251,146,60,0.3); color: #fb923c; background: rgba(251,146,60,0.05); }
+.scheduler-add-btn.add-peer:hover { border-color: rgba(96,165,250,0.3); color: #60a5fa; background: rgba(96,165,250,0.05); }
+.scheduler-add-btn.add-launch:hover { border-color: rgba(244,114,182,0.3); color: #f472b6; background: rgba(244,114,182,0.05); }
