@@ -70,21 +70,19 @@ jobs:
         run: |
           TAG=${GITHUB_REF#refs/tags/}
 
-          # Collect all artifacts that exist (not all platforms produce all formats)
-          FILES=""
-          for f in artifacts/linux-build/*.AppImage \
-                   artifacts/linux-build/*.deb \
-                   artifacts/linux-build/*.rpm \
-                   artifacts/mac-build/*.dmg \
-                   artifacts/mac-build/*.zip \
-                   artifacts/win-build/*.exe \
-                   artifacts/win-build/*.zip; do
-            [ -f "$f" ] && FILES="$FILES $f"
-          done
+          # Collect all artifacts into a file list (handles spaces in names)
+          find artifacts -type f \( \
+            -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
+            -o -name '*.dmg' -o -name '*.exe' -o -name '*.zip' \
+          \) > /tmp/release-files.txt
 
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Switchboard $TAG" \
+          echo "Release files:"
+          cat /tmp/release-files.txt
+
+          # Build gh release command args
+          ARGS=(release create "$TAG"
+            --repo "$GITHUB_REPOSITORY"
+            --title "Switchboard $TAG"
             --notes "## What's New
 
           - **Command Scheduler** — Visual workflow sequencer with 9 step types for orchestrating commands across multiple AI CLI sessions
@@ -93,5 +91,10 @@ jobs:
           - **Macro Recording** — Capture keystrokes, auto-detect pauses, save as reusable patterns
           - **Template Variables** — Dynamic patterns with built-in and user-defined variables
 
-          See [ROADMAP.md](https://github.com/aaaronmiller/switchboard/blob/main/ROADMAP.md) for upcoming features." \
-            $FILES
+          See [ROADMAP.md](https://github.com/aaaronmiller/switchboard/blob/main/ROADMAP.md) for upcoming features.")
+
+          while IFS= read -r f; do
+            ARGS+=("$f")
+          done < /tmp/release-files.txt
+
+          gh "${ARGS[@]}"
