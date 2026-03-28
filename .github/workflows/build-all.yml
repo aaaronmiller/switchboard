@@ -6,9 +6,13 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -31,7 +35,9 @@ jobs:
         run: npm ci
 
       - name: Build ${{ matrix.platform }}
-        run: npm run build:${{ matrix.platform }}
+        run: npm run build:${{ matrix.platform }} -- --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -47,6 +53,7 @@ jobs:
 
   release:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -54,21 +61,37 @@ jobs:
         with:
           path: artifacts
 
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get the tag
           TAG=${GITHUB_REF#refs/tags/}
-          
-          # Create release
-          gh release create $TAG \
+
+          # Collect all artifacts that exist (not all platforms produce all formats)
+          FILES=""
+          for f in artifacts/linux-build/*.AppImage \
+                   artifacts/linux-build/*.deb \
+                   artifacts/linux-build/*.rpm \
+                   artifacts/mac-build/*.dmg \
+                   artifacts/mac-build/*.zip \
+                   artifacts/win-build/*.exe \
+                   artifacts/win-build/*.zip; do
+            [ -f "$f" ] && FILES="$FILES $f"
+          done
+
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --title "Switchboard $TAG" \
-            --notes "Built from fork with auto-sync" \
-            artifacts/linux-build/*.AppImage \
-            artifacts/linux-build/*.deb \
-            artifacts/linux-build/*.rpm \
-            artifacts/mac-build/*.dmg \
-            artifacts/mac-build/*.zip \
-            artifacts/win-build/*.exe \
-            artifacts/win-build/*.zip
+            --notes "## What's New
+
+          - **Command Scheduler** — Visual workflow sequencer with 9 step types for orchestrating commands across multiple AI CLI sessions
+          - **20+ Built-in Patterns** — AI Orchestration, DevOps, and Utility recipes ready to use
+          - **Session Roles & Broadcast** — Tag sessions as @builder/@tester/@reviewer, mirror input to all
+          - **Macro Recording** — Capture keystrokes, auto-detect pauses, save as reusable patterns
+          - **Template Variables** — Dynamic patterns with built-in and user-defined variables
+
+          See [ROADMAP.md](https://github.com/aaaronmiller/switchboard/blob/main/ROADMAP.md) for upcoming features." \
+            $FILES
