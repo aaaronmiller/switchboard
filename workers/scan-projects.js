@@ -63,6 +63,11 @@ function readFolderFromFilesystem(folder) {
       let textContent = '';
       let slug = null;
       let customTitle = null;
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let cacheReadTokens = 0;
+      let cacheWriteTokens = 0;
+      let lastModel = null;
       try {
         const content = fs.readFileSync(filePath, 'utf8');
         const lines = content.split('\n').filter(Boolean);
@@ -75,6 +80,15 @@ function readFolderFromFilesystem(folder) {
           if (entry.type === 'user' || entry.type === 'assistant' ||
               (entry.type === 'message' && (entry.role === 'user' || entry.role === 'assistant'))) {
             messageCount++;
+          }
+          // Token accumulation from assistant messages (Claude JSONL format)
+          if (entry.type === 'assistant' && entry.message?.usage) {
+            const u = entry.message.usage;
+            inputTokens += u.input_tokens || 0;
+            outputTokens += u.output_tokens || 0;
+            cacheReadTokens += u.cache_read_input_tokens || 0;
+            cacheWriteTokens += u.cache_creation_input_tokens || 0;
+            if (entry.message.model) lastModel = entry.message.model;
           }
           const msg = entry.message;
           const text = typeof msg === 'string' ? msg :
@@ -95,6 +109,7 @@ function readFolderFromFilesystem(folder) {
         created: stat.birthtime.toISOString(),
         modified: stat.mtime.toISOString(),
         messageCount, textContent, slug, customTitle,
+        inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, model: lastModel,
       });
     }
   } catch {}

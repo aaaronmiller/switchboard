@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('api', {
   readMemory: (filePath) => ipcRenderer.invoke('read-memory', filePath),
   saveMemory: (filePath, content) => ipcRenderer.invoke('save-memory', filePath, content),
   getProjects: (showArchived) => ipcRenderer.invoke('get-projects', showArchived),
+  getAgentSessions: (agentId) => ipcRenderer.invoke('get-agent-sessions', agentId),
   getActiveSessions: () => ipcRenderer.invoke('get-active-sessions'),
   getActiveTerminals: () => ipcRenderer.invoke('get-active-terminals'),
   stopSession: (id) => ipcRenderer.invoke('stop-session', id),
@@ -21,6 +22,9 @@ contextBridge.exposeInMainWorld('api', {
   openTerminal: (id, projectPath, isNew, sessionOptions) => ipcRenderer.invoke('open-terminal', id, projectPath, isNew, sessionOptions),
   search: (type, query) => ipcRenderer.invoke('search', type, query),
   readSessionJsonl: (sessionId) => ipcRenderer.invoke('read-session-jsonl', sessionId),
+  readSessionConversation: (sessionId, filePath, agentId) => ipcRenderer.invoke('read-session-conversation', sessionId, filePath, agentId),
+  getSessionTokens: (sessionId) => ipcRenderer.invoke('get-session-tokens', sessionId),
+  getAllSessionTokens: () => ipcRenderer.invoke('get-all-session-tokens'),
 
   // Settings
   getSetting: (key) => ipcRenderer.invoke('get-setting', key),
@@ -35,6 +39,15 @@ contextBridge.exposeInMainWorld('api', {
   onHeadlessEvent: (callback) => {
     ipcRenderer.on('headless-event', (_event, sessionId, eventData) => callback(sessionId, eventData));
   },
+  onSessionActivity: (callback) => {
+    ipcRenderer.on('session-activity', (_event, sessionId, eventData) => callback(sessionId, eventData));
+  },
+  watchSessionFile: (sessionId, filePath, agentId) =>
+    ipcRenderer.invoke('watch-session-file', sessionId, filePath, agentId),
+  unwatchSessionFile: (sessionId) =>
+    ipcRenderer.invoke('unwatch-session-file', sessionId),
+  installActivityHook: () => ipcRenderer.invoke('install-activity-hook'),
+  checkActivityHook: () => ipcRenderer.invoke('check-activity-hook'),
 
   browseFolder: () => ipcRenderer.invoke('browse-folder'),
   addProject: (projectPath) => ipcRenderer.invoke('add-project', projectPath),
@@ -82,6 +95,16 @@ contextBridge.exposeInMainWorld('api', {
   // File drag-and-drop
   getPathForFile: (file) => webUtils.getPathForFile(file),
 
+  // Multi-window
+  detachSession: (sessionId) => ipcRenderer.invoke('detach-session', sessionId),
+  getWindowSessions: () => ipcRenderer.invoke('get-window-sessions'),
+  broadcastInput: (text) => ipcRenderer.invoke('broadcast-input', text),
+  getWindows: () => ipcRenderer.invoke('get-windows'),
+  focusWindow: (windowId) => ipcRenderer.invoke('focus-window', windowId),
+  onSessionDetached: (callback) => {
+    ipcRenderer.on('session-detached', (_event, sessionId, windowId) => callback(sessionId, windowId));
+  },
+
   // Platform
   platform: process.platform,
 
@@ -126,5 +149,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   onPeersChanged: (callback) => {
     ipcRenderer.on('peers-changed', () => callback());
+  },
+  onPanelZoom: (callback) => {
+    ipcRenderer.on('panel-zoom', (_event, direction) => callback(direction));
   },
 });

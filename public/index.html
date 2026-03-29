@@ -18,6 +18,7 @@
         <button class="sidebar-tab" data-tab="stats" title="Stats"><svg width="18" height="18" viewBox="0 0 512 512" fill="currentColor" stroke="currentColor" stroke-width="0"><path d="M128 496H48V304h80zm224 0h-80V208h80zm112 0h-80V96h80zm-224 0h-80V16h80z"/></svg></button>
         <button id="global-settings-btn" title="Global settings"></button>
       </div>
+      <div id="agent-selector" style="display:none;"></div>
       <div id="session-filters">
         <button id="running-toggle" title="Show running only"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="4"/></svg></button>
         <button id="star-toggle" title="Show pinned only"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707c-.28-.28-.576-.49-.888-.656L10.073 9.333l-.07 3.181a.5.5 0 0 1-.853.354l-3.535-3.536-4.243 4.243a.5.5 0 1 1-.707-.707l4.243-4.243L1.372 5.11a.5.5 0 0 1 .354-.854l3.18-.07L8.37.722A3.37 3.37 0 0 1 9.12.074a.5.5 0 0 1 .708.002l-.707.707z"/></svg></button>
@@ -25,6 +26,7 @@
         <button id="archive-toggle" title="Show archived sessions"></button>
         <span id="loading-status" style="display:none;"></span>
         <button id="resort-btn" title="Re-sort sessions"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg></button>
+        <button id="broadcast-btn" title="Broadcast command to all running sessions"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 8.35V20a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8.35A2 2 0 0 1 3.26 6.5l8-3.2a2 2 0 0 1 1.48 0l8 3.2A2 2 0 0 1 22 8.35Z"/><path d="M6 18h12"/><path d="M6 14h12"/><path d="M12 10h.01"/></svg></button>
         <button id="add-project-btn" title="Add project"><svg width="14" height="14" viewBox="0 0 512 512" fill="currentColor" stroke="currentColor" stroke-width="0"><path d="M512 416c0 35.3-28.7 64-64 64L64 480c-35.3 0-64-28.7-64-64L0 96C0 60.7 28.7 32 64 32l128 0c20.1 0 39.1 9.5 51.2 25.6l19.2 25.6c6 8.1 15.5 12.8 25.6 12.8l160 0c35.3 0 64 28.7 64 64l0 256zM232 376c0 13.3 10.7 24 24 24s24-10.7 24-24l0-64 64 0c13.3 0 24-10.7 24-24s-10.7-24-24-24l-64 0 0-64c0-13.3-10.7-24-24-24s-24 10.7-24 24l0 64-64 0c-13.3 0-24 10.7-24 24s10.7 24 24 24l64 0 0 64z"/></svg></button>
       </div>
     </div>
@@ -105,6 +107,8 @@
         </div>
         <div id="terminal-header-controls">
           <span id="terminal-header-status"></span>
+          <button id="terminal-compact-btn" title="Run /compact to summarize and compress context">/compact</button>
+          <button id="terminal-detach-btn" title="Pop out into new window">&#x2197;</button>
           <button id="terminal-stop-btn" title="Stop process">Stop</button>
           <button id="terminal-restart-btn" title="Restart session">Restart</button>
         </div>
@@ -116,9 +120,32 @@
         </div>
       </div>
       <div id="terminals"></div>
+      <div id="conversation-viewer" style="display:none;">
+        <div id="cv-header">
+          <div id="cv-header-info">
+            <span id="cv-session-name"></span>
+            <span id="cv-session-meta"></span>
+          </div>
+          <div id="cv-header-actions">
+            <button id="cv-export-md-btn" title="Export as Markdown">Export MD</button>
+            <button id="cv-copy-btn" title="Copy to clipboard">Copy</button>
+            <button id="cv-resume-btn" title="Resume this session">Resume</button>
+          </div>
+        </div>
+        <div id="cv-messages"></div>
+      </div>
     </div>
   </div>
   </div><!-- /app-container -->
+  <!-- Command Palette (Ctrl+K) -->
+  <div id="cmd-palette" style="display:none;">
+    <div id="cmd-palette-backdrop"></div>
+    <div id="cmd-palette-dialog">
+      <input id="cmd-palette-input" type="text" placeholder="Search sessions, projects, or run a command…" autocomplete="off" spellcheck="false">
+      <div id="cmd-palette-results"></div>
+    </div>
+  </div>
+
   <div id="update-toast" class="hidden">
     <span id="update-toast-msg">Update ready — restart to apply</span>
     <button id="update-restart-btn">Restart</button>

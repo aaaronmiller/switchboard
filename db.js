@@ -323,6 +323,68 @@ function deleteSetting(key) {
   stmts.settingsDelete.run(key);
 }
 
+// --- Token tracking ---
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS session_tokens (
+    sessionId TEXT PRIMARY KEY,
+    inputTokens INTEGER DEFAULT 0,
+    outputTokens INTEGER DEFAULT 0,
+    cacheReadTokens INTEGER DEFAULT 0,
+    cacheWriteTokens INTEGER DEFAULT 0,
+    model TEXT,
+    updatedAt TEXT
+  )
+`);
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_session_tokens_model ON session_tokens(model)');
+
+const tokenStmts = {
+  upsert: db.prepare(`
+    INSERT INTO session_tokens (sessionId, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, model, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(sessionId) DO UPDATE SET
+      inputTokens = excluded.inputTokens,
+      outputTokens = excluded.outputTokens,
+      cacheReadTokens = excluded.cacheReadTokens,
+      cacheWriteTokens = excluded.cacheWriteTokens,
+      model = excluded.model,
+      updatedAt = excluded.updatedAt
+  `),
+  get: db.prepare('SELECT * FROM session_tokens WHERE sessionId = ?'),
+  getAll: db.prepare('SELECT * FROM session_tokens'),
+  delete: db.prepare('DELETE FROM session_tokens WHERE sessionId = ?'),
+};
+
+const upsertTokensBatch = db.transaction((entries) => {
+  for (const e of entries) {
+    tokenStmts.upsert.run(
+      e.sessionId, e.inputTokens || 0, e.outputTokens || 0,
+      e.cacheReadTokens || 0, e.cacheWriteTokens || 0,
+      e.model || null, e.updatedAt || new Date().toISOString()
+    );
+  }
+});
+
+function upsertSessionTokens(entries) {
+  upsertTokensBatch(entries);
+}
+
+function getSessionTokens(sessionId) {
+  return tokenStmts.get.get(sessionId) || null;
+}
+
+function getAllSessionTokens() {
+  const rows = tokenStmts.getAll.all();
+  const map = new Map();
+  for (const row of rows) map.set(row.sessionId, row);
+  return map;
+}
+
+function deleteSessionTokens(sessionId) {
+  tokenStmts.delete.run(sessionId);
+}
+
 // --- Peers broker tables ---
 
 db.exec(`
@@ -465,6 +527,8 @@ module.exports = {
   searchByType, isSearchIndexPopulated,
   getSetting, setSetting, deleteSetting,
   closeDb,
+  // Token tracking
+  upsertSessionTokens, getSessionTokens, getAllSessionTokens, deleteSessionTokens,
   // Peers broker
   peerRegister, peerHeartbeat, peerSetSummary, peerUnregister, peerUnregisterBySession,
   peerListAll, peerListByDir, peerListByRepo, peerGetById,

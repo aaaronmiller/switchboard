@@ -38,6 +38,83 @@ const planSaveBtn = document.getElementById('plan-save-btn');
 const planPreviewBtn = document.getElementById('plan-preview-btn');
 const planViewerPreviewEl = document.getElementById('plan-viewer-preview');
 
+// --- Independent panel zoom ---
+let sidebarZoom = parseFloat(localStorage.getItem('sidebarZoom') || '1');
+let mainZoom = parseFloat(localStorage.getItem('mainZoom') || '1');
+let hoverPanel = 'main'; // which panel the cursor is over
+
+const sidebar = document.getElementById('sidebar');
+const mainEl = document.getElementById('main');
+
+function applyZoom() {
+  sidebar.style.zoom = sidebarZoom;
+  mainEl.style.zoom = mainZoom;
+  localStorage.setItem('sidebarZoom', sidebarZoom);
+  localStorage.setItem('mainZoom', mainZoom);
+}
+applyZoom();
+
+// Track which panel the mouse is over
+sidebar.addEventListener('mouseenter', () => { hoverPanel = 'sidebar'; });
+mainEl.addEventListener('mouseenter', () => { hoverPanel = 'main'; });
+
+function panelZoom(direction) {
+  const step = 0.05;
+  if (hoverPanel === 'sidebar') {
+    if (direction === 'in') sidebarZoom = Math.min(3, sidebarZoom + step);
+    else if (direction === 'out') sidebarZoom = Math.max(0.4, sidebarZoom - step);
+    else sidebarZoom = 1;
+  } else {
+    if (direction === 'in') mainZoom = Math.min(3, mainZoom + step);
+    else if (direction === 'out') mainZoom = Math.max(0.4, mainZoom - step);
+    else mainZoom = 1;
+  }
+  applyZoom();
+}
+
+// Ctrl+scroll for per-panel zoom
+document.addEventListener('wheel', (e) => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  panelZoom(e.deltaY < 0 ? 'in' : 'out');
+}, { passive: false });
+
+// Menu-driven zoom (Ctrl+/-, Ctrl+0) via IPC
+window.api.onPanelZoom((direction) => panelZoom(direction));
+
+// --- Global brightness controls ---
+let iconBrightness = parseFloat(localStorage.getItem('iconBrightness') || '1');
+let borderBrightness = parseFloat(localStorage.getItem('borderBrightness') || '1');
+
+function applyBrightness() {
+  document.documentElement.style.setProperty('--icon-brightness', iconBrightness);
+  // For borders: inject/update a dynamic style that scales all border opacities
+  let borderStyle = document.getElementById('border-brightness-style');
+  if (!borderStyle) {
+    borderStyle = document.createElement('style');
+    borderStyle.id = 'border-brightness-style';
+    document.head.appendChild(borderStyle);
+  }
+  // Scale factor: 1 = default, >1 = brighter borders, <1 = dimmer
+  const b = borderBrightness;
+  borderStyle.textContent = `
+    #sidebar, #sidebar *, #terminal-header, #terminal-header *,
+    .session-item, .session-actions button, .tab-btn,
+    .toolbar button, .project-group, .settings-field,
+    .settings-input, .settings-select, .peers-popover,
+    .peer-toast, .filter-btn, #search-input, #jsonl-viewer,
+    .file-panel-header, .diff-toolbar, .memory-toolbar,
+    .plan-toolbar, #grid-viewer-header {
+      border-color: rgba(255, 255, 255, ${(0.06 * b).toFixed(3)}) !important;
+    }
+    .session-item:hover, .tab-btn:hover, .filter-btn.active {
+      border-color: rgba(255, 255, 255, ${(0.12 * b).toFixed(3)}) !important;
+    }
+  `;
+}
+
+applyBrightness();
+
 let currentPlanContent = '';
 let currentPlanFilePath = '';
 let currentPlanFilename = '';
@@ -101,9 +178,13 @@ let cachedProjects = [];
 let cachedAllProjects = [];
 let activePtyIds = new Set();
 let sessionAgentMap = new Map(); // sessionId → cliAgent id
+let tokenCache = {}; // sessionId → { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, model, costCents }
 let headlessState = new Map(); // sessionId → { events: [], lastAction: '', startTime }
 let sortedOrder = []; // [{ projectPath, itemIds: [itemId, ...] }, ...] — single source of truth for sidebar order
 let activeTab = 'sessions';
+let activeAgent = localStorage.getItem('activeAgent') || 'claude'; // which CLI agent's sessions to show
+let cachedAgentProjects = new Map(); // agentId → projects[] cache
+let installedAgents = {}; // populated on init
 let cachedPlans = [];
 let visibleSessionCount = 10;
 let sessionMaxAgeDays = 3;
@@ -124,6 +205,7 @@ let searchMatchIds = null; // null = no search active; Set<string> = matched ses
 const attentionSessions = new Set(); // sessions needing user action (OSC 9)
 const responseReadySessions = new Set(); // Claude finished, user hasn't looked (terminal state)
 const sessionBusyState = new Map(); // sessionId → boolean (currently active)
+const errorSessions = new Set(); // sessions that errored out / API issues / non-zero exit
 const lastActivityTime = new Map(); // sessionId → Date of last terminal output
 
 // Noise patterns — these don't count as activity
@@ -137,6 +219,13 @@ function setActivity(sessionId, active) {
 
   const wasActive = sessionBusyState.get(sessionId) || false;
   sessionBusyState.set(sessionId, active);
+
+  // Clear error state when session becomes active again (restarted/recovered)
+  if (active && errorSessions.has(sessionId)) {
+    errorSessions.delete(sessionId);
+    const errItem = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
+    if (errItem) errItem.classList.remove('session-error');
+  }
 
   if (wasActive && !active) {
     // Activity ended → response-ready if user isn't looking at this session
@@ -158,9 +247,19 @@ function setActivity(sessionId, active) {
 }
 
 // Terminal output activity — updates lastActivityTime only, busy state driven by backend
+// Patterns that indicate API errors, rate limits, auth failures, or crashes
+const errorPatterns = /overloaded|rate.limit|exceeded|api.error|unauthorized|authentication.failed|invalid.api.key|quota|529|503|502|500.*error|credit|billing|internal.server.error/i;
+
 function trackActivity(sessionId, data) {
   if (activityNoiseRe.test(data)) return;
   lastActivityTime.set(sessionId, new Date());
+
+  // Detect API/auth errors in terminal output
+  if (errorPatterns.test(data)) {
+    errorSessions.add(sessionId);
+    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
+    if (item) item.classList.add('session-error');
+  }
 }
 
 function clearUnread(sessionId) {
@@ -460,6 +559,13 @@ window.api.onProcessExited((sessionId, exitCode) => {
     entry.closed = true;
   }
 
+  // Mark as errored if non-zero exit (crash, API failure, etc.)
+  if (exitCode !== 0 && exitCode != null) {
+    errorSessions.add(sessionId);
+    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
+    if (item) item.classList.add('session-error');
+  }
+
   // Clean up terminal UI on exit (uses destroySession to handle grid cards too)
   if (entry) {
     destroySession(sessionId);
@@ -469,6 +575,7 @@ window.api.onProcessExited((sessionId, exitCode) => {
   } else if (activeSessionId === sessionId) {
     setActiveSession(null);
     terminalHeader.style.display = 'none';
+    hideConversationViewer();
     placeholder.style.display = '';
   }
 
@@ -564,6 +671,40 @@ window.api.onHeadlessEvent((sessionId, event) => {
   updateHeadlessSparkline(sessionId, state);
 
   // Live-update log panel if it's open for this session
+  if (window._headlessLogUpdater) {
+    window._headlessLogUpdater(sessionId, event);
+  }
+});
+
+// --- Hook-based + file-watcher session activity (all CLIs) ---
+window.api.onSessionActivity((sessionId, event) => {
+  let state = headlessState.get(sessionId);
+  if (!state) {
+    state = { events: [], lastAction: '', startTime: Date.now() };
+    headlessState.set(sessionId, state);
+  }
+
+  state.events.push(event);
+  if (state.events.length > 50) state.events.shift();
+
+  if (event.type === 'tool_start' || event.type === 'tool_use') {
+    state.lastAction = event.name || 'tool';
+    state.lastActionTime = event.ts;
+  } else if (event.type === 'text') {
+    state.lastAction = event.text?.slice(0, 40) || 'thinking...';
+    state.lastActionTime = event.ts;
+  } else if (event.type === 'error') {
+    state.lastAction = 'error: ' + (event.text || '').slice(0, 30);
+    state.lastActionTime = event.ts;
+    // Mark session as errored
+    errorSessions.add(sessionId);
+    const errItem = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
+    if (errItem) errItem.classList.add('session-error');
+  }
+
+  // Update sparkline (reuses same function — works for any session type)
+  updateHeadlessSparkline(sessionId, state);
+
   if (window._headlessLogUpdater) {
     window._headlessLogUpdater(sessionId, event);
   }
@@ -778,6 +919,21 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function formatTokenCount(n) {
+  if (!n) return '0';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
+  return String(n);
+}
+
+function formatCentsCost(cents) {
+  if (!cents || cents === 0) return null;
+  if (cents < 1) return '<$0.01';
+  const dollars = cents / 100;
+  if (dollars >= 1) return '$' + dollars.toFixed(2);
+  return '$0.' + String(cents).padStart(2, '0');
+}
+
 function showPeersPopover(sessionId, anchorEl) {
   // Remove any existing popover
   document.querySelectorAll('.peers-popover').forEach(p => p.remove());
@@ -865,19 +1021,53 @@ archiveToggle.addEventListener('click', () => {
 });
 
 // --- Star filter toggle ---
-starToggle.addEventListener('click', () => {
-  showStarredOnly = !showStarredOnly;
-  if (showStarredOnly) { showRunningOnly = false; runningToggle.classList.remove('active'); }
-  starToggle.classList.toggle('active', showStarredOnly);
-  refreshSidebar({ resort: true });
+// Clicking star now switches to the "_pinned" meta-view (or back to previous agent)
+starToggle.addEventListener('click', async () => {
+  const container = document.getElementById('agent-selector');
+  if (activeAgent === '_pinned') {
+    // Toggle off — go back to Claude
+    showStarredOnly = false;
+    starToggle.classList.remove('active');
+    const prevAgent = localStorage.getItem('prevAgent') || 'claude';
+    activeAgent = prevAgent;
+    localStorage.setItem('activeAgent', prevAgent);
+    if (container) container.querySelectorAll('.agent-selector-btn').forEach(b => b.classList.toggle('active', b.dataset.agent === prevAgent));
+    loadProjectsForAgent();
+  } else {
+    // Toggle on — switch to pinned meta-view
+    localStorage.setItem('prevAgent', activeAgent);
+    showStarredOnly = true; showRunningOnly = false;
+    starToggle.classList.add('active'); runningToggle.classList.remove('active');
+    activeAgent = '_pinned';
+    localStorage.setItem('activeAgent', '_pinned');
+    if (container) container.querySelectorAll('.agent-selector-btn').forEach(b => b.classList.toggle('active', b.dataset.agent === '_pinned'));
+    loadMetaView('_pinned');
+  }
 });
 
 // --- Running filter toggle ---
+// Clicking running now switches to the "_active" meta-view (or back)
 runningToggle.addEventListener('click', () => {
-  showRunningOnly = !showRunningOnly;
-  if (showRunningOnly) { showStarredOnly = false; starToggle.classList.remove('active'); }
-  runningToggle.classList.toggle('active', showRunningOnly);
-  refreshSidebar({ resort: true });
+  const container = document.getElementById('agent-selector');
+  if (activeAgent === '_active') {
+    // Toggle off — go back to previous agent
+    showRunningOnly = false;
+    runningToggle.classList.remove('active');
+    const prevAgent = localStorage.getItem('prevAgent') || 'claude';
+    activeAgent = prevAgent;
+    localStorage.setItem('activeAgent', prevAgent);
+    if (container) container.querySelectorAll('.agent-selector-btn').forEach(b => b.classList.toggle('active', b.dataset.agent === prevAgent));
+    loadProjectsForAgent();
+  } else {
+    // Toggle on — switch to active meta-view
+    localStorage.setItem('prevAgent', activeAgent);
+    showRunningOnly = true; showStarredOnly = false;
+    runningToggle.classList.add('active'); starToggle.classList.remove('active');
+    activeAgent = '_active';
+    localStorage.setItem('activeAgent', '_active');
+    if (container) container.querySelectorAll('.agent-selector-btn').forEach(b => b.classList.toggle('active', b.dataset.agent === '_active'));
+    loadMetaView('_active');
+  }
 });
 
 // --- Today filter toggle ---
@@ -981,14 +1171,35 @@ terminalRestartBtn.addEventListener('click', () => {
   openSession(entry.session);
 });
 
+const terminalCompactBtn = document.getElementById('terminal-compact-btn');
+terminalCompactBtn.addEventListener('click', () => {
+  if (!activeSessionId || !activePtyIds.has(activeSessionId)) return;
+  window.api.sendInput(activeSessionId, '/compact\r');
+});
+
+const terminalDetachBtn = document.getElementById('terminal-detach-btn');
+terminalDetachBtn.addEventListener('click', async () => {
+  if (!activeSessionId) return;
+  const result = await window.api.detachSession(activeSessionId);
+  if (!result.ok) {
+    statusBarActivity.textContent = 'Failed to detach: ' + (result.error || 'unknown');
+    setTimeout(() => { statusBarActivity.textContent = ''; }, 4000);
+  }
+});
+
 // --- Poll for active PTY sessions ---
 async function pollActiveSessions() {
   try {
     const sessions = await window.api.getActiveSessions();
+    const prevSize = activePtyIds.size;
     activePtyIds = new Set(sessions.map(s => s.sessionId));
     for (const s of sessions) sessionAgentMap.set(s.sessionId, s.cliAgent);
     updateRunningIndicators();
     updateTerminalHeader();
+    // Auto-refresh the "Active" meta-view when PTY count changes
+    if (activeAgent === '_active' && activePtyIds.size !== prevSize) {
+      loadMetaView('_active');
+    }
   } catch {}
 }
 
@@ -1028,9 +1239,12 @@ function updateRunningIndicators() {
 function updateTerminalHeader() {
   if (!activeSessionId) return;
   const running = activePtyIds.has(activeSessionId);
+  const agentId = sessionAgentMap.get(activeSessionId) || 'claude';
   terminalHeaderStatus.className = running ? 'running' : 'stopped';
   terminalHeaderStatus.textContent = running ? 'Running' : 'Stopped';
   terminalStopBtn.style.display = running ? '' : 'none';
+  // /compact only relevant for running Claude sessions
+  terminalCompactBtn.style.display = (running && agentId === 'claude') ? '' : 'none';
   updatePtyTitle();
 }
 
@@ -1679,6 +1893,7 @@ function buildSessionItem(session) {
   if (session.archived) item.classList.add('archived-item');
   if (activePtyIds.has(session.sessionId)) item.classList.add('has-running-pty');
   if (attentionSessions.has(session.sessionId)) item.classList.add('needs-attention');
+  if (errorSessions.has(session.sessionId)) item.classList.add('session-error');
   if (responseReadySessions.has(session.sessionId)) item.classList.add('response-ready');
   if (sessionBusyState.get(session.sessionId)) item.classList.add('cli-busy');
   item.dataset.sessionId = session.sessionId;
@@ -1715,7 +1930,15 @@ function buildSessionItem(session) {
 
   const metaEl = document.createElement('div');
   metaEl.className = 'session-meta';
-  metaEl.textContent = timeStr + (session.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '');
+  let metaText = timeStr + (session.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '');
+  const tok = tokenCache[session.sessionId];
+  if (tok) {
+    const totalTok = (tok.inputTokens || 0) + (tok.outputTokens || 0);
+    if (totalTok > 0) metaText += ' \u00b7 ' + formatTokenCount(totalTok);
+    const cost = formatCentsCost(tok.costCents);
+    if (cost) metaText += ' \u00b7 ' + cost;
+  }
+  metaEl.textContent = metaText;
 
   if (session.type === 'terminal') {
     const badge = document.createElement('span');
@@ -1746,8 +1969,8 @@ function buildSessionItem(session) {
   info.appendChild(idEl);
   info.appendChild(metaEl);
 
-  // Headless sparkline row
-  if (session.type === 'headless') {
+  // Activity sparkline row — shown for ANY session with tool activity (headless, PTY, or file-watched)
+  {
     const sparkline = document.createElement('div');
     sparkline.className = 'headless-sparkline';
     sparkline.id = 'sparkline-' + session.sessionId;
@@ -1939,9 +2162,13 @@ async function showTerminalHeader(session) {
     peersBtn = document.createElement('button');
     peersBtn.className = 'terminal-header-peers-btn';
     peersBtn.title = 'Send message to peers';
-    peersBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-    const headerRight = terminalHeader.querySelector('.terminal-header-status')?.parentElement || terminalHeader;
-    headerRight.appendChild(peersBtn);
+    peersBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Peers';
+    const headerControls = document.getElementById('terminal-header-controls');
+    if (headerControls) {
+      headerControls.insertBefore(peersBtn, headerControls.firstChild);
+    } else {
+      terminalHeader.appendChild(peersBtn);
+    }
   }
   peersBtn.onclick = async () => {
     await refreshPeers();
@@ -2082,6 +2309,7 @@ function showSession(sessionId) {
     document.querySelectorAll('.terminal-container').forEach(el => el.classList.remove('visible'));
     placeholder.style.display = 'none';
     hidePlanViewer();
+    hideConversationViewer();
 
     // Remove any existing headless log panel
     const oldLog = document.getElementById('headless-log-panel');
@@ -2135,6 +2363,14 @@ async function openSession(session) {
     return;
   }
 
+  // Non-running historical sessions → show conversation viewer instead of spawning terminal
+  const isRunning = activePtyIds.has(sessionId);
+  if (!isRunning && session.type !== 'terminal') {
+    activeSessionId = sessionId;
+    await showConversationViewer(session);
+    return;
+  }
+
   // If already open, handle closed-session cleanup or just show it
   if (openSessions.has(sessionId)) {
     const entry = openSessions.get(sessionId);
@@ -2163,6 +2399,338 @@ async function openSession(session) {
   }
   if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
 
+  showSession(sessionId);
+  pollActiveSessions();
+}
+
+// ============================================================
+// CONVERSATION VIEWER
+// Shows historical sessions without spawning a terminal.
+// ============================================================
+
+const cvPanel = document.getElementById('conversation-viewer');
+const cvMessages = document.getElementById('cv-messages');
+const cvSessionName = document.getElementById('cv-session-name');
+const cvSessionMeta = document.getElementById('cv-session-meta');
+const cvExportMdBtn = document.getElementById('cv-export-md-btn');
+const cvCopyBtn = document.getElementById('cv-copy-btn');
+const cvResumeBtn = document.getElementById('cv-resume-btn');
+
+let cvCurrentSession = null;
+let cvCurrentMessages = [];
+
+function hideConversationViewer() {
+  cvPanel.style.display = 'none';
+  cvCurrentSession = null;
+  cvCurrentMessages = [];
+}
+
+async function showConversationViewer(session) {
+  // Update sidebar active state
+  document.querySelectorAll('.session-item.active').forEach(el => el.classList.remove('active'));
+  const item = document.querySelector(`[data-session-id="${session.sessionId}"]`);
+  if (item) item.classList.add('active');
+  setActiveSession(session.sessionId);
+
+  // Hide terminal/placeholder, show viewer
+  placeholder.style.display = 'none';
+  terminalHeader.style.display = 'none';
+  hidePlanViewer();
+  for (const entry of openSessions.values()) entry.element.classList.remove('visible');
+  cvPanel.style.display = 'flex';
+
+  cvCurrentSession = session;
+  cvSessionName.textContent = cleanDisplayName(session.name || session.sessionId);
+  cvSessionMeta.textContent = '';
+  cvMessages.innerHTML = '<div class="cv-loading">Loading conversation…</div>';
+
+  const agentId = session.agent || sessionAgentMap.get(session.sessionId) || 'claude';
+  const result = await window.api.readSessionConversation(session.sessionId, session.file || null, agentId);
+
+  if (result.error) {
+    cvMessages.innerHTML = `<div class="cv-error">Could not load conversation: ${escapeHtml(result.error)}</div>`;
+    return;
+  }
+
+  cvCurrentMessages = result.messages || [];
+  renderConversationMessages(cvCurrentMessages, agentId);
+
+  // Meta: message counts + token/cost from cache
+  const userCount = cvCurrentMessages.filter(m => m.role === 'user').length;
+  const toolCount = cvCurrentMessages.reduce((n, m) => n + (m.tools?.length || 0), 0);
+  const parts = [`${userCount} turns`];
+  if (toolCount > 0) parts.push(`${toolCount} tool calls`);
+  const tok = tokenCache[session.sessionId];
+  if (tok) {
+    const totalTok = (tok.inputTokens || 0) + (tok.outputTokens || 0);
+    if (totalTok > 0) parts.push(formatTokenCount(totalTok) + ' tokens');
+    if (tok.costCents > 0) parts.push(formatCentsCost(tok.costCents));
+    if (tok.model) parts.push(tok.model.replace('claude-', '').replace(/-\d{8}$/, ''));
+  }
+  cvSessionMeta.textContent = parts.join(' · ');
+
+  // Update header for main area
+  updateTerminalHeader();
+}
+
+function renderConversationMessages(messages, agentId) {
+  if (messages.length === 0) {
+    cvMessages.innerHTML = '<div class="cv-empty">No messages found in this session.</div>';
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+
+  for (const msg of messages) {
+    const el = buildMessageEl(msg);
+    if (el) frag.appendChild(el);
+  }
+
+  cvMessages.innerHTML = '';
+  cvMessages.appendChild(frag);
+}
+
+function buildMessageEl(msg) {
+  if (msg.role === 'summary') {
+    const el = document.createElement('div');
+    el.className = 'cv-summary';
+    el.innerHTML = `<span class="cv-summary-label">⟳ Compacted</span><span class="cv-summary-text">${escapeHtml(msg.text)}</span>`;
+    return el;
+  }
+
+  if (msg.role === 'system') {
+    const el = document.createElement('div');
+    el.className = 'cv-system';
+    el.textContent = msg.text;
+    return el;
+  }
+
+  const el = document.createElement('div');
+  el.className = `cv-message cv-${msg.role}`;
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'cv-msg-header';
+  const roleLabel = document.createElement('span');
+  roleLabel.className = 'cv-msg-role';
+  roleLabel.textContent = msg.role === 'user' ? 'You' : 'Assistant';
+  header.appendChild(roleLabel);
+
+  if (msg.ts) {
+    const timeEl = document.createElement('span');
+    timeEl.className = 'cv-msg-time';
+    try { timeEl.textContent = new Date(msg.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch {}
+    header.appendChild(timeEl);
+  }
+  if (msg.model) {
+    const modelEl = document.createElement('span');
+    modelEl.className = 'cv-msg-model';
+    modelEl.textContent = msg.model.replace('claude-', '').replace(/-\d{8}$/, '');
+    header.appendChild(modelEl);
+  }
+  el.appendChild(header);
+
+  // Text body
+  if (msg.text) {
+    const body = document.createElement('div');
+    body.className = 'cv-msg-body';
+    body.innerHTML = renderMarkdownLite(msg.text);
+    el.appendChild(body);
+  }
+
+  // Tool calls
+  if (msg.tools && msg.tools.length > 0) {
+    const toolsEl = document.createElement('div');
+    toolsEl.className = 'cv-tools';
+    for (const tool of msg.tools) {
+      toolsEl.appendChild(buildToolCallEl(tool));
+    }
+    el.appendChild(toolsEl);
+  }
+
+  // Token usage badge
+  if (msg.usage) {
+    const usage = document.createElement('div');
+    usage.className = 'cv-usage';
+    usage.textContent = `↑${msg.usage.input_tokens?.toLocaleString() || 0} ↓${msg.usage.output_tokens?.toLocaleString() || 0} tokens`;
+    el.appendChild(usage);
+  }
+
+  return el;
+}
+
+function buildToolCallEl(tool) {
+  const el = document.createElement('details');
+  el.className = 'cv-tool';
+
+  const summary = document.createElement('summary');
+  summary.className = 'cv-tool-summary';
+
+  const nameEl = document.createElement('span');
+  nameEl.className = 'cv-tool-name';
+  nameEl.textContent = tool.name;
+
+  // Quick preview of first input key
+  const inputKeys = tool.input ? Object.keys(tool.input) : [];
+  if (inputKeys.length > 0) {
+    const preview = document.createElement('span');
+    preview.className = 'cv-tool-preview';
+    const val = tool.input[inputKeys[0]];
+    const previewText = typeof val === 'string' ? val.slice(0, 60) : JSON.stringify(val).slice(0, 60);
+    preview.textContent = previewText + (previewText.length >= 60 ? '…' : '');
+    summary.appendChild(nameEl);
+    summary.appendChild(preview);
+  } else {
+    summary.appendChild(nameEl);
+  }
+
+  if (tool.result?.isError) {
+    const errBadge = document.createElement('span');
+    errBadge.className = 'cv-tool-err-badge';
+    errBadge.textContent = 'error';
+    summary.appendChild(errBadge);
+  }
+
+  el.appendChild(summary);
+
+  // Input
+  if (inputKeys.length > 0) {
+    const inputEl = document.createElement('div');
+    inputEl.className = 'cv-tool-input';
+    inputEl.innerHTML = `<pre>${escapeHtml(JSON.stringify(tool.input, null, 2))}</pre>`;
+    el.appendChild(inputEl);
+  }
+
+  // Result
+  if (tool.result) {
+    const resultEl = document.createElement('div');
+    resultEl.className = `cv-tool-result${tool.result.isError ? ' cv-tool-result-error' : ''}`;
+    const resultText = tool.result.text || '';
+    // Truncate very long results
+    const display = resultText.length > 2000 ? resultText.slice(0, 2000) + `\n… (${resultText.length - 2000} chars truncated)` : resultText;
+    resultEl.innerHTML = `<pre>${escapeHtml(display)}</pre>`;
+    el.appendChild(resultEl);
+  }
+
+  return el;
+}
+
+// Lightweight markdown renderer — handles code blocks, bold, italic, inline code, headers
+function renderMarkdownLite(text) {
+  if (!text) return '';
+  let html = escapeHtml(text);
+
+  // Fenced code blocks (```lang\n...\n```)
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre class="cv-code-block${lang ? ' lang-' + lang : ''}">${code}</pre>`
+  );
+
+  // Inline code
+  html = html.replace(/`([^`\n]+)`/g, '<code class="cv-inline-code">$1</code>');
+
+  // Headers
+  html = html.replace(/^### (.+)$/gm, '<h3 class="cv-h3">$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2 class="cv-h2">$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1 class="cv-h1">$1</h1>');
+
+  // Bold / italic
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+  // Paragraphs (double newline → paragraph break)
+  html = html.replace(/\n\n+/g, '</p><p>');
+  html = '<p>' + html + '</p>';
+
+  // Single newlines → <br> inside paragraphs
+  html = html.replace(/\n/g, '<br>');
+
+  return html;
+}
+
+// Export conversation as Markdown
+function conversationToMarkdown(messages, sessionName) {
+  const lines = [`# ${sessionName || 'Conversation'}\n`];
+  for (const msg of messages) {
+    if (msg.role === 'summary') {
+      lines.push(`---\n> **[Compacted]** ${msg.text}\n---\n`);
+      continue;
+    }
+    if (msg.role === 'system') {
+      lines.push(`> *System: ${msg.text}*\n`);
+      continue;
+    }
+    const label = msg.role === 'user' ? '## You' : '## Assistant';
+    lines.push(label);
+    if (msg.text) lines.push(msg.text);
+    if (msg.tools && msg.tools.length > 0) {
+      for (const tool of msg.tools) {
+        lines.push(`\n**Tool: \`${tool.name}\`**`);
+        if (Object.keys(tool.input || {}).length > 0) {
+          lines.push('```json\n' + JSON.stringify(tool.input, null, 2) + '\n```');
+        }
+        if (tool.result?.text) {
+          lines.push('**Result:**');
+          lines.push('```\n' + tool.result.text.slice(0, 1000) + '\n```');
+        }
+      }
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+// Wire up export/copy/resume buttons
+cvExportMdBtn.addEventListener('click', async () => {
+  if (!cvCurrentMessages.length) return;
+  const md = conversationToMarkdown(cvCurrentMessages, cvCurrentSession?.name || cvCurrentSession?.sessionId);
+  const blob = new Blob([md], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${cvCurrentSession?.sessionId || 'conversation'}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+cvCopyBtn.addEventListener('click', async () => {
+  if (!cvCurrentMessages.length) return;
+  const md = conversationToMarkdown(cvCurrentMessages, cvCurrentSession?.name || cvCurrentSession?.sessionId);
+  try {
+    await navigator.clipboard.writeText(md);
+    cvCopyBtn.textContent = 'Copied!';
+    setTimeout(() => { cvCopyBtn.textContent = 'Copy'; }, 2000);
+  } catch {}
+});
+
+cvResumeBtn.addEventListener('click', async () => {
+  if (!cvCurrentSession) return;
+  hideConversationViewer();
+  // Force terminal open even though session isn't in activePtyIds yet
+  activeSessionId = cvCurrentSession.sessionId;
+  const session = sessionMap.get(cvCurrentSession.sessionId) || cvCurrentSession;
+  // Temporarily mark as running type so openSession goes to terminal path
+  const originalType = session.type;
+  session._forceTerminal = true;
+  await openSessionForced(session);
+  session._forceTerminal = false;
+});
+
+// Open session directly as terminal (bypass conversation viewer)
+async function openSessionForced(session) {
+  const { sessionId, projectPath } = session;
+  if (openSessions.has(sessionId)) {
+    showSession(sessionId);
+    return;
+  }
+  const entry = createTerminalEntry(session);
+  const resumeOptions = await resolveDefaultSessionOptions({ projectPath });
+  const result = await window.api.openTerminal(sessionId, projectPath, false, resumeOptions);
+  if (!result.ok) {
+    entry.terminal.write(`\r\nError: ${result.error}\r\n`);
+    entry.closed = true;
+    return;
+  }
+  if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
   showSession(sessionId);
   pollActiveSessions();
 }
@@ -2255,6 +2823,9 @@ document.querySelectorAll('.sidebar-tab').forEach(tab => {
     memoryContent.style.display = 'none';
     sessionFilters.style.display = 'none';
     searchBar.style.display = 'none';
+
+    const agentSelector = document.getElementById('agent-selector');
+    if (agentSelector) agentSelector.style.display = tabName === 'sessions' ? '' : 'none';
 
     if (tabName === 'sessions') {
       sessionFilters.style.display = '';
@@ -3774,16 +4345,35 @@ async function showNewSessionPopover(project, anchorEl) {
   termBtn.onclick = () => { popover.remove(); launchTerminalSession(project); };
   popover.appendChild(termBtn);
 
-  // Position relative to anchor, flip upward if it would overflow
+  // Position relative to anchor — try below, flip above, clamp to viewport
   document.body.appendChild(popover);
   const rect = anchorEl.getBoundingClientRect();
   const popoverHeight = popover.offsetHeight;
-  if (rect.bottom + 4 + popoverHeight > window.innerHeight) {
-    popover.style.top = (rect.top - popoverHeight - 4) + 'px';
+  const popoverWidth = popover.offsetWidth;
+  let top, left;
+
+  if (rect.bottom + 4 + popoverHeight <= window.innerHeight) {
+    // Fits below the anchor
+    top = rect.bottom + 4;
+  } else if (rect.top - popoverHeight - 4 >= 0) {
+    // Fits above the anchor
+    top = rect.top - popoverHeight - 4;
   } else {
-    popover.style.top = (rect.bottom + 4) + 'px';
+    // Doesn't fit above or below — clamp to viewport with padding
+    top = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - popoverHeight - 8));
   }
-  popover.style.left = rect.left + 'px';
+
+  left = rect.left;
+  // Clamp horizontally too
+  if (left + popoverWidth > window.innerWidth - 8) {
+    left = window.innerWidth - popoverWidth - 8;
+  }
+  if (left < 8) left = 8;
+
+  popover.style.top = top + 'px';
+  popover.style.left = left + 'px';
+  popover.style.maxHeight = (window.innerHeight - 16) + 'px';
+  popover.style.overflowY = 'auto';
 
   // Close on click outside
   function onClickOutside(e) {
@@ -3855,6 +4445,9 @@ function showHeadlessPromptDialog(project) {
       Headless Session
     </h3>
     <textarea placeholder="Enter your prompt for Claude..." autofocus></textarea>
+    <div class="headless-prompt-options">
+      <label class="headless-option"><input type="checkbox" id="headless-bare"> <span>Bare mode</span> <span class="headless-option-hint">Skip hooks &amp; LSP</span></label>
+    </div>
     <div class="headless-prompt-actions">
       <button class="headless-cancel-btn">Cancel</button>
       <button class="headless-start-btn">Start</button>
@@ -3862,6 +4455,7 @@ function showHeadlessPromptDialog(project) {
   `;
 
   const textarea = dialog.querySelector('textarea');
+  const bareCheckbox = dialog.querySelector('#headless-bare');
   const startBtn = dialog.querySelector('.headless-start-btn');
   const cancelBtn = dialog.querySelector('.headless-cancel-btn');
 
@@ -3871,8 +4465,9 @@ function showHeadlessPromptDialog(project) {
   startBtn.onclick = async () => {
     const prompt = textarea.value.trim();
     if (!prompt) return;
+    const bare = bareCheckbox.checked;
     overlay.remove();
-    await launchHeadlessSession(project, prompt);
+    await launchHeadlessSession(project, prompt, { bare });
   };
 
   textarea.addEventListener('keydown', (e) => {
@@ -3888,10 +4483,11 @@ function showHeadlessPromptDialog(project) {
   setTimeout(() => textarea.focus(), 50);
 }
 
-async function launchHeadlessSession(project, prompt) {
+async function launchHeadlessSession(project, prompt, extraOptions = {}) {
   const sessionId = crypto.randomUUID();
   const projectPath = project.projectPath;
   const options = await resolveDefaultSessionOptions(project);
+  if (extraOptions.bare) options.bare = true;
 
   const session = {
     sessionId,
@@ -4287,6 +4883,50 @@ async function openSettingsViewer(scope, projectPath) {
 
         ${!isProject ? `<div class="settings-field">
           <div class="settings-field-header">
+            <span class="settings-label">Icon Brightness</span>
+          </div>
+          <div class="settings-hint">Make icons brighter or dimmer across the entire app.</div>
+          <div class="settings-slider-row">
+            <input type="range" class="settings-range" id="sv-icon-brightness" min="0.3" max="3" step="0.1" value="${iconBrightness}">
+            <span class="settings-range-value" id="sv-icon-brightness-val">${iconBrightness.toFixed(1)}</span>
+          </div>
+        </div>` : ''}
+
+        ${!isProject ? `<div class="settings-field">
+          <div class="settings-field-header">
+            <span class="settings-label">Border Brightness</span>
+          </div>
+          <div class="settings-hint">Make borders and dividers brighter or dimmer across the entire app.</div>
+          <div class="settings-slider-row">
+            <input type="range" class="settings-range" id="sv-border-brightness" min="0.3" max="5" step="0.1" value="${borderBrightness}">
+            <span class="settings-range-value" id="sv-border-brightness-val">${borderBrightness.toFixed(1)}</span>
+          </div>
+        </div>` : ''}
+
+        ${!isProject ? `<div class="settings-field">
+          <div class="settings-field-header">
+            <span class="settings-label">Sidebar Zoom</span>
+          </div>
+          <div class="settings-hint">Zoom level for the sidebar panel. Ctrl+scroll over sidebar also works.</div>
+          <div class="settings-slider-row">
+            <input type="range" class="settings-range" id="sv-sidebar-zoom" min="0.5" max="2" step="0.05" value="${sidebarZoom}">
+            <span class="settings-range-value" id="sv-sidebar-zoom-val">${Math.round(sidebarZoom * 100)}%</span>
+          </div>
+        </div>` : ''}
+
+        ${!isProject ? `<div class="settings-field">
+          <div class="settings-field-header">
+            <span class="settings-label">Main Panel Zoom</span>
+          </div>
+          <div class="settings-hint">Zoom level for the terminal / content area. Ctrl+scroll over main panel also works.</div>
+          <div class="settings-slider-row">
+            <input type="range" class="settings-range" id="sv-main-zoom" min="0.5" max="2" step="0.05" value="${mainZoom}">
+            <span class="settings-range-value" id="sv-main-zoom-val">${Math.round(mainZoom * 100)}%</span>
+          </div>
+        </div>` : ''}
+
+        ${!isProject ? `<div class="settings-field">
+          <div class="settings-field-header">
             <span class="settings-label">IDE Emulation</span>
           </div>
           <div class="settings-checkbox-row">
@@ -4296,6 +4936,17 @@ async function openSettingsViewer(scope, projectPath) {
           <div class="settings-hint">When enabled, Switchboard acts as an IDE so Claude can open files and diffs in a side panel. Disable this if you want Claude to use your own IDE (e.g. VS Code, Cursor) instead. Changes take effect for new sessions only — running sessions are not affected.</div>
         </div>` : ''}
       </div>
+
+      ${!isProject ? `<div class="settings-field">
+          <div class="settings-field-header">
+            <span class="settings-label">Activity Monitoring Hook</span>
+          </div>
+          <div class="settings-hint">Install a Claude Code PostToolUse hook that sends real-time tool activity to Switchboard, powering sidebar sparklines for all sessions.</div>
+          <div class="settings-hook-row" id="sv-hook-row">
+            <span class="settings-hook-status" id="sv-hook-status">Checking...</span>
+            <button class="settings-hook-btn" id="sv-install-hook-btn" style="display:none">Install Hook</button>
+          </div>
+        </div>` : ''}
 
       ${!isProject ? `<div class="settings-section settings-updates-section">
         <div class="settings-section-title">Updates</div>
@@ -4336,6 +4987,46 @@ async function openSettingsViewer(scope, projectPath) {
     });
   });
 
+  // Brightness sliders — live preview as you drag
+  const iconSlider = settingsViewerBody.querySelector('#sv-icon-brightness');
+  const iconVal = settingsViewerBody.querySelector('#sv-icon-brightness-val');
+  if (iconSlider) {
+    iconSlider.addEventListener('input', () => {
+      iconBrightness = parseFloat(iconSlider.value);
+      if (iconVal) iconVal.textContent = iconBrightness.toFixed(1);
+      applyBrightness();
+    });
+  }
+  const borderSlider = settingsViewerBody.querySelector('#sv-border-brightness');
+  const borderVal = settingsViewerBody.querySelector('#sv-border-brightness-val');
+  if (borderSlider) {
+    borderSlider.addEventListener('input', () => {
+      borderBrightness = parseFloat(borderSlider.value);
+      if (borderVal) borderVal.textContent = borderBrightness.toFixed(1);
+      applyBrightness();
+    });
+  }
+
+  // Zoom sliders — live preview as you drag
+  const sidebarZoomSlider = settingsViewerBody.querySelector('#sv-sidebar-zoom');
+  const sidebarZoomVal = settingsViewerBody.querySelector('#sv-sidebar-zoom-val');
+  if (sidebarZoomSlider) {
+    sidebarZoomSlider.addEventListener('input', () => {
+      sidebarZoom = parseFloat(sidebarZoomSlider.value);
+      if (sidebarZoomVal) sidebarZoomVal.textContent = Math.round(sidebarZoom * 100) + '%';
+      applyZoom();
+    });
+  }
+  const mainZoomSlider = settingsViewerBody.querySelector('#sv-main-zoom');
+  const mainZoomVal = settingsViewerBody.querySelector('#sv-main-zoom-val');
+  if (mainZoomSlider) {
+    mainZoomSlider.addEventListener('input', () => {
+      mainZoom = parseFloat(mainZoomSlider.value);
+      if (mainZoomVal) mainZoomVal.textContent = Math.round(mainZoom * 100) + '%';
+      applyZoom();
+    });
+  }
+
   // Save button
   settingsViewerBody.querySelector('#sv-save-btn').addEventListener('click', async () => {
     const settings = {};
@@ -4372,6 +5063,18 @@ async function openSettingsViewer(scope, projectPath) {
       settings.terminalTheme = settingsViewerBody.querySelector('#sv-terminal-theme').value || 'switchboard';
       settings.mcpEmulation = settingsViewerBody.querySelector('#sv-mcp-emulation').checked;
       settings.shellProfile = settingsViewerBody.querySelector('#sv-shell-profile').value || 'auto';
+      // Brightness sliders — persist to localStorage (instant, no restart needed)
+      const ib = settingsViewerBody.querySelector('#sv-icon-brightness');
+      const bb = settingsViewerBody.querySelector('#sv-border-brightness');
+      if (ib) { iconBrightness = parseFloat(ib.value); localStorage.setItem('iconBrightness', iconBrightness); }
+      if (bb) { borderBrightness = parseFloat(bb.value); localStorage.setItem('borderBrightness', borderBrightness); }
+      applyBrightness();
+      // Zoom sliders — persist
+      const sz = settingsViewerBody.querySelector('#sv-sidebar-zoom');
+      const mz = settingsViewerBody.querySelector('#sv-main-zoom');
+      if (sz) { sidebarZoom = parseFloat(sz.value); localStorage.setItem('sidebarZoom', sidebarZoom); }
+      if (mz) { mainZoom = parseFloat(mz.value); localStorage.setItem('mainZoom', mainZoom); }
+      applyZoom();
     }
 
     // Preserve windowBounds and sidebarWidth if they exist
@@ -4442,6 +5145,37 @@ async function openSettingsViewer(scope, projectPath) {
     });
   }
 
+  // Activity monitoring hook status
+  const hookStatusEl = settingsViewerBody.querySelector('#sv-hook-status');
+  const hookInstallBtn = settingsViewerBody.querySelector('#sv-install-hook-btn');
+  if (hookStatusEl && hookInstallBtn) {
+    window.api.checkActivityHook().then(({ installed }) => {
+      if (installed) {
+        hookStatusEl.textContent = 'Installed';
+        hookStatusEl.style.color = '#22c55e';
+        hookInstallBtn.style.display = 'none';
+      } else {
+        hookStatusEl.textContent = 'Not installed';
+        hookStatusEl.style.color = '#ef4444';
+        hookInstallBtn.style.display = '';
+      }
+    });
+    hookInstallBtn.addEventListener('click', async () => {
+      hookInstallBtn.disabled = true;
+      hookInstallBtn.textContent = 'Installing...';
+      const result = await window.api.installActivityHook();
+      if (result.ok) {
+        hookStatusEl.textContent = result.already ? 'Already installed' : 'Installed';
+        hookStatusEl.style.color = '#22c55e';
+        hookInstallBtn.style.display = 'none';
+      } else {
+        hookStatusEl.textContent = 'Error: ' + (result.error || 'unknown');
+        hookInstallBtn.disabled = false;
+        hookInstallBtn.textContent = 'Retry';
+      }
+    });
+  }
+
   // Remove project button
   const removeBtn = settingsViewerBody.querySelector('#sv-remove-btn');
   if (removeBtn) {
@@ -4465,6 +5199,73 @@ globalSettingsBtn.addEventListener('click', () => {
 addProjectBtn.addEventListener('click', () => {
   showAddProjectDialog();
 });
+
+// --- Broadcast button ---
+const broadcastBtn = document.getElementById('broadcast-btn');
+broadcastBtn.addEventListener('click', () => {
+  showBroadcastDialog();
+});
+
+function showBroadcastDialog() {
+  const overlay = document.createElement('div');
+  overlay.className = 'add-project-overlay';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'add-project-dialog';
+  dialog.style.maxWidth = '480px';
+
+  dialog.innerHTML = `
+    <h3>Broadcast Command</h3>
+    <div class="add-project-hint">Send a command to all currently running sessions simultaneously.</div>
+    <div class="folder-input-row">
+      <input type="text" id="broadcast-input" placeholder="e.g.  /compact  or  git status" autocomplete="off" spellcheck="false">
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:var(--text-muted);">
+      <input type="checkbox" id="broadcast-newline" checked> Append Enter (send as command)
+    </label>
+    <div class="add-project-error" id="broadcast-error"></div>
+    <div class="add-project-actions">
+      <button id="broadcast-cancel-btn" class="add-project-btn-secondary">Cancel</button>
+      <button id="broadcast-send-btn" class="add-project-btn-primary">Broadcast</button>
+    </div>
+  `;
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  const input = dialog.querySelector('#broadcast-input');
+  const sendBtn = dialog.querySelector('#broadcast-send-btn');
+  const cancelBtn = dialog.querySelector('#broadcast-cancel-btn');
+  const errorEl = dialog.querySelector('#broadcast-error');
+  const newlineChk = dialog.querySelector('#broadcast-newline');
+
+  input.focus();
+
+  const close = () => overlay.remove();
+
+  cancelBtn.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+  const doSend = async () => {
+    const text = input.value;
+    if (!text.trim()) { errorEl.textContent = 'Enter a command'; return; }
+    const payload = newlineChk.checked ? text + '\r' : text;
+    const result = await window.api.broadcastInput(payload);
+    if (result.ok) {
+      statusBarActivity.textContent = `Broadcast sent to ${result.count} session${result.count !== 1 ? 's' : ''}`;
+      setTimeout(() => { statusBarActivity.textContent = ''; }, 3000);
+      close();
+    } else {
+      errorEl.textContent = result.error || 'Broadcast failed';
+    }
+  };
+
+  sendBtn.addEventListener('click', doSend);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doSend();
+    if (e.key === 'Escape') close();
+  });
+}
 
 function showAddProjectDialog() {
   const overlay = document.createElement('div');
@@ -4605,6 +5406,164 @@ setTimeout(() => {
 }, 100);
 
 
+// ============================================================
+// COMMAND PALETTE (Ctrl+K)
+// Fuzzy search across sessions, projects, and quick actions.
+// ============================================================
+
+const cmdPalette = document.getElementById('cmd-palette');
+const cmdPaletteInput = document.getElementById('cmd-palette-input');
+const cmdPaletteResults = document.getElementById('cmd-palette-results');
+let cmdPaletteOpen = false;
+let cmdPaletteCursor = -1;
+
+const CMD_ACTIONS = [
+  { type: 'action', label: 'Add Project', hint: 'Add a new project folder', icon: '✦', run: () => { showAddProjectDialog(); } },
+  { type: 'action', label: '/compact — Compress context', hint: 'Send /compact to active session', icon: '⟳', run: () => { if (activeSessionId && activePtyIds.has(activeSessionId)) window.api.sendInput(activeSessionId, '/compact\r'); } },
+  { type: 'action', label: 'Broadcast command…', hint: 'Send to all running sessions', icon: '⋰', run: () => { showBroadcastDialog(); } },
+  { type: 'action', label: 'Toggle grid view', hint: 'Show all terminals in grid', icon: '⊞', run: () => { toggleGridView(); } },
+  { type: 'action', label: 'Global Settings', hint: 'Open settings panel', icon: '⚙', run: () => { document.getElementById('global-settings-btn')?.click(); } },
+];
+
+function cmdPaletteScore(query, text) {
+  if (!query) return 1;
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  if (t.includes(q)) return 2 + (t.startsWith(q) ? 1 : 0);
+  // Fuzzy: every char of query must appear in order
+  let ti = 0;
+  for (const ch of q) {
+    ti = t.indexOf(ch, ti);
+    if (ti === -1) return 0;
+    ti++;
+  }
+  return 1;
+}
+
+function buildCmdItems(query) {
+  const items = [];
+
+  // Actions
+  for (const action of CMD_ACTIONS) {
+    const score = cmdPaletteScore(query, action.label);
+    if (score > 0) items.push({ ...action, score });
+  }
+
+  // Sessions from cache
+  for (const project of cachedAllProjects) {
+    for (const session of project.sessions) {
+      const name = cleanDisplayName(session.name || session.sessionId);
+      const score = cmdPaletteScore(query, name + ' ' + project.path);
+      if (score > 0) {
+        items.push({
+          type: 'session',
+          label: name,
+          hint: project.path.split('/').slice(-2).join('/'),
+          icon: activePtyIds.has(session.sessionId) ? '●' : '○',
+          score,
+          session,
+        });
+      }
+    }
+  }
+
+  // Sort: actions first (by score), then sessions (by score + recency)
+  items.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'action' ? -1 : 1;
+    return b.score - a.score;
+  });
+
+  return items.slice(0, 12);
+}
+
+function renderCmdResults(items) {
+  cmdPaletteResults.innerHTML = '';
+  if (items.length === 0) {
+    cmdPaletteResults.innerHTML = '<div class="cmd-empty">No results</div>';
+    cmdPaletteCursor = -1;
+    return;
+  }
+  items.forEach((item, i) => {
+    const el = document.createElement('div');
+    el.className = 'cmd-item' + (i === cmdPaletteCursor ? ' cmd-item-active' : '');
+    el.dataset.index = i;
+    const iconEl = `<span class="cmd-item-icon">${item.icon || '○'}</span>`;
+    const labelEl = `<span class="cmd-item-label">${escapeHtml(item.label)}</span>`;
+    const hintEl = item.hint ? `<span class="cmd-item-hint">${escapeHtml(item.hint)}</span>` : '';
+    el.innerHTML = iconEl + labelEl + hintEl;
+    el.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      executeCmdItem(item);
+    });
+    el.addEventListener('mouseover', () => {
+      cmdPaletteCursor = i;
+      renderCmdResults(items);
+    });
+    cmdPaletteResults.appendChild(el);
+  });
+}
+
+let _cmdItems = [];
+
+function openCmdPalette() {
+  cmdPaletteOpen = true;
+  cmdPalette.style.display = 'flex';
+  cmdPaletteInput.value = '';
+  cmdPaletteCursor = -1;
+  _cmdItems = buildCmdItems('');
+  renderCmdResults(_cmdItems);
+  requestAnimationFrame(() => cmdPaletteInput.focus());
+}
+
+function closeCmdPalette() {
+  cmdPaletteOpen = false;
+  cmdPalette.style.display = 'none';
+  cmdPaletteInput.value = '';
+}
+
+function executeCmdItem(item) {
+  closeCmdPalette();
+  if (item.type === 'action') {
+    item.run();
+  } else if (item.type === 'session') {
+    openSession(item.session);
+  }
+}
+
+cmdPaletteInput.addEventListener('input', () => {
+  _cmdItems = buildCmdItems(cmdPaletteInput.value.trim());
+  cmdPaletteCursor = _cmdItems.length > 0 ? 0 : -1;
+  renderCmdResults(_cmdItems);
+});
+
+cmdPaletteInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { closeCmdPalette(); return; }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    cmdPaletteCursor = Math.min(cmdPaletteCursor + 1, _cmdItems.length - 1);
+    renderCmdResults(_cmdItems);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    cmdPaletteCursor = Math.max(cmdPaletteCursor - 1, 0);
+    renderCmdResults(_cmdItems);
+  } else if (e.key === 'Enter') {
+    if (cmdPaletteCursor >= 0 && _cmdItems[cmdPaletteCursor]) {
+      executeCmdItem(_cmdItems[cmdPaletteCursor]);
+    }
+  }
+});
+
+document.getElementById('cmd-palette-backdrop').addEventListener('click', closeCmdPalette);
+
+// Ctrl+K / Cmd+K to open
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault();
+    cmdPaletteOpen ? closeCmdPalette() : openCmdPalette();
+  }
+  if (e.key === 'Escape' && cmdPaletteOpen) closeCmdPalette();
+});
+
 // --- Init: restore settings ---
 (async () => {
   const global = await window.api.getSetting('global');
@@ -4625,7 +5584,207 @@ setTimeout(() => {
   }
 })();
 
-loadProjects().then(() => {
+// --- Agent selector initialization ---
+// Meta-views: special sidebar views that aggregate across CLIs
+const META_VIEWS = {
+  '_active': { label: 'Active', icon: '&#9679;', color: '#22c55e', title: 'All running sessions across every CLI' },
+  '_pinned': { label: 'Pinned', icon: '&#9733;', color: '#eab308', title: 'Pinned sessions from all CLIs' },
+};
+
+async function loadMetaView(viewId) {
+  // Gather sessions from ALL installed agents
+  const allProjects = [];
+  const agentIds = Object.entries(installedAgents).filter(([, a]) => a.installed).map(([id]) => id);
+
+  const results = await Promise.all(agentIds.map(async (id) => {
+    if (id === 'claude') {
+      const [def, all] = await Promise.all([window.api.getProjects(false), window.api.getProjects(true)]);
+      return { id, projects: all, defaults: def };
+    } else {
+      const projects = await window.api.getAgentSessions(id);
+      return { id, projects, defaults: projects };
+    }
+  }));
+
+  for (const { id, projects } of results) {
+    for (const proj of projects) {
+      // Tag each session with its agent for badge rendering
+      for (const s of proj.sessions) {
+        if (!s.agent) s.agent = id;
+        sessionAgentMap.set(s.sessionId, id);
+      }
+      allProjects.push(proj);
+    }
+  }
+
+  // Merge projects with same path
+  const merged = new Map();
+  for (const proj of allProjects) {
+    if (merged.has(proj.projectPath)) {
+      const existing = merged.get(proj.projectPath);
+      for (const s of proj.sessions) {
+        if (!existing.sessions.some(e => e.sessionId === s.sessionId)) {
+          existing.sessions.push(s);
+        }
+      }
+    } else {
+      merged.set(proj.projectPath, { ...proj, sessions: [...proj.sessions] });
+    }
+  }
+
+  let projects = Array.from(merged.values());
+
+  if (viewId === '_active') {
+    // Keep only projects with running sessions
+    projects = projects.map(p => ({
+      ...p,
+      sessions: p.sessions.filter(s => activePtyIds.has(s.sessionId)),
+    })).filter(p => p.sessions.length > 0);
+  } else if (viewId === '_pinned') {
+    // Keep only pinned sessions
+    projects = projects.map(p => ({
+      ...p,
+      sessions: p.sessions.filter(s => s.starred),
+    })).filter(p => p.sessions.length > 0);
+  }
+
+  cachedProjects = projects;
+  cachedAllProjects = projects;
+  refreshSidebar({ resort: true });
+  renderDefaultStatus();
+  startSessionFileWatchers(projects);
+}
+
+(async function initAgentSelector() {
+  try {
+    installedAgents = await window.api.detectAgents();
+  } catch { installedAgents = {}; }
+
+  const container = document.getElementById('agent-selector');
+  if (!container) return;
+
+  const agentsToShow = Object.entries(installedAgents).filter(([, a]) => a.installed);
+
+  // Always show — meta-views are useful even with only Claude
+  container.style.display = '';
+  container.innerHTML = '';
+
+  function setActive(viewId) {
+    activeAgent = viewId;
+    localStorage.setItem('activeAgent', viewId);
+    container.querySelectorAll('.agent-selector-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.agent === viewId)
+    );
+  }
+
+  // Meta-view buttons first
+  for (const [viewId, meta] of Object.entries(META_VIEWS)) {
+    const btn = document.createElement('button');
+    btn.className = 'agent-selector-btn meta-view-btn' + (viewId === activeAgent ? ' active' : '');
+    btn.dataset.agent = viewId;
+    btn.title = meta.title;
+    btn.innerHTML = `<span class="agent-dot meta-dot" style="background:${meta.color}">${meta.icon}</span><span class="agent-selector-label">${meta.label}</span>`;
+    btn.addEventListener('click', () => {
+      if (viewId === activeAgent) return;
+      setActive(viewId);
+      // Clear filters when switching to meta view (they're built-in)
+      showStarredOnly = false; showRunningOnly = false;
+      starToggle.classList.remove('active'); runningToggle.classList.remove('active');
+      loadMetaView(viewId);
+    });
+    container.appendChild(btn);
+  }
+
+  // Separator
+  const sep = document.createElement('span');
+  sep.className = 'agent-selector-sep';
+  container.appendChild(sep);
+
+  // Per-CLI agent buttons
+  for (const [id, agent] of agentsToShow) {
+    const btn = document.createElement('button');
+    btn.className = 'agent-selector-btn' + (id === activeAgent ? ' active' : '');
+    btn.dataset.agent = id;
+    btn.title = agent.name;
+    btn.innerHTML = `<span class="agent-dot" style="background:${agent.color}"></span><span class="agent-selector-label">${agent.name.split(' ')[0]}</span>`;
+    btn.addEventListener('click', () => {
+      if (id === activeAgent) return;
+      setActive(id);
+      // Clear meta-view state
+      showStarredOnly = false; showRunningOnly = false;
+      starToggle.classList.remove('active'); runningToggle.classList.remove('active');
+      loadProjectsForAgent();
+    });
+    container.appendChild(btn);
+  }
+})();
+
+// Start file watchers for recently active sessions (last 24h) that have JSONL files.
+// This powers sparkline activity for PTY sessions across all CLIs.
+function startSessionFileWatchers(projects) {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000; // 24h ago
+  for (const proj of projects) {
+    for (const session of proj.sessions) {
+      if (!session.file) continue;
+      if (!session.file.endsWith('.jsonl')) continue;
+      // Only watch recently-modified sessions
+      const mod = session.modified ? new Date(session.modified).getTime() : 0;
+      if (mod < cutoff) continue;
+      // Skip headless sessions (they already get events via stream-json)
+      if (session.type === 'headless') continue;
+      const agentId = session.agent || sessionAgentMap.get(session.sessionId) || 'claude';
+      window.api.watchSessionFile(session.sessionId, session.file, agentId);
+    }
+  }
+}
+
+async function loadProjectsForAgent() {
+  // Meta-views (starts with _) use their own loader
+  if (activeAgent.startsWith('_')) {
+    await loadMetaView(activeAgent);
+    return;
+  }
+  if (activeAgent === 'claude') {
+    await loadProjects({ resort: true });
+  } else {
+    const projects = await window.api.getAgentSessions(activeAgent);
+    cachedAgentProjects.set(activeAgent, projects);
+    cachedProjects = projects;
+    cachedAllProjects = projects;
+    refreshSidebar({ resort: true });
+    renderDefaultStatus();
+    startSessionFileWatchers(projects);
+  }
+}
+
+// --- Detached window mode ---
+// When loaded with ?detached=<sessionId>, show just the terminal (no sidebar nav).
+const _detachedSessionId = new URLSearchParams(window.location.search).get('detached');
+if (_detachedSessionId) {
+  // Hide sidebar and filters — it's a focus terminal window
+  document.getElementById('sidebar').style.display = 'none';
+  document.getElementById('sidebar-resize-handle').style.display = 'none';
+  document.getElementById('main').style.borderLeft = 'none';
+  // Load enough session data to open the terminal
+  loadProjects().then(() => {
+    const session = sessionMap.get(_detachedSessionId);
+    if (session) {
+      openSession(session);
+    } else {
+      // Session not in projects cache — build a minimal stub from active sessions
+      window.api.getActiveSessions().then(actives => {
+        const active = actives.find(s => s.sessionId === _detachedSessionId);
+        if (active) openSession({ sessionId: _detachedSessionId, name: active.name || _detachedSessionId, projectPath: active.projectPath || '', type: 'pty', sessions: [] });
+      });
+    }
+  });
+} else {
+
+// Initial load — respect saved meta-view or agent selection
+(activeAgent.startsWith('_') ? loadMetaView(activeAgent) : loadProjects()).then(() => {
+  // Sync filter button states for meta-views
+  if (activeAgent === '_active') { showRunningOnly = true; runningToggle.classList.add('active'); }
+  if (activeAgent === '_pinned') { showStarredOnly = true; starToggle.classList.add('active'); }
   // Restore grid view preference before opening sessions so they enter grid mode
   if (localStorage.getItem('gridViewActive') === '1') {
     showGridView();
@@ -4635,7 +5794,11 @@ loadProjects().then(() => {
     const session = sessionMap.get(activeSessionId);
     if (session) openSession(session);
   }
+  // Start file watchers for recent sessions to power sidebar sparklines
+  startSessionFileWatchers(cachedAllProjects);
 });
+
+} // end if (_detachedSessionId) else block
 
 // Live-reload sidebar when filesystem changes are detected
 let projectsChangedTimer = null;
@@ -4650,8 +5813,13 @@ window.api.onProjectsChanged(() => {
   projectsChangedTimer = setTimeout(() => {
     projectsChangedTimer = null;
     loadProjects();
+    // Refresh token cache so new sessions get cost data
+    window.api.getAllSessionTokens().then(data => { if (data) tokenCache = data; });
   }, 300);
 });
+
+// Load token cache on startup
+window.api.getAllSessionTokens().then(data => { if (data) tokenCache = data; });
 
 // Status bar
 let activityTimer = null;

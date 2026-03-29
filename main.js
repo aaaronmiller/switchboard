@@ -219,7 +219,7 @@ if (app.isPackaged || process.env.FORCE_UPDATER) {
   function sendUpdaterEvent(type, data) {
     log.info(`[updater] ${type}`, data || '');
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('updater-event', type, data);
+      safeSend('updater-event', type, data);
     }
   }
   autoUpdater.on('checking-for-update', () => sendUpdaterEvent('checking'));
@@ -230,7 +230,7 @@ if (app.isPackaged || process.env.FORCE_UPDATER) {
   autoUpdater.on('error', (err) => {
     log.error('[updater] Error:', err?.message || String(err));
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('updater-event', 'error', { message: err?.message || String(err) });
+      safeSend('updater-event', 'error', { message: err?.message || String(err) });
     }
   });
 }
@@ -247,6 +247,7 @@ const {
   peerRegister, peerHeartbeat, peerSetSummary, peerUnregister, peerUnregisterBySession,
   peerListAll, peerListByDir, peerListByRepo, peerGetById,
   peerSendMessage, peerPollMessages, peerCleanStale,
+  upsertSessionTokens, getSessionTokens, getAllSessionTokens, deleteSessionTokens,
 } = require('./db');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -258,6 +259,20 @@ const MAX_BUFFER_SIZE = 256 * 1024;
 // Active PTY sessions
 const activeSessions = new Map();
 let mainWindow = null;
+
+// --- Multi-window registry ---
+// windowId → { window: BrowserWindow, ownedSessions: Set<sessionId>, isMain: bool }
+const windowRegistry = new Map();
+// sessionId → windowId (reverse lookup for routing)
+const sessionWindowMap = new Map();
+
+// --- Session activity monitoring (hook-based + file-watcher) ---
+// Tracks tool events for ANY session (PTY or headless) to power sidebar sparklines.
+// Events arrive via: (1) HTTP POST /session-event from Claude Code hooks,
+// (2) fs.watch on JSONL session files for other CLIs,
+// (3) existing headless stream-json parsing.
+const sessionFileWatchers = new Map(); // sessionId → { watcher, filePath, lastSize }
+const WATCHED_SESSION_FILES = new Map(); // filePath → sessionId (reverse lookup)
 
 function createWindow() {
   // Restore saved window bounds
@@ -296,12 +311,23 @@ function createWindow() {
     },
   });
 
+  // Register in multi-window registry
+  registerWindow(mainWindow, true);
+
   // Set position after creation to prevent macOS from clamping size
   if (restorePosition) {
     mainWindow.setBounds({ ...restorePosition, width: bounds.width, height: bounds.height });
   }
 
   mainWindow.loadFile(path.join(__dirname, 'public', 'index.html'));
+
+  // Disable Electron's built-in zoom — we handle it per-panel in the renderer
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.control && (input.key === '=' || input.key === '+' || input.key === '-' || input.key === '0')) {
+      // Let our menu accelerators handle these instead of Electron's native zoom
+      event.preventDefault();
+    }
+  });
 
   // Open external links in the system browser instead of a child BrowserWindow
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -416,9 +442,12 @@ function buildMenu() {
       submenu: [
         { role: 'toggleDevTools' },
         { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
+        // Zoom handled per-panel in renderer (sidebar vs main independent zoom)
+        // Keep menu items but wire them to renderer via IPC
+        { label: 'Zoom In', accelerator: 'CmdOrCtrl+Plus', click: () => safeSend('panel-zoom', 'in') },
+        { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', visible: false, click: () => safeSend('panel-zoom', 'in') },
+        { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => safeSend('panel-zoom', 'out') },
+        { label: 'Reset Zoom', accelerator: 'CmdOrCtrl+0', click: () => safeSend('panel-zoom', 'reset') },
         { type: 'separator' },
         { role: 'togglefullscreen' },
       ],
@@ -671,6 +700,8 @@ function buildProjectsFromCache(showArchived) {
       name: meta?.name || null,
       starred: meta?.starred || 0,
       archived: meta?.archived || 0,
+      file: path.join(PROJECTS_DIR, row.folder, row.sessionId + '.jsonl'),
+      agent: 'claude',
     };
     if (!showArchived && s.archived) continue;
     folderMap.get(row.folder).sessions.push(s);
@@ -729,17 +760,149 @@ function buildProjectsFromCache(showArchived) {
 }
 
 
-function notifyRendererProjectsChanged() {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('projects-changed');
+// Safe send — guards against destroyed window AND disposed render frame (mid-reload)
+// Broadcasts to ALL windows by default. For session-specific routing, use safeSendToSession.
+function safeSend(channel, ...args) {
+  for (const [, entry] of windowRegistry) {
+    try {
+      const w = entry.window;
+      if (w && !w.isDestroyed() && w.webContents && !w.webContents.isDestroyed()) {
+        w.webContents.send(channel, ...args);
+      }
+    } catch {
+      // Render frame disposed mid-send — safe to ignore
+    }
   }
+}
+
+// Send to the window that owns a specific session (falls back to broadcast)
+function safeSendToSession(sessionId, channel, ...args) {
+  const windowId = sessionWindowMap.get(sessionId);
+  const entry = windowId != null ? windowRegistry.get(windowId) : null;
+  if (entry) {
+    try {
+      const w = entry.window;
+      if (w && !w.isDestroyed() && w.webContents && !w.webContents.isDestroyed()) {
+        w.webContents.send(channel, ...args);
+        return;
+      }
+    } catch {}
+  }
+  // Fallback: broadcast (session not yet assigned or window gone)
+  safeSend(channel, ...args);
+}
+
+// Send to a specific BrowserWindow by reference
+function safeSendToWindow(win, channel, ...args) {
+  try {
+    if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
+      win.webContents.send(channel, ...args);
+    }
+  } catch {}
+}
+
+// Register a window in the registry
+function registerWindow(win, isMain = false) {
+  const id = win.id;
+  windowRegistry.set(id, { window: win, ownedSessions: new Set(), isMain });
+  win.on('closed', () => {
+    const entry = windowRegistry.get(id);
+    if (entry) {
+      // Return orphaned sessions to main window
+      for (const sid of entry.ownedSessions) {
+        sessionWindowMap.delete(sid);
+        const mainEntry = [...windowRegistry.values()].find(e => e.isMain);
+        if (mainEntry) {
+          mainEntry.ownedSessions.add(sid);
+          sessionWindowMap.set(sid, mainEntry.window.id);
+        }
+      }
+      windowRegistry.delete(id);
+    }
+  });
+  return id;
+}
+
+// Assign a session to a window
+function assignSessionToWindow(sessionId, windowId) {
+  // Remove from previous owner
+  const prevWindowId = sessionWindowMap.get(sessionId);
+  if (prevWindowId != null) {
+    const prev = windowRegistry.get(prevWindowId);
+    if (prev) prev.ownedSessions.delete(sessionId);
+  }
+  sessionWindowMap.set(sessionId, windowId);
+  const entry = windowRegistry.get(windowId);
+  if (entry) entry.ownedSessions.add(sessionId);
+}
+
+// Create a detached window for a session (focus mode — terminal only, no sidebar)
+function createDetachedWindow(sessionId) {
+  const session = activeSessions.get(sessionId);
+  const title = session?.name || session?.projectPath?.split(path.sep).pop() || sessionId;
+
+  const win = new BrowserWindow({
+    width: 900,
+    height: 650,
+    title: `Switchboard — ${title}`,
+    icon: path.join(__dirname, 'build', 'icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+
+  const windowId = registerWindow(win, false);
+  assignSessionToWindow(sessionId, windowId);
+
+  // Load same HTML but with detached query param
+  win.loadFile(path.join(__dirname, 'public', 'index.html'), {
+    query: { detached: sessionId },
+  });
+
+  // Open external links in system browser
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url).catch(() => {});
+    return { action: 'deny' };
+  });
+
+  // Inject window.open override (same as main window)
+  win.webContents.on('did-finish-load', () => {
+    win.webContents.executeJavaScript(`
+      window.open = function(url) {
+        if (url && /^https?:\\/\\//i.test(url)) { window.api.openExternal(url); return null; }
+        const proxy = {};
+        Object.defineProperty(proxy, 'location', { get() {
+          const loc = {};
+          Object.defineProperty(loc, 'href', {
+            set(u) { if (/^https?:\\/\\//i.test(u)) window.api.openExternal(u); }
+          });
+          return loc;
+        }});
+        return proxy;
+      };
+      void 0;
+    `);
+  });
+
+  // Disable Electron zoom (same as main)
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.control && (input.key === '=' || input.key === '+' || input.key === '-' || input.key === '0')) {
+      event.preventDefault();
+    }
+  });
+
+  return { windowId, window: win };
+}
+
+function notifyRendererProjectsChanged() {
+  safeSend('projects-changed');
 }
 
 function sendStatus(text, type) {
   if (text) log.info(`[status] (${type || 'info'}) ${text}`);
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('status-update', text, type || 'info');
-  }
+  safeSend('status-update', text, type || 'info');
 }
 
 // --- Worker-based cache population (non-blocking) ---
@@ -786,6 +949,19 @@ function populateCacheViaWorker() {
           title: (s.customTitle ? s.customTitle + ' ' : '') + s.summary,
           body: s.textContent,
         })));
+        // Persist token usage for sessions that have it
+        const tokenEntries = sessions
+          .filter(s => s.inputTokens > 0 || s.outputTokens > 0)
+          .map(s => ({
+            sessionId: s.sessionId,
+            inputTokens: s.inputTokens || 0,
+            outputTokens: s.outputTokens || 0,
+            cacheReadTokens: s.cacheReadTokens || 0,
+            cacheWriteTokens: s.cacheWriteTokens || 0,
+            model: s.model || null,
+            updatedAt: new Date().toISOString(),
+          }));
+        if (tokenEntries.length > 0) upsertSessionTokens(tokenEntries);
       }
       setFolderMeta(folder, projectPath, indexMtimeMs);
     }
@@ -903,7 +1079,23 @@ ipcMain.on('mcp-diff-response', (_event, sessionId, diffId, action, editedConten
 
 ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
   try {
-    const content = fs.readFileSync(filePath, 'utf8');
+    // Path sandbox: only allow reads within known safe directories
+    const resolved = path.resolve(filePath);
+    const allowedRoots = [PROJECTS_DIR, PLANS_DIR, CLAUDE_DIR];
+    // Also allow active session project paths
+    for (const [, session] of activeSessions) {
+      if (session.projectPath) allowedRoots.push(path.resolve(session.projectPath));
+    }
+    const allowed = allowedRoots.some(root => {
+      const r = path.resolve(root);
+      return resolved === r || resolved.startsWith(r + path.sep);
+    });
+    if (!allowed) {
+      log.warn(`[security] Blocked read-file-for-panel outside sandbox: ${resolved}`);
+      return { ok: false, error: 'Access denied: path outside allowed directories' };
+    }
+
+    const content = fs.readFileSync(resolved, 'utf8');
     return { ok: true, content };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -923,6 +1115,207 @@ ipcMain.handle('get-projects', (_event, showArchived) => {
   } catch (err) {
     console.error('Error listing projects:', err);
     return [];
+  }
+});
+
+// Extract a summary from the first user message in a session file (any agent format).
+// Reads at most 8KB for performance.
+function extractSessionSummary(filePath, agentId) {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(8192);
+    const bytesRead = fs.readSync(fd, buf, 0, 8192, 0);
+    fs.closeSync(fd);
+    if (bytesRead === 0) return '';
+
+    const text = buf.toString('utf8', 0, bytesRead);
+
+    // Aider: markdown format — grab first #### heading content
+    if (agentId === 'aider') {
+      const match = text.match(/^####\s+(.+)/m);
+      return match ? match[1].slice(0, 120) : '';
+    }
+
+    // JSONL formats: find first user message
+    const lines = text.split('\n').filter(Boolean);
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line);
+
+        // Claude/Qwen format: { type: "user", message: { content: "..." } }
+        if (obj.type === 'user' || (obj.type === 'message' && obj.role === 'user') || obj.role === 'user') {
+          const msg = obj.message || obj;
+          const content = typeof msg === 'string' ? msg
+            : typeof msg.content === 'string' ? msg.content
+            : msg.content?.[0]?.text || '';
+          if (content) return content.slice(0, 120);
+        }
+
+        // Codex format: { type: "response_item", payload: { role: "developer", content: [...] } }
+        if (obj.type === 'response_item' && obj.payload?.role === 'developer') {
+          const parts = obj.payload.content || [];
+          for (const c of parts) {
+            if ((c.type === 'input_text' || c.type === 'text') && c.text) return c.text.slice(0, 120);
+          }
+        }
+
+        // Gemini format: { role: "user", parts: [{ text: "..." }] }
+        if (obj.role === 'user' && obj.parts) {
+          for (const part of obj.parts) {
+            if (part.text) return part.text.slice(0, 120);
+          }
+        }
+      } catch { /* non-JSON line */ }
+    }
+  } catch { /* file read error */ }
+  return '';
+}
+
+// --- IPC: get-agent-sessions ---
+// Returns sessions for non-Claude agents using AGENT_HISTORY discovery.
+// Groups them by project (derived from file paths or cwd inside session data).
+ipcMain.handle('get-agent-sessions', (_event, agentId) => {
+  try {
+    const history = AGENT_HISTORY[agentId];
+    if (!history) return [];
+
+    const rawSessions = history.getSessions();
+    if (!rawSessions || rawSessions.length === 0) return [];
+
+    const metaMap = getAllMeta();
+    const folderMap = new Map();
+
+    for (const raw of rawSessions) {
+      // Derive a project grouping key from the session's project hash or file path
+      let projectPath = raw.project || path.dirname(raw.file);
+      let folder = raw.project || path.basename(path.dirname(raw.file));
+
+      // Try to get a human-readable project path from the session content
+      if (history.parseSession) {
+        try {
+          const parsed = history.parseSession(raw.file);
+          if (parsed?.cwd) {
+            projectPath = parsed.cwd;
+            folder = parsed.cwd.split('/').filter(Boolean).slice(-2).join('/');
+          }
+        } catch {}
+      }
+
+      // Also try reading first line for cwd (common in JSONL formats)
+      if (projectPath === raw.project || !projectPath.startsWith('/')) {
+        try {
+          const firstLine = fs.readFileSync(raw.file, 'utf8').split('\n')[0];
+          if (firstLine) {
+            const obj = JSON.parse(firstLine);
+            if (obj.cwd) {
+              projectPath = obj.cwd;
+              folder = obj.cwd.split('/').filter(Boolean).slice(-2).join('/');
+            } else if (obj.payload?.cwd) {
+              projectPath = obj.payload.cwd;
+              folder = obj.payload.cwd.split('/').filter(Boolean).slice(-2).join('/');
+            }
+          }
+        } catch {}
+      }
+
+      if (!folderMap.has(projectPath)) {
+        folderMap.set(projectPath, { folder, projectPath, sessions: [] });
+      }
+
+      const meta = metaMap.get(raw.id);
+      const messageCount = raw.size ? Math.max(1, Math.round(raw.size / 500)) : 0;
+
+      const summary = extractSessionSummary(raw.file, agentId);
+      folderMap.get(projectPath).sessions.push({
+        sessionId: raw.id,
+        summary,
+        firstPrompt: summary,
+        created: raw.modified ? new Date(raw.modified).toISOString() : '',
+        modified: raw.modified ? new Date(raw.modified).toISOString() : '',
+        messageCount,
+        projectPath,
+        slug: null,
+        name: meta?.name || null,
+        starred: meta?.starred || 0,
+        archived: meta?.archived || 0,
+        agent: agentId,
+        file: raw.file,
+      });
+    }
+
+    const projects = [];
+    for (const proj of folderMap.values()) {
+      proj.sessions.sort((a, b) => new Date(b.modified) - new Date(a.modified));
+      projects.push(proj);
+    }
+    projects.sort((a, b) => {
+      const aDate = a.sessions[0]?.modified || '';
+      const bDate = b.sessions[0]?.modified || '';
+      return new Date(bDate) - new Date(aDate);
+    });
+    return projects;
+  } catch (err) {
+    log.error(`Error getting ${agentId} sessions:`, err);
+    return [];
+  }
+});
+
+// --- IPC: install-activity-hook ---
+// Installs the Switchboard PostToolUse hook into Claude Code settings.
+ipcMain.handle('install-activity-hook', () => {
+  try {
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    let settings = {};
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    }
+
+    const hookScript = path.join(__dirname, 'scripts', 'switchboard-hook.sh');
+    if (!fs.existsSync(hookScript)) {
+      return { ok: false, error: 'Hook script not found' };
+    }
+
+    if (!settings.hooks) settings.hooks = {};
+    if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
+
+    // Check if already installed
+    const alreadyInstalled = settings.hooks.PostToolUse.some(entry =>
+      entry.hooks?.some(h => h.command && h.command.includes('switchboard-hook'))
+    );
+    if (alreadyInstalled) {
+      return { ok: true, already: true };
+    }
+
+    settings.hooks.PostToolUse.push({
+      matcher: '',
+      hooks: [{
+        type: 'command',
+        command: hookScript,
+      }],
+    });
+
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+    log.info('[hooks] Installed Switchboard activity hook into Claude Code settings');
+    return { ok: true };
+  } catch (err) {
+    log.error('[hooks] Error installing activity hook:', err.message);
+    return { ok: false, error: err.message };
+  }
+});
+
+// --- IPC: check-activity-hook ---
+// Checks if the Switchboard PostToolUse hook is installed.
+ipcMain.handle('check-activity-hook', () => {
+  try {
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    if (!fs.existsSync(settingsPath)) return { installed: false };
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const installed = settings.hooks?.PostToolUse?.some(entry =>
+      entry.hooks?.some(h => h.command && h.command.includes('switchboard-hook'))
+    ) || false;
+    return { installed };
+  } catch {
+    return { installed: false };
   }
 });
 
@@ -988,6 +1381,25 @@ ipcMain.handle('save-plan', (_event, filePath, content) => {
     console.error('Error saving plan:', err);
     return { ok: false, error: err.message };
   }
+});
+
+// --- IPC: get-session-tokens ---
+const { estimateCostCents, formatTokens, formatCost } = require('./tokens');
+
+ipcMain.handle('get-session-tokens', (_event, sessionId) => {
+  const row = getSessionTokens(sessionId);
+  if (!row) return null;
+  const costCents = estimateCostCents(row);
+  return { ...row, costCents };
+});
+
+ipcMain.handle('get-all-session-tokens', () => {
+  const map = getAllSessionTokens();
+  const result = {};
+  for (const [sessionId, row] of map) {
+    result[sessionId] = { ...row, costCents: estimateCostCents(row) };
+  }
+  return result;
 });
 
 // --- IPC: get-stats ---
@@ -1847,6 +2259,7 @@ ipcMain.handle('launch-headless', async (_event, sessionId, projectPath, prompt,
 
   // Build command args
   const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
+  if (sessionOptions?.bare) args.push('--bare');
   if (agent.sessionFlag) args.push(agent.sessionFlag, sessionId);
 
   // Permission flags (claude-specific)
@@ -1904,9 +2317,7 @@ ipcMain.handle('launch-headless', async (_event, sessionId, projectPath, prompt,
         session.events.push(classified);
         // Keep buffer bounded
         if (session.events.length > 100) session.events.shift();
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('headless-event', sessionId, classified);
-        }
+        safeSend('headless-event', sessionId, classified);
       }
     } catch {
       // Non-JSON line (progress indicators, warnings) — skip
@@ -1919,9 +2330,7 @@ ipcMain.handle('launch-headless', async (_event, sessionId, projectPath, prompt,
     if (!text) return;
     const errEvent = { type: 'error', text, ts: Date.now() };
     session.events.push(errEvent);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('headless-event', sessionId, errEvent);
-    }
+    safeSend('headless-event', sessionId, errEvent);
   });
 
   // On exit, send process-exited (reuses existing renderer handler)
@@ -1933,13 +2342,8 @@ ipcMain.handle('launch-headless', async (_event, sessionId, projectPath, prompt,
       notifyPeersChanged();
     }
     log.info(`[headless] Session ${sessionId} exited with code ${code}`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('process-exited', sessionId, code);
-      // Send final completion event
-      mainWindow.webContents.send('headless-event', sessionId, {
-        type: 'complete', exitCode: code, ts: Date.now(),
-      });
-    }
+    safeSend('process-exited', sessionId, code);
+    safeSend('headless-event', sessionId, { type: 'complete', exitCode: code, ts: Date.now() });
   });
 
   child.on('error', (err) => {
@@ -1950,12 +2354,8 @@ ipcMain.handle('launch-headless', async (_event, sessionId, projectPath, prompt,
       notifyPeersChanged();
     }
     log.error(`[headless] Spawn error for ${sessionId}: ${err.message}`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('process-exited', sessionId, 1);
-      mainWindow.webContents.send('headless-event', sessionId, {
-        type: 'error', text: err.message, ts: Date.now(),
-      });
-    }
+    safeSend('process-exited', sessionId, 1);
+    safeSend('headless-event', sessionId, { type: 'error', text: err.message, ts: Date.now() });
   });
 
   return { ok: true, sessionId };
@@ -2010,6 +2410,156 @@ function classifyHeadlessEvent(event) {
 
   return null;
 }
+
+// ============================================================
+// SESSION FILE WATCHERS — monitor JSONL logs from other CLIs
+// ============================================================
+// For CLIs that don't have hooks (Codex, Qwen, Gemini, Kimi, Hermes, etc.),
+// we tail their session JSONL files and parse new lines for tool events.
+
+function classifyJsonlLine(line, agentId) {
+  try {
+    const obj = JSON.parse(line);
+    const ts = Date.now();
+
+    // Claude JSONL format
+    if (agentId === 'claude') {
+      if (obj.type === 'assistant' && Array.isArray(obj.message?.content)) {
+        for (const block of obj.message.content) {
+          if (block.type === 'tool_use') return { type: 'tool_use', name: block.name, ts, agent: agentId };
+        }
+        for (const block of obj.message.content) {
+          if (block.type === 'text' && block.text) return { type: 'text', text: block.text.slice(0, 80), ts, agent: agentId };
+        }
+      }
+      if (obj.type === 'tool_result' || obj.type === 'tool_use') {
+        return { type: 'tool_use', name: obj.name || obj.tool_name || 'tool', ts, agent: agentId };
+      }
+    }
+
+    // Codex JSONL: { type: "response_item", payload: { role: "assistant", content: [...] } }
+    if (agentId === 'codex') {
+      if (obj.type === 'response_item' && obj.payload?.role === 'assistant') {
+        const content = obj.payload.content || [];
+        for (const c of content) {
+          if (c.type === 'tool_call' || c.type === 'function_call') return { type: 'tool_use', name: c.name || c.function?.name || 'tool', ts, agent: agentId };
+        }
+        return { type: 'text', text: 'response', ts, agent: agentId };
+      }
+    }
+
+    // Qwen JSONL: same as Claude (fork)
+    if (agentId === 'qwen') {
+      if (obj.type === 'assistant' || obj.role === 'assistant') {
+        if (obj.message?.parts) {
+          for (const part of obj.message.parts) {
+            if (part.functionCall) return { type: 'tool_use', name: part.functionCall.name || 'tool', ts, agent: agentId };
+          }
+        }
+        return { type: 'text', text: 'response', ts, agent: agentId };
+      }
+      if (obj.type === 'tool_use' || obj.type === 'tool_result') {
+        return { type: 'tool_use', name: obj.name || 'tool', ts, agent: agentId };
+      }
+    }
+
+    // Gemini JSONL/JSON: parts with functionCall
+    if (agentId === 'gemini') {
+      if (obj.role === 'model' || obj.role === 'assistant') {
+        if (obj.parts) {
+          for (const part of obj.parts) {
+            if (part.functionCall) return { type: 'tool_use', name: part.functionCall.name || 'tool', ts, agent: agentId };
+          }
+        }
+        return { type: 'text', text: 'response', ts, agent: agentId };
+      }
+    }
+
+    // Kimi/Hermes: { role: "tool", ... } or { role: "assistant", tool_calls: [...] }
+    if (agentId === 'kimi' || agentId === 'hermes') {
+      if (obj.role === 'tool') return { type: 'tool_use', name: obj.name || 'tool', ts, agent: agentId };
+      if (obj.role === 'assistant' && obj.tool_calls) {
+        const tc = obj.tool_calls[0];
+        return { type: 'tool_use', name: tc?.function?.name || 'tool', ts, agent: agentId };
+      }
+      if (obj.role === 'assistant') return { type: 'text', text: 'response', ts, agent: agentId };
+    }
+
+    // Generic fallback: look for common tool patterns
+    if (obj.tool_name || obj.type === 'tool_use' || obj.type === 'tool_result') {
+      return { type: 'tool_use', name: obj.tool_name || obj.name || 'tool', ts, agent: agentId };
+    }
+    if (obj.type === 'error' || obj.error) {
+      return { type: 'error', text: obj.error?.message || obj.text || 'error', ts, agent: agentId };
+    }
+  } catch {
+    // Non-JSON line — ignore
+  }
+  return null;
+}
+
+function watchSessionFile(sessionId, filePath, agentId) {
+  if (sessionFileWatchers.has(sessionId)) return; // already watching
+
+  let lastSize = 0;
+  try { lastSize = fs.statSync(filePath).size; } catch { return; }
+
+  const watcher = fs.watch(filePath, { persistent: false }, (eventType) => {
+    if (eventType !== 'change') return;
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.size <= lastSize) return; // no new data (or file was truncated)
+
+      // Read only the new bytes
+      const fd = fs.openSync(filePath, 'r');
+      const buf = Buffer.alloc(stat.size - lastSize);
+      fs.readSync(fd, buf, 0, buf.length, lastSize);
+      fs.closeSync(fd);
+      lastSize = stat.size;
+
+      // Parse new lines
+      const newLines = buf.toString('utf8').split('\n').filter(Boolean);
+      for (const line of newLines) {
+        const classified = classifyJsonlLine(line, agentId);
+        if (classified) {
+          safeSend('session-activity', sessionId, classified);
+        }
+      }
+    } catch (err) {
+      log.warn(`[session-watcher] Error reading ${filePath}: ${err.message}`);
+    }
+  });
+
+  sessionFileWatchers.set(sessionId, { watcher, filePath, lastSize });
+  WATCHED_SESSION_FILES.set(filePath, sessionId);
+  log.info(`[session-watcher] Watching ${agentId} session file: ${path.basename(filePath)}`);
+}
+
+function unwatchSessionFile(sessionId) {
+  const entry = sessionFileWatchers.get(sessionId);
+  if (!entry) return;
+  try { entry.watcher.close(); } catch {}
+  WATCHED_SESSION_FILES.delete(entry.filePath);
+  sessionFileWatchers.delete(sessionId);
+}
+
+function unwatchAllSessionFiles() {
+  for (const [sessionId] of sessionFileWatchers) {
+    unwatchSessionFile(sessionId);
+  }
+}
+
+// IPC: start watching a session's JSONL file for tool events
+ipcMain.handle('watch-session-file', (_event, sessionId, filePath, agentId) => {
+  watchSessionFile(sessionId, filePath, agentId);
+  return { ok: true };
+});
+
+// IPC: stop watching
+ipcMain.handle('unwatch-session-file', (_event, sessionId) => {
+  unwatchSessionFile(sessionId);
+  return { ok: true };
+});
 
 // ============================================================
 // PEERS BROKER — HTTP server + IPC handlers for cross-session messaging
@@ -2099,6 +2649,29 @@ function startPeersBroker() {
             res.end(JSON.stringify({ ok: true }));
             notifyPeersChanged();
             break;
+
+          // --- Hook-based session activity events ---
+          // Accepts: { session_id, tool_name, tool_result?, error?, agent? }
+          // Used by Claude Code PostToolUse hook and other CLI integrations.
+          case '/session-event': {
+            const sessionId = data.session_id;
+            if (!sessionId) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: 'session_id required' }));
+              break;
+            }
+            const classified = {
+              type: data.error ? 'error' : (data.tool_name ? 'tool_use' : 'text'),
+              name: data.tool_name || undefined,
+              text: data.error || data.tool_result?.slice(0, 200) || data.text?.slice(0, 120) || undefined,
+              ts: Date.now(),
+              agent: data.agent || 'claude',
+            };
+            safeSend('session-activity', sessionId, classified);
+            res.end(JSON.stringify({ ok: true }));
+            break;
+          }
+
           default:
             res.statusCode = 404;
             res.end(JSON.stringify({ error: 'not found' }));
@@ -2149,7 +2722,7 @@ function deliverPeerMessage(toPeerId, fromPeerId, text) {
   // Try to deliver via IPC to the renderer (for UI notification)
   if (mainWindow && !mainWindow.isDestroyed()) {
     const sender = peerGetById(fromPeerId);
-    mainWindow.webContents.send('peer-message', {
+    safeSend('peer-message', {
       toPeerId,
       fromPeerId,
       fromAgent: sender?.agent || 'unknown',
@@ -2176,9 +2749,7 @@ function deliverPeerMessage(toPeerId, fromPeerId, text) {
 }
 
 function notifyPeersChanged() {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('peers-changed');
-  }
+  safeSend('peers-changed');
 }
 
 // Auto-register sessions as peers when they spawn
@@ -2266,6 +2837,176 @@ ipcMain.handle('read-session-jsonl', (_event, sessionId) => {
   }
 });
 
+// --- IPC: read-session-conversation ---
+// Returns normalized messages for the conversation viewer.
+// Supports Claude JSONL (primary) and generic JSONL formats for other agents.
+ipcMain.handle('read-session-conversation', (_event, sessionId, filePath, agentId) => {
+  // Resolve file path: prefer explicit filePath (non-Claude), fall back to Claude cache
+  let jsonlPath = filePath || null;
+  if (!jsonlPath) {
+    const folder = getCachedFolder(sessionId);
+    if (!folder) return { error: 'Session not found' };
+    jsonlPath = path.join(PROJECTS_DIR, folder, sessionId + '.jsonl');
+  }
+
+  // Path sandbox
+  const resolved = path.resolve(jsonlPath);
+  const allowedRoots = [PROJECTS_DIR, PLANS_DIR, CLAUDE_DIR];
+  for (const [, session] of activeSessions) {
+    if (session.projectPath) allowedRoots.push(path.resolve(session.projectPath));
+  }
+  // Also allow agent history directories
+  for (const hist of Object.values(AGENT_HISTORY)) {
+    try {
+      if (hist.historyDir) allowedRoots.push(path.resolve(hist.historyDir()));
+    } catch {}
+  }
+  const allowed = allowedRoots.some(root => {
+    const r = path.resolve(root);
+    return resolved === r || resolved.startsWith(r + path.sep);
+  });
+  if (!allowed) return { error: 'Access denied' };
+
+  try {
+    const content = fs.readFileSync(jsonlPath, 'utf-8');
+    const lines = content.split('\n').filter(Boolean);
+    const messages = normalizeConversation(lines, agentId || 'claude');
+    return { messages };
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
+// Normalize raw JSONL lines into a clean message array for the viewer
+function normalizeConversation(lines, agentId) {
+  const parsed = [];
+  for (const line of lines) {
+    try { parsed.push(JSON.parse(line)); } catch { /* skip non-JSON */ }
+  }
+
+  if (agentId === 'claude') return normalizeClaudeConversation(parsed);
+
+  // Generic fallback for other agents
+  return normalizeGenericConversation(parsed, agentId);
+}
+
+function normalizeClaudeConversation(entries) {
+  // Build tool result lookup: tool_use_id → result content
+  const toolResults = new Map();
+  for (const entry of entries) {
+    if (entry.type === 'user' && Array.isArray(entry.message?.content)) {
+      for (const block of entry.message.content) {
+        if (block.type === 'tool_result') {
+          const resultText = Array.isArray(block.content)
+            ? block.content.map(c => c.text || '').join('\n')
+            : (typeof block.content === 'string' ? block.content : '');
+          toolResults.set(block.tool_use_id, { text: resultText, isError: !!block.is_error });
+        }
+      }
+    }
+  }
+
+  const messages = [];
+  for (const entry of entries) {
+    const ts = entry.timestamp || null;
+    const uuid = entry.uuid || null;
+
+    if (entry.type === 'summary') {
+      messages.push({ role: 'summary', text: entry.summary || '', ts, uuid });
+      continue;
+    }
+
+    if (entry.type === 'system' && entry.system) {
+      // Skip verbose system prompts unless they're short
+      const text = typeof entry.system === 'string' ? entry.system : JSON.stringify(entry.system);
+      if (text.length < 400) messages.push({ role: 'system', text, ts, uuid });
+      continue;
+    }
+
+    if (entry.type === 'user' && Array.isArray(entry.message?.content)) {
+      const textBlocks = entry.message.content.filter(b => b.type === 'text');
+      const hasToolResults = entry.message.content.some(b => b.type === 'tool_result');
+      // Only emit user message if it has real text (not just tool results)
+      if (textBlocks.length > 0) {
+        const text = textBlocks.map(b => b.text || '').join('\n');
+        messages.push({ role: 'user', text: text.trim(), ts, uuid });
+      }
+      // Skip pure tool-result entries — they're shown inline with tool calls
+      continue;
+    }
+
+    if (entry.type === 'assistant' && Array.isArray(entry.message?.content)) {
+      const textBlocks = entry.message.content.filter(b => b.type === 'text');
+      const toolBlocks = entry.message.content.filter(b => b.type === 'tool_use');
+      const text = textBlocks.map(b => b.text || '').join('\n').trim();
+
+      const tools = toolBlocks.map(b => ({
+        id: b.id,
+        name: b.name,
+        input: b.input || {},
+        result: toolResults.get(b.id) || null,
+      }));
+
+      const usage = entry.message?.usage || null;
+      const model = entry.message?.model || null;
+
+      if (text || tools.length > 0) {
+        messages.push({ role: 'assistant', text, tools, usage, model, ts, uuid });
+      }
+      continue;
+    }
+  }
+
+  return messages;
+}
+
+function normalizeGenericConversation(entries, agentId) {
+  const messages = [];
+  for (const entry of entries) {
+    const role = entry.role || entry.type || 'unknown';
+    let text = '';
+    let tools = [];
+
+    if (agentId === 'codex') {
+      if (entry.type !== 'response_item') continue;
+      const r = entry.role || entry.payload?.role;
+      if (r === 'developer' || r === 'user') {
+        const content = entry.payload?.content || [];
+        text = content.filter(c => c.type === 'input_text' || c.type === 'text').map(c => c.text || '').join('\n');
+        messages.push({ role: 'user', text: text.trim(), ts: null, uuid: null });
+      } else if (r === 'assistant') {
+        const content = entry.payload?.content || [];
+        text = content.filter(c => c.type === 'text' || c.type === 'output_text').map(c => c.text || '').join('\n');
+        tools = content.filter(c => c.type === 'tool_call' || c.type === 'function_call').map(c => ({
+          id: c.id || '',
+          name: c.name || c.function?.name || 'tool',
+          input: c.arguments ? (typeof c.arguments === 'string' ? (() => { try { return JSON.parse(c.arguments); } catch { return { raw: c.arguments }; } })() : c.arguments) : {},
+          result: null,
+        }));
+        if (text || tools.length > 0) messages.push({ role: 'assistant', text: text.trim(), tools, ts: null, uuid: null });
+      }
+      continue;
+    }
+
+    // Gemini / generic OpenAI-style
+    if (role === 'user' || role === 'human') {
+      if (entry.parts) text = entry.parts.map(p => p.text || '').join('\n');
+      else if (Array.isArray(entry.content)) text = entry.content.map(c => typeof c === 'string' ? c : (c.text || '')).join('\n');
+      else text = typeof entry.content === 'string' ? entry.content : '';
+      if (text) messages.push({ role: 'user', text: text.trim(), ts: null, uuid: null });
+    } else if (role === 'assistant' || role === 'model') {
+      if (entry.parts) {
+        tools = entry.parts.filter(p => p.functionCall).map(p => ({ id: '', name: p.functionCall.name || 'tool', input: p.functionCall.args || {}, result: null }));
+        text = entry.parts.filter(p => p.text).map(p => p.text).join('\n');
+      } else if (typeof entry.content === 'string') {
+        text = entry.content;
+      }
+      if (text || tools.length > 0) messages.push({ role: 'assistant', text: text.trim(), tools, ts: null, uuid: null });
+    }
+  }
+  return messages;
+}
+
 ipcMain.handle('archive-session', (_event, sessionId, archived) => {
   const val = archived ? 1 : 0;
   setArchived(sessionId, val);
@@ -2274,7 +3015,12 @@ ipcMain.handle('archive-session', (_event, sessionId, archived) => {
 
 // --- IPC: open-terminal ---
 ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, sessionOptions) => {
-  if (!mainWindow) return { ok: false, error: 'no window' };
+  // Find requesting window from IPC sender
+  const senderWindow = BrowserWindow.fromWebContents(_event.sender);
+  if (!senderWindow) return { ok: false, error: 'no window' };
+
+  // Assign session to the requesting window
+  assignSessionToWindow(sessionId, senderWindow.id);
 
   // Reattach to existing session
   if (activeSessions.has(sessionId)) {
@@ -2284,18 +3030,18 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
 
     // If TUI is in alternate screen mode, send escape to switch into it
     if (session.altScreen && !session.isPlainTerminal) {
-      mainWindow.webContents.send('terminal-data', sessionId, '\x1b[?1049h');
+      safeSendToSession(sessionId, 'terminal-data', sessionId, '\x1b[?1049h');
     }
 
     // Send buffered output for reattach
     for (const chunk of session.outputBuffer) {
-      mainWindow.webContents.send('terminal-data', sessionId, chunk);
+      safeSendToSession(sessionId, 'terminal-data', sessionId, chunk);
     }
 
     if (!session.isPlainTerminal) {
       // Hide cursor after buffer replay — the live PTY stream or resize nudge
       // will re-show it at the correct position, avoiding a stale cursor artifact
-      mainWindow.webContents.send('terminal-data', sessionId, '\x1b[?25l');
+      safeSendToSession(sessionId, 'terminal-data', sessionId, '\x1b[?25l');
     }
 
     return { ok: true, reattached: true, mcpActive: !!session.mcpServer };
@@ -2516,16 +3262,12 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
             session._cliBusy = true;
             session._oscIdle = false;
             log.debug(`[OSC 0] session=${currentId} → BUSY`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('cli-busy-state', currentId, true);
-            }
+              safeSendToSession(currentId, 'cli-busy-state', currentId, true);
           } else if (isIdle && session._cliBusy) {
             session._cliBusy = false;
             session._oscIdle = true;
             log.debug(`[OSC 0] session=${currentId} → IDLE`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('cli-busy-state', currentId, false);
-            }
+            safeSendToSession(currentId, 'cli-busy-state', currentId, false);
           }
         }
       }
@@ -2542,16 +3284,12 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
             session._cliBusy = true;
             session._oscIdle = false;
             log.debug(`[OSC 9;4] session=${currentId} → BUSY`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('cli-busy-state', currentId, true);
-            }
+            safeSendToSession(currentId, 'cli-busy-state', currentId, true);
           }
         } else {
           // Regular notification (attention, permission, etc.)
           log.info(`[OSC 9] session=${currentId} message="${payload}"`);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('terminal-notification', currentId, payload);
-          }
+          safeSendToSession(currentId, 'terminal-notification', currentId, payload);
         }
       }
     }
@@ -2582,9 +3320,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
       }
     }
 
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('terminal-data', currentId, data);
-    }
+    safeSendToSession(currentId, 'terminal-data', currentId, data);
   });
 
   ptyProcess.onExit(({ exitCode }) => {
@@ -2600,14 +3336,9 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
     session.mcpServer = null;
 
     const realId = session.realSessionId || sessionId;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('process-exited', realId, exitCode);
-      // If a fork/plan-accept transition re-keyed this session under realId
-      // but the PTY exited before transition detection ran, also notify the
-      // renderer for the original sessionId so it doesn't stay stuck as "Running".
-      if (realId !== sessionId && activeSessions.has(sessionId)) {
-        mainWindow.webContents.send('process-exited', sessionId, exitCode);
-      }
+    safeSend('process-exited', realId, exitCode);
+    if (realId !== sessionId && activeSessions.has(sessionId)) {
+      safeSend('process-exited', sessionId, exitCode);
     }
     activeSessions.delete(realId);
     // Clean up the original key too in case transition detection hasn't run yet
@@ -2833,9 +3564,7 @@ function detectSessionTransitions(folder) {
         activeSessions.set(newId, session);
         // Re-key MCP server to match new session ID
         rekeyMcpServer(sessionId, newId);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('session-forked', sessionId, newId);
-        }
+        safeSend('session-forked', sessionId, newId);
         break; // Only one transition per session per flush
       }
     }
@@ -2912,6 +3641,60 @@ function startProjectsWatcher() {
 // --- IPC: app version ---
 ipcMain.handle('get-app-version', () => app.getVersion());
 
+// --- IPC: multi-window ---
+
+// Detach a session into its own BrowserWindow
+ipcMain.handle('detach-session', async (_event, sessionId) => {
+  if (!activeSessions.has(sessionId)) return { ok: false, error: 'session not found' };
+  const { windowId } = createDetachedWindow(sessionId);
+  // Notify all windows that session ownership changed
+  safeSend('session-detached', sessionId, windowId);
+  return { ok: true, windowId };
+});
+
+// List sessions owned by the calling window
+ipcMain.handle('get-window-sessions', (_event) => {
+  const senderWindow = BrowserWindow.fromWebContents(_event.sender);
+  if (!senderWindow) return { sessions: [] };
+  const entry = windowRegistry.get(senderWindow.id);
+  return { sessions: entry ? [...entry.ownedSessions] : [], isMain: entry?.isMain ?? false };
+});
+
+// Broadcast a command/input to all running PTY sessions
+ipcMain.handle('broadcast-input', (_event, text) => {
+  let count = 0;
+  for (const [sessionId, session] of activeSessions) {
+    if (session.pty && !session.exited) {
+      try {
+        session.pty.write(text);
+        count++;
+      } catch {}
+    }
+  }
+  return { ok: true, count };
+});
+
+// Get list of all windows (for cross-window awareness)
+ipcMain.handle('get-windows', (_event) => {
+  const senderWindow = BrowserWindow.fromWebContents(_event.sender);
+  return [...windowRegistry.entries()].map(([id, entry]) => ({
+    id,
+    isMain: entry.isMain,
+    isSelf: senderWindow ? id === senderWindow.id : false,
+    sessionCount: entry.ownedSessions.size,
+    sessions: [...entry.ownedSessions],
+  }));
+});
+
+// Focus/bring a window to front by window ID
+ipcMain.handle('focus-window', (_event, windowId) => {
+  const entry = windowRegistry.get(windowId);
+  if (!entry || entry.window.isDestroyed()) return { ok: false };
+  entry.window.show();
+  entry.window.focus();
+  return { ok: true };
+});
+
 // --- IPC: auto-updater ---
 ipcMain.handle('updater-check', () => {
   if (!autoUpdater) return { available: false, dev: true };
@@ -2952,6 +3735,9 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   // Shut down peers broker
   stopPeersBroker();
+
+  // Stop all session file watchers
+  unwatchAllSessionFiles();
 
   // Shut down all MCP servers
   shutdownAllMcp();
