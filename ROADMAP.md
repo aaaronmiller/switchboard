@@ -6,64 +6,50 @@
 
 ---
 
-## Block 0 — Orchestrator, Proxy & Token Compression (Extra-Large)
+## Block 0 — Orchestrator, Proxy Integration & Token Compression (Extra-Large)
 
-The next-generation architecture. Three tightly-coupled subsystem that transform Switchboard from a session manager into an **intelligent orchestration hub**. All three share infrastructure: the orchestrator needs status feeds, the proxy handles model routing, and compression sits at the I/O boundary to slash token costs.
+Three subsystems. The proxy is already **functional and complete** as a standalone service — this block is about integrating it into Switchboard, building the orchestrator on top, and adding the compression layer at the I/O boundary.
 
-### Orchestrator Layer
+### Proxy Integration (already built — just needs wiring)
+
+| Feature | Size | Description |
+|---------|------|-------------|
+| **Proxy Integration** | `[L]` | The proxy already works standalone — arbitrary model routing across any provider (OpenAI, Anthropic, Google, local). Just needs: (1) IPC bridge from Switchboard sessions to proxy, (2) model selector UI in session config, (3) proxy config stored in `~/.switchboard/providers.json`. No proxy code to write — just integration. |
+| **Proxy Telemetry Reporting** | `[M]` | The proxy already tracks tokens, costs, latency per request. Needs: (1) telemetry endpoint Switchboard can poll/subscribe to, (2) display per-session in sidebar (token count, cost, model badge), (3) aggregate view in stats tab. |
+| **Model Fallback Chain** | `[S]` | If the proxy supports retry-on-error (or can be extended), configure fallback chains per session: `sonnet-4 → gpt-4o → haiku`. Stored in provider config. |
+
+### Orchestrator Layer (new)
 
 | Feature | Size | Description |
 |---------|------|-------------|
 | **Orchestrator Core** | `[XL]` | New subsystem that sits above all running sessions and maintains a real-time state model of every active agent. Tracks: session health, current task, progress %, last tool call, error state, token burn rate, git status. Exposes `orchestrator.getState()` returning a snapshot of all sessions. UI: new "Orchestrator" sidebar tab showing live state of every running session across all agents. |
 | **Hook-Based Status Reporting** | `[L]` | Leverages the existing PostToolUse hook mechanic: when any agent executes a tool, the hook fires an HTTP event to Switchboard. The orchestrator subscribes to these events and builds a live state machine per session. Extends beyond tool events — adds heartbeat pings, task completion signals, error detection. New IPC: `orchestrator-subscribe`, `orchestrator-unsubscribe`, `orchestrator-get-state`. |
 | **Cross-Session Coordination** | `[L]` | Orchestrator can detect when sessions are working on related tasks (same project path, shared file references). Offers suggestions: "Session A just modified `api.py` — Session B is reviewing `test_api.py`, want to notify?" Enables manual or automatic task delegation between agents. |
-| **Mission Control Dashboard** | `[L]` | Visual overlay showing all active sessions as cards with live-updating status: running/stuck/error/idle, current step, progress bar, last tool used, token burn rate. Auto-refreshes every 1s from orchestrator state. Clicking a card opens that session. `dep: Orchestrator Core, Hook-Based Status` |
+| **Mission Control Dashboard** | `[L]` | Visual overlay showing all active sessions as cards with live-updating status: running/stuck/error/idle, current step, progress bar, last tool used, token burn rate (from proxy telemetry). Auto-refreshes every 1s from orchestrator state. Clicking a card opens that session. `dep: Orchestrator Core, Hook-Based Status, Proxy Telemetry` |
 
-**Shared code:** All four share the `OrchestratorState` class (in-memory state machine) and the hook event ingest pipeline. Status reporting feeds the orchestrator, which feeds the dashboard.
-
-**Files touched:** New file `orchestrator.js` (main process state machine + hook ingest), new IPC handlers in `main.js`, new preload bindings, new sidebar tab in `public/index.html`, orchestrator panel in `public/app.js`, CSS for mission control cards.
-
-### Proxy Layer
+### Dynamic Compression (new)
 
 | Feature | Size | Description |
 |---------|------|-------------|
-| **Arbitrary Model Routing** | `[XL]` | Local proxy layer that sits between Switchboard sessions and LLM backends. Intercepts model requests and routes them to any configured provider (OpenAI, Anthropic, Google, local Ollama, etc.). User can select different models per session or per step: "use `gpt-4o-mini` for boilerplate, `claude-sonnet-4` for architecture, `o1` for reasoning." Model selection exposed in session config UI and step-level override in scheduler. |
-| **Provider Abstraction** | `[L]` | Unified request/response interface across providers. Normalizes: message format, tool calling syntax, streaming behavior, token counting, error formats. Provider config stored in `~/.switchboard/providers.json` with API keys, rate limits, model lists. New file: `proxy-router.js` (main process). `dep: Arbitrary Model Routing` |
-| **Model Fallback Chain** | `[M]` | Configurable fallback: if primary model is rate-limited or returns an error, automatically retry on next model in chain. E.g., `claude-sonnet-4 → gpt-4o → claude-haiku → local-llama`. User defines chains per task type (code, review, planning). `dep: Provider Abstraction` |
-| **Cost-Aware Routing** | `[M]` | Orchestrator tracks per-session token budget. When budget is tight, proxy auto-routes to cheaper models for non-critical tasks. Dashboard shows spend projection: "At current rate, you'll hit $10/day budget in 3 hours." `dep: Arbitrary Model Routing, Orchestrator Core` |
-
-**Shared code:** All four share the `ProviderRegistry` class and the request interception middleware. Provider Abstraction is the foundation the others build on.
-
-**Files touched:** New file `proxy-router.js` (main process), `~/.switchboard/providers.json` config, IPC handlers in `main.js`, preload bindings, model selector UI in `public/app.js` (session config panel), CSS for model badges.
-
-### Dynamic Compression
-
-| Feature | Size | Description |
-|---------|------|-------------|
-| **Input Compression** | `[XL]` | Before user prompts reach the LLM, they pass through a compression layer that removes redundancy, compresses boilerplate, and strips non-essential formatting while preserving semantics. Target: **70-80% token reduction** on typical developer input (verbose explanations, repeated context, large code blocks). Uses a combination of: AST-aware code dedup, semantic text compression, context window optimization. Compressed input is transparently decompressed in the response for display. `dep: Proxy Layer (intercept point)` |
-| **Output Compression** | `[L]` | Terminal output and LLM responses are compressed before being sent back to the session context. Removes: repeated boilerplate, redundant error messages, verbose stack traces (summarized to root cause), duplicate imports. Preserves: code changes, decisions, key findings. Target: **70-80% token reduction** on output. `dep: Proxy Layer` |
-| **Compression Config** | `[M]` | Per-session compression settings: off / light (preserve structure, compress whitespace) / aggressive (semantic compression) / custom regex rules. Compression ratio displayed per message ("saved 73% tokens"). Toggle in session config. Settings persist in `~/.switchboard/compression.json`. `dep: Input Compression, Output Compression` |
-| **Fidelity Verification** | `[M]` | Post-compression quality check: decompress and diff against original, flag low-confidence compressions for user review. Compression ratio + fidelity score logged per message. Adaptive: if fidelity drops below threshold for a session, auto-reduce compression aggressiveness. `dep: Input Compression` |
-
-**Shared code:** Input and Output compression share the `CompressorEngine` class with different rule sets. Config is shared across both. Fidelity verification uses the same engine in reverse.
-
-**Files touched:** New file `compressor.js` (compression engine + rule sets), integration in `proxy-router.js` (intercept points), IPC handlers, preload bindings, compression config UI in `public/app.js`, CSS for compression ratio badges.
+| **Input Compression** | `[XL]` | Before user prompts reach the LLM, they pass through a compression layer that removes redundancy, compresses boilerplate, and strips non-essential formatting while preserving semantics. Target: **70-80% token reduction** on typical developer input. Uses a combination of: AST-aware code dedup, semantic text compression, context window optimization. Integrates at the proxy intercept point — compressed requests go through the existing proxy, so no new routing code needed. Compressed input is transparently decompressed in the response for display. |
+| **Output Compression** | `[L]` | Terminal output and LLM responses are compressed before being sent back to the session context. Removes: repeated boilerplate, redundant error messages, verbose stack traces (summarized to root cause), duplicate imports. Preserves: code changes, decisions, key findings. Target: **70-80% token reduction** on output. |
+| **Compression Config** | `[M]` | Per-session compression settings: off / light (preserve structure, compress whitespace) / aggressive (semantic compression) / custom regex rules. Compression ratio displayed per message ("saved 73% tokens"). Toggle in session config. Settings persist in `~/.switchboard/compression.json`. |
+| **Fidelity Verification** | `[M]` | Post-compression quality check: decompress and diff against original, flag low-confidence compressions for user review. Compression ratio + fidelity score logged per message. Adaptive: if fidelity drops below threshold for a session, auto-reduce compression aggressiveness. |
 
 ### Implementation Order
 
 ```
-1. Provider Abstraction        → foundation for proxy layer
-2. Arbitrary Model Routing     → core proxy functionality
-3. Hook-Based Status Reporting → feeds orchestrator
+1. Proxy Integration          → wire up existing proxy to Switchboard sessions
+2. Proxy Telemetry Reporting  → surface token/cost/model data in UI
+3. Hook-Based Status Reporting → feeds orchestrator from existing hook mechanic
 4. Orchestrator Core           → state machine + hook ingest
-5. Input Compression           → biggest token savings first
+5. Input Compression           → biggest token savings first (proxy intercept point)
 6. Output Compression          → second half of savings
-7. Model Fallback Chain        → reliability on top of proxy
+7. Model Fallback Chain        → reliability on top of proxy (if supported)
 8. Cross-Session Coordination  → orchestrator intelligence
 9. Compression Config          → user control
-10. Cost-Aware Routing         → budget management
-11. Fidelity Verification      → quality assurance
-12. Mission Control Dashboard  → visual interface
+10. Fidelity Verification      → quality assurance
+11. Mission Control Dashboard  → visual interface combining all three layers
 ```
 
 ### Architecture Diagram
@@ -80,10 +66,10 @@ The next-generation architecture. Three tightly-coupled subsystem that transform
         │               │                      │
         ▼               ▼                      ▼
 ┌───────────────────────────────────────────────────────────┐
-│                    Proxy Router                            │
+│              Proxy (ALREADY FUNCTIONAL)                    │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐ │
 │  │   Provider   │  │    Model     │  │   Compression    │ │
-│  │ Abstraction  │  │   Fallback   │  │     Engine       │ │
+│  │   Routing    │  │   Fallback   │  │     Engine       │ │
 │  └──────┬───────┘  └──────┬───────┘  └────────┬─────────┘ │
 └─────────┼─────────────────┼───────────────────┼───────────┘
           │                 │                   │
@@ -100,12 +86,11 @@ The next-generation architecture. Three tightly-coupled subsystem that transform
    errors)          │
 ```
 
-**Estimated total:** ~2000+ lines across orchestrator.js, proxy-router.js, compressor.js, IPC handlers, UI, and CSS.
+**Estimated total:** ~1500 lines (proxy integration is ~200 lines, the rest is orchestrator + compression).
 
 **External dependencies:**
-- LLM provider API keys and rate limits
-- Proxy-side work if using existing proxy infrastructure (Headroom, RTK)
-- PostToolUse hook must be installed in agent configs (already done for Claude Code)
+- Proxy service running and accessible (already functional standalone)
+- PostToolUse hook installed in agent configs (already done for Claude Code)
 
 ---
 
