@@ -6,91 +6,124 @@
 
 ---
 
-## Block 0 — Orchestrator, Proxy Integration & Token Compression (Extra-Large)
+## Block 0 — Orchestrator, Agentic Swarms & TDD Quality Gates (Extra-Large)
 
-Three subsystems. The proxy is already **functional and complete** as a standalone service — this block is about integrating it into Switchboard, building the orchestrator on top, and adding the compression layer at the I/O boundary.
+**The killer differentiator.** While every other AI coding tool goes kanban-board or hands-off git-worktree, Switchboard offers **full micromanagement control** over every process. The orchestrator doesn't just watch — it *thinks*, *decomposes*, *dispatches*, and *verifies*. The user stays in the loop with full visibility and veto power at every level.
 
-### Proxy Integration (already built — just needs wiring)
-
-| Feature | Size | Description |
-|---------|------|-------------|
-| **Proxy Integration** | `[L]` | The proxy already works standalone — arbitrary model routing across any provider (OpenAI, Anthropic, Google, local). Just needs: (1) IPC bridge from Switchboard sessions to proxy, (2) model selector UI in session config, (3) proxy config stored in `~/.switchboard/providers.json`. No proxy code to write — just integration. |
-| **Proxy Telemetry Reporting** | `[M]` | The proxy already tracks tokens, costs, latency per request. Needs: (1) telemetry endpoint Switchboard can poll/subscribe to, (2) display per-session in sidebar (token count, cost, model badge), (3) aggregate view in stats tab. |
-| **Model Fallback Chain** | `[S]` | If the proxy supports retry-on-error (or can be extended), configure fallback chains per session: `sonnet-4 → gpt-4o → haiku`. Stored in provider config. |
-
-### Orchestrator Layer (new)
+### Orchestrator with Deliberative Council
 
 | Feature | Size | Description |
 |---------|------|-------------|
-| **Orchestrator Core** | `[XL]` | New subsystem that sits above all running sessions and maintains a real-time state model of every active agent. Tracks: session health, current task, progress %, last tool call, error state, token burn rate, git status. Exposes `orchestrator.getState()` returning a snapshot of all sessions. UI: new "Orchestrator" sidebar tab showing live state of every running session across all agents. |
-| **Hook-Based Status Reporting** | `[L]` | Leverages the existing PostToolUse hook mechanic: when any agent executes a tool, the hook fires an HTTP event to Switchboard. The orchestrator subscribes to these events and builds a live state machine per session. Extends beyond tool events — adds heartbeat pings, task completion signals, error detection. New IPC: `orchestrator-subscribe`, `orchestrator-unsubscribe`, `orchestrator-get-state`. |
-| **Cross-Session Coordination** | `[L]` | Orchestrator can detect when sessions are working on related tasks (same project path, shared file references). Offers suggestions: "Session A just modified `api.py` — Session B is reviewing `test_api.py`, want to notify?" Enables manual or automatic task delegation between agents. |
-| **Mission Control Dashboard** | `[L]` | Visual overlay showing all active sessions as cards with live-updating status: running/stuck/error/idle, current step, progress bar, last tool used, token burn rate (from proxy telemetry). Auto-refreshes every 1s from orchestrator state. Clicking a card opens that session. `dep: Orchestrator Core, Hook-Based Status, Proxy Telemetry` |
+| **Orchestrator Agent** | `[XL]` | An AI agent that confers with a **deliberative council** (like the deliberative-refinement skill: 6-8 specialist agents running rounds of critique). When given a project goal ("build a REST API for user management"), the orchestrator + council break it down into elemental tasks, classify each as parallel or serial, identify dependencies, and produce a structured execution plan. The council roles: Architect (system design), Decomposer (task breakdown), QA (test strategy), Security (threat model), Performance (bottleneck prediction), Cost (model routing), and Devil's Advocate (what could go wrong). |
+| **Hook-Based Status Reporting** | `[L]` | Leverages the existing PostToolUse hook mechanic: when any agent executes a tool, the hook fires an HTTP event to the orchestrator. This is the council's eyes — they see what every agent is doing in real-time. Extends beyond tool events to heartbeat pings, task completion signals, and error detection. New IPC: `orchestrator-subscribe`, `orchestrator-unsubscribe`, `orchestrator-get-state`. |
+| **Plan Decomposition & Visualization** | `[L]` | The orchestrator's output plan is visualized as a task graph: nodes are tasks, edges are dependencies, colors encode parallel/serial. User can edit the plan before dispatch: merge tasks, split tasks, reorder, add/remove. The plan supports conditional branches ("if test fails, retry with upgraded model") and gates ("don't proceed to integration until unit tests pass"). `dep: Orchestrator Agent` |
 
-### Dynamic Compression (new)
+### Agentic Swarm Execution
 
 | Feature | Size | Description |
 |---------|------|-------------|
-| **Input Compression** | `[XL]` | Before user prompts reach the LLM, they pass through a compression layer that removes redundancy, compresses boilerplate, and strips non-essential formatting while preserving semantics. Target: **70-80% token reduction** on typical developer input. Uses a combination of: AST-aware code dedup, semantic text compression, context window optimization. Integrates at the proxy intercept point — compressed requests go through the existing proxy, so no new routing code needed. Compressed input is transparently decompressed in the response for display. |
-| **Output Compression** | `[L]` | Terminal output and LLM responses are compressed before being sent back to the session context. Removes: repeated boilerplate, redundant error messages, verbose stack traces (summarized to root cause), duplicate imports. Preserves: code changes, decisions, key findings. Target: **70-80% token reduction** on output. |
-| **Compression Config** | `[M]` | Per-session compression settings: off / light (preserve structure, compress whitespace) / aggressive (semantic compression) / custom regex rules. Compression ratio displayed per message ("saved 73% tokens"). Toggle in session config. Settings persist in `~/.switchboard/compression.json`. |
-| **Fidelity Verification** | `[M]` | Post-compression quality check: decompress and diff against original, flag low-confidence compressions for user review. Compression ratio + fidelity score logged per message. Adaptive: if fidelity drops below threshold for a session, auto-reduce compression aggressiveness. |
+| **Swarm Dispatch** | `[XL]` | Execute the plan by spawning parallel agent sessions. Each task gets its own agent instance with a focused prompt ("you are a test writer for the auth module — write tests for these endpoints: ..."). The scheduler already supports this — Block 0 extends it from manual patterns to orchestrator-generated plans. Swarm runs show a live task board: green ✓ for done, blue ◐ for running, red ✗ for failed, grey ○ for queued. `dep: Plan Decomposition` |
+| **Self-Service Model Escalation** | `[M]` | Any sub-agent (or the orchestrator) can request its model be upgraded or downgraded via the proxy. When a cheap model is stuck (detected by loop detection, repeated failures, or the agent explicitly asking for help), it auto-escalates: `haiku → sonnet-4 → opus`. When a smart model finishes quickly with high confidence, it suggests downgrading for similar tasks. This is surfaced in the UI as "Session X upgraded from haiku → sonnet-4: stuck on regex parsing." `dep: Proxy Integration` |
+| **Cross-Agent Coordination** | `[L]` | The orchestrator detects when swarm agents are stepping on each other (same file, conflicting changes, circular dependencies) and intervenes: pauses one, redirects, or merges. Enables patterns like "Agent A builds API, Agent B writes tests, Agent C reviews — but C waits for A and B to finish." `dep: Swarm Dispatch, Hook-Based Status` |
+
+### TDD Quality Gates
+
+| Feature | Size | Description |
+|---------|------|-------------|
+| **Gated Specs & Test-First Dispatch** | `[XL]` | Every task in the plan ships with a spec and test suite. The swarm dispatches cheap models to write code, but **code only lands if tests pass**. This is the quality gate: even a "retarded model" can produce working code as long as the tests validate it. Workflow: (1) Orchestrator writes spec + tests (smart model), (2) dispatches cheap model to implement, (3) runs tests, (4) if pass → merge, if fail → retry with feedback or escalate model. `dep: Swarm Dispatch` |
+| **Test Generation Council** | `[M]` | The QA member of the deliberative council specializes in test strategy: unit tests, integration tests, property tests, edge cases. Before any code is written, the QA council generates the test suite so the gate is ready. Uses the scheduler's existing pattern system to store test suites as reusable patterns. `dep: Orchestrator Agent` |
+| **Continuous Verification Loop** | `[L]` | After code lands, the orchestrator runs a verification sweep: lint, type-check, integration tests, and a smoke test. If anything breaks, it creates a fix task and dispatches it. This loop runs until green. The user sees a live verification pipeline with pass/fail bars for each stage. `dep: Gated Specs` |
+
+### Proxy Integration & Compression (infrastructure)
+
+| Feature | Size | Description |
+|---------|------|-------------|
+| **Proxy Integration** | `[L]` | The proxy already works standalone — arbitrary model routing across any provider. Needs: (1) IPC bridge from Switchboard sessions to proxy, (2) model selector UI in session config, (3) proxy config stored in `~/.switchboard/providers.json`. No proxy code to write — just wiring. |
+| **Proxy Telemetry Reporting** | `[M]` | Proxy already tracks tokens, costs, latency per request. Needs: (1) telemetry endpoint Switchboard polls/subscribes to, (2) display per-session in sidebar (token count, cost, model badge), (3) cost-per-task attribution for swarm runs. |
+| **Input/Output Compression** | `[L]` | 70-80% token reduction on prompts and responses via AST-aware code dedup and semantic compression. Integrates at the proxy intercept point — compressed requests go through the existing proxy, so no new routing code needed. Per-session compression config with ratio badges. Target: slash costs on swarm runs where cheap models process large contexts. |
+| **Model Fallback Chain** | `[S]` | Configure fallback chains per session: `sonnet-4 → gpt-4o → haiku`. Auto-retry on rate limit or error. Stored in provider config. |
+
+### The UI Challenge: Displaying Everything Cleanly
+
+The hardest part of Block 0 isn't the code — it's **displaying a deliberative council, a swarm of agents, their test results, model escalations, and the verification pipeline** without overwhelming the user.
+
+**Design principles:**
+1. **Progressive disclosure** — Top-level shows "Building auth API: 3/7 tasks done, $0.42 so far." Click to expand shows the task graph. Click a task to see the council deliberation, agent output, and test results.
+2. **Color by state, not by type** — Green = passing, yellow = in-progress, red = failing, grey = queued. One color language across tasks, tests, agents, and pipeline stages.
+3. **Cost always visible** — A running total in the top-right of the orchestrator panel: "$0.42 · 84k tokens · haiku (3), sonnet (1)."
+4. **User stays in control** — The orchestrator proposes, the user approves or edits. No autonomous execution without consent. Override any model choice, skip any task, merge any branches.
+5. **The scheduler is the canvas** — Existing scheduler UI (task list, execution overlay, pattern editor) becomes the orchestrator's interface. No new panel — just a richer view of the same data.
 
 ### Implementation Order
 
 ```
-1. Proxy Integration          → wire up existing proxy to Switchboard sessions
-2. Proxy Telemetry Reporting  → surface token/cost/model data in UI
-3. Hook-Based Status Reporting → feeds orchestrator from existing hook mechanic
-4. Orchestrator Core           → state machine + hook ingest
-5. Input Compression           → biggest token savings first (proxy intercept point)
-6. Output Compression          → second half of savings
-7. Model Fallback Chain        → reliability on top of proxy (if supported)
-8. Cross-Session Coordination  → orchestrator intelligence
-9. Compression Config          → user control
-10. Fidelity Verification      → quality assurance
-11. Mission Control Dashboard  → visual interface combining all three layers
+1. Proxy Integration             → wire up existing proxy (foundation for everything)
+2. Proxy Telemetry Reporting     → surface token/cost/model data in UI
+3. Hook-Based Status Reporting   → feeds orchestrator from existing hook mechanic
+4. Orchestrator Agent + Council  → deliberative decomposition engine
+5. Plan Decomposition & Viz      → task graph UI (extends scheduler)
+6. Swarm Dispatch                → execute plan as parallel agent sessions
+7. TDD Gated Specs               → test-first quality gates
+8. Test Generation Council       → QA writes tests before code
+9. Self-Service Model Escalation → sub-agents request model changes via proxy
+10. Cross-Agent Coordination     → orchestrator resolves conflicts
+11. Continuous Verification Loop → lint → test → smoke pipeline
+12. Input/Output Compression     → 70-80% token cost reduction
+13. Model Fallback Chain         → reliability on top of proxy
 ```
 
 ### Architecture Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     Switchboard UI                          │
-│  ┌──────────┐  ┌──────────────┐  ┌────────────────────┐    │
-│  │ Session  │  │ Orchestrator │  │  Mission Control   │    │
-│  │ Config   │  │   Dashboard  │  │                    │    │
-│  └────┬─────┘  └──────┬───────┘  └──────────┬─────────┘    │
-│       │               │                      │              │
-└───────┼───────────────┼──────────────────────┼──────────────┘
-        │               │                      │
-        ▼               ▼                      ▼
-┌───────────────────────────────────────────────────────────┐
-│              Proxy (ALREADY FUNCTIONAL)                    │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐ │
-│  │   Provider   │  │    Model     │  │   Compression    │ │
-│  │   Routing    │  │   Fallback   │  │     Engine       │ │
-│  └──────┬───────┘  └──────┬───────┘  └────────┬─────────┘ │
-└─────────┼─────────────────┼───────────────────┼───────────┘
-          │                 │                   │
-          ▼                 ▼                   ▼
-┌──────────────┐  ┌─────────────────┐  ┌───────────────┐
-│  Anthropic   │  │    OpenAI       │  │    Ollama /   │
-│  Claude API  │  │    GPT API      │  │  Local LLM    │
-└──────────────┘  └─────────────────┘  └───────────────┘
+│                    Switchboard UI                           │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │              Orchestrator Panel                      │   │
+│  │  ┌───────────┐  ┌─────────────┐  ┌───────────────┐ │   │
+│  │  │ Delibera- │  │   Plan      │  │    Swarm      │ │   │
+│  │  │  tive     │→ │   Graph     │→ │  Task Board   │ │   │
+│  │  │  Council  │  │  (editable) │  │  (live)       │ │   │
+│  │  └───────────┘  └─────────────┘  └───────┬───────┘ │   │
+│  │                                          │          │   │
+│  │  ┌───────────────────────────────────────┤          │   │
+│  │  │ Verification Pipeline                  │          │   │
+│  │  │ spec → unit → integration → smoke     │          │   │
+│  │  └───────────────────────────────────────┘          │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│  $0.42 · 84k tokens · haiku(3) sonnet(1)  ← always visible │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+          ┌────────────────┼────────────────┐
+          ▼                ▼                ▼
+┌─────────────────┐ ┌──────────────┐ ┌──────────────────┐
+│ Proxy (existing)│ │ Agent Session│ │  Test Runner     │
+│ ┌─────────────┐ │ │ (per task)   │ │ (gate: pass/fail)│
+│ │ Model Router│ │ │ haiku/sonnet │ │                  │
+│ │ Fallback    │ │ │ auto-escalate│ │ unit/integration │
+│ │ Compression │ │ │              │ │ smoke/lint       │
+│ └──────┬──────┘ │ └──────────────┘ └──────────────────┘
+│        │        │
+└────────┼────────┘
+         │
+         ▼
+┌──────────────┐  ┌────────────┐  ┌────────────┐
+│  Anthropic   │  │   OpenAI   │  │  Ollama /  │
+│  Claude API  │  │   GPT API  │  │  Local LLM │
+└──────────────┘  └────────────┘  └────────────┘
 
-                    ▲
-  Hook Events ──────┤ (PostToolUse → HTTP → Orchestrator)
-  (tool calls,      │
-   heartbeats,      │
-   errors)          │
+  ▲
+  │ Hook Events (PostToolUse → HTTP → Orchestrator)
+  │ Tool calls, heartbeats, errors, completion signals
 ```
 
-**Estimated total:** ~1500 lines (proxy integration is ~200 lines, the rest is orchestrator + compression).
+**Estimated total:** ~2500 lines across orchestrator.js, council agents, plan graph UI, swarm dispatcher, TDD gate runner, proxy integration, compression, and UI.
 
 **External dependencies:**
 - Proxy service running and accessible (already functional standalone)
 - PostToolUse hook installed in agent configs (already done for Claude Code)
+- Test runner infrastructure (can use existing scheduler patterns + `waitForOutput`)
 
 ---
 
@@ -226,7 +259,7 @@ Lower priority features that become valuable once Blocks 1-5 are solid.
 
 | Phase | Block | Features | Est. Lines | Complexity |
 |-------|-------|----------|------------|------------|
-| **NOW** | 0. Orchestrator+Proxy+Compression | Orchestrator, Proxy, Compression (12 features) | ~2000+ | XL |
+| **NOW** | 0. Orchestrator + Swarms + TDD | Orchestrator+Council, Swarm, TDD Gates, Proxy, Compression (13 features) | ~2500+ | XL |
 | **Next** | 1. Resilience | Retry, Error Watcher, Health Monitor, WAIT_FOR_IDLE | ~400 | Medium |
 | **Next** | 2. Patterns | Quick Send, YAML/CSV, Nested, Matrix, Git Storage | ~500 | Low-Medium |
 | **Then** | 3. Visualization | History+, Timeline, Dashboard, Analytics | ~800 | Medium |
@@ -241,21 +274,22 @@ Lower priority features that become valuable once Blocks 1-5 are solid.
 ## Dependencies Graph
 
 ```
-Block 0: Orchestrator + Proxy + Compression
-  Provider Abstraction ──────┐
-  Arbitrary Model Routing ───┤── Proxy Layer ──┐
-  Hook-Based Status ─────────┤                 │
-  Orchestrator Core ─────────┤                 │
-  Input Compression ─────────┤─── Compression ─┤
-  Output Compression ────────┘                 │
-  Model Fallback Chain ───── Proxy Layer ──────┤
-  Cross-Session Coordination Orchestrator ─────┤
-  Compression Config ──────── Compression ─────┤
-  Cost-Aware Routing ──────── Proxy+Orch ──────┤
-  Fidelity Verification ───── Compression ─────┤
-  Mission Control Dashboard ─ Orchestrator ────┘
-                                                 │
-Block 1: Resilience                              │
+Block 0: Orchestrator + Swarms + TDD
+  Proxy Integration ─────────────────────────┐
+  Proxy Telemetry ───────────────────────────┤
+  Hook-Based Status ─────────────────────────┤
+  Orchestrator Agent + Council ──────────────┤
+  Plan Decomposition & Viz ──────────────────┤
+  Swarm Dispatch ────────────────────────────┤
+  TDD Gated Specs ───────────────────────────┤
+  Test Generation Council ─── dep: Council    │
+  Self-Service Model Escalation ── dep: Proxy│
+  Cross-Agent Coordination ── dep: Swarm     │
+  Continuous Verification ─── dep: TDD Gates │
+  Input/Output Compression ─── dep: Proxy    │
+  Model Fallback Chain ────── dep: Proxy     │
+                                             │
+Block 1: Resilience                          │
   23 Retry ──────────────────────────────────┐   │
   32 Error Watcher ──┐                       │   │
   33 Health Monitor ─┤── shared health loop   │   │
@@ -296,7 +330,7 @@ Block 6: Advanced
 
 ## Notes
 
-- **Block 0 is the priority** — Orchestrator, Proxy, and Compression are the next features to build.
+- **Block 0 is the priority** — Orchestrator + Swarms + TDD is the killer feature set. Everything else extends it.
 - **Block 1 and 2 can be developed in parallel** — they share no dependencies.
 - **Block 3 depends on Block 1** (health data for dashboard) but can start with Timeline independently.
 - **Block 4 depends on having a `runPatternByName` extraction** — do this refactor first.
