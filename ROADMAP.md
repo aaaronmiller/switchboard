@@ -6,95 +6,100 @@
 
 ---
 
-## Block 0 — Orchestrator, Agentic Swarms & TDD Quality Gates (Extra-Large)
+## Block 0 — MACS Integration: The Synthetic Cortex (Extra-Large)
 
-**The killer differentiator.** While every other AI coding tool goes kanban-board or hands-off git-worktree, Switchboard offers **full micromanagement control** over every process. The orchestrator doesn't just watch — it *thinks*, *decomposes*, *dispatches*, and *verifies*. The user stays in the loop with full visibility and veto power at every level.
+**The killer differentiator.** While every other AI coding tool goes kanban-board or hands-off git-worktree, Switchboard is the **command center for a biomimetic cognitive architecture** — the MACS (Monitoring Agentic Swarms) system built on the Context-Injected Orchestration (CIO) Pattern. Three-layer topology: **Prime → Council → Swarm**. File-system shared memory. Quality gates. Cheap models doing grunt work, verified by tests. The user stays in COMMAND, not control — gives one objective, approves the plan once, watches the ant colony work.
 
-### Orchestrator with Deliberative Council
+### The MACS Architecture (Prime → Council → Swarm)
 
-| Feature | Size | Description |
-|---------|------|-------------|
-| **Orchestrator Agent** | `[XL]` | An AI agent that confers with a **deliberative council** (like the deliberative-refinement skill: 6-8 specialist agents running rounds of critique). When given a project goal ("build a REST API for user management"), the orchestrator + council break it down into elemental tasks, classify each as parallel or serial, identify dependencies, and produce a structured execution plan. The council roles: Architect (system design), Decomposer (task breakdown), QA (test strategy), Security (threat model), Performance (bottleneck prediction), Cost (model routing), and Devil's Advocate (what could go wrong). |
-| **Hook-Based Status Reporting** | `[L]` | Leverages the existing PostToolUse hook mechanic: when any agent executes a tool, the hook fires an HTTP event to the orchestrator. This is the council's eyes — they see what every agent is doing in real-time. Extends beyond tool events to heartbeat pings, task completion signals, and error detection. New IPC: `orchestrator-subscribe`, `orchestrator-unsubscribe`, `orchestrator-get-state`. |
-| **Plan Decomposition & Visualization** | `[L]` | The orchestrator's output plan is visualized as a task graph: nodes are tasks, edges are dependencies, colors encode parallel/serial. User can edit the plan before dispatch: merge tasks, split tasks, reorder, add/remove. The plan supports conditional branches ("if test fails, retry with upgraded model") and gates ("don't proceed to integration until unit tests pass"). `dep: Orchestrator Agent` |
+| Layer | Role | Implementation |
+|-------|------|---------------|
+| **Prime Orchestrator** | The "Ego" — holds identity, integrates outputs, narrates progress | CLAUDE.md + speckit spec/plan generation. One approval from user, then autonomous execution. |
+| **Council** | The "Sub-Personalities" — Architect, Decomposer, QA, Security, Performance, Cost, Devil's Advocate. Debate the plan, validate specs. | Deliberative council (like deliberative-refinement skill): 6-8 specialist agents, 3 rounds of critique. Produces: spec.md, plan.md, tasks.md with dependency graph. |
+| **Swarm** | The "Automatic Processes" — parallel stateless agents executing individual tasks. Cheap models by default, auto-escalate when stuck. | Speckit tasks → spawned as parallel sessions. Each gets focused prompt + file context + tool access. Returns result to shared memory. |
 
-### Agentic Swarm Execution
-
-| Feature | Size | Description |
-|---------|------|-------------|
-| **Swarm Dispatch** | `[XL]` | Execute the plan by spawning parallel agent sessions. Each task gets its own agent instance with a focused prompt ("you are a test writer for the auth module — write tests for these endpoints: ..."). The scheduler already supports this — Block 0 extends it from manual patterns to orchestrator-generated plans. Swarm runs show a live task board: green ✓ for done, blue ◐ for running, red ✗ for failed, grey ○ for queued. `dep: Plan Decomposition` |
-| **Self-Service Model Escalation** | `[M]` | Any sub-agent (or the orchestrator) can request its model be upgraded or downgraded via the proxy. When a cheap model is stuck (detected by loop detection, repeated failures, or the agent explicitly asking for help), it auto-escalates: `haiku → sonnet-4 → opus`. When a smart model finishes quickly with high confidence, it suggests downgrading for similar tasks. This is surfaced in the UI as "Session X upgraded from haiku → sonnet-4: stuck on regex parsing." `dep: Proxy Integration` |
-| **Cross-Agent Coordination** | `[L]` | The orchestrator detects when swarm agents are stepping on each other (same file, conflicting changes, circular dependencies) and intervenes: pauses one, redirects, or merges. Enables patterns like "Agent A builds API, Agent B writes tests, Agent C reviews — but C waits for A and B to finish." `dep: Swarm Dispatch, Hook-Based Status` |
-
-### TDD Quality Gates
+### Quality Gates (TDD + Speckit Enforcement)
 
 | Feature | Size | Description |
 |---------|------|-------------|
-| **Gated Specs & Test-First Dispatch** | `[XL]` | Every task in the plan ships with a spec and test suite. The swarm dispatches cheap models to write code, but **code only lands if tests pass**. This is the quality gate: even a "retarded model" can produce working code as long as the tests validate it. Workflow: (1) Orchestrator writes spec + tests (smart model), (2) dispatches cheap model to implement, (3) runs tests, (4) if pass → merge, if fail → retry with feedback or escalate model. `dep: Swarm Dispatch` |
-| **Test Generation Council** | `[M]` | The QA member of the deliberative council specializes in test strategy: unit tests, integration tests, property tests, edge cases. Before any code is written, the QA council generates the test suite so the gate is ready. Uses the scheduler's existing pattern system to store test suites as reusable patterns. `dep: Orchestrator Agent` |
-| **Continuous Verification Loop** | `[L]` | After code lands, the orchestrator runs a verification sweep: lint, type-check, integration tests, and a smoke test. If anything breaks, it creates a fix task and dispatches it. This loop runs until green. The user sees a live verification pipeline with pass/fail bars for each stage. `dep: Gated Specs` |
+| **Gated Specs (Speckit Constitution)** | `[L]` | Before any code is written, the QA council member generates a constitution.md (project principles), spec.md (WHAT/WHY), and test suites. Speckit's built-in quality gates validate: no implementation details in specs, all ambiguities resolved, constitution alignment checked. `dep: Council` |
+| **Test-First Dispatch** | `[XL]` | Every task in the plan ships with tests. Swarm dispatches cheap models to implement, but **code only lands if tests pass**. Even a weak model produces working code as long as the gate validates it. Workflow: (1) QA writes tests (smart model), (2) cheap model implements, (3) run tests, (4) pass → merge, fail → retry with feedback or escalate. `dep: Gated Specs, Swarm Dispatch` |
+| **Continuous Verification Loop** | `[L]` | After code lands, run: lint → type-check → integration tests → smoke test. If anything breaks, create a fix task and dispatch it. Loop runs until green. User sees live verification pipeline: ✓ unit ✓ integration ◐ smoke. `dep: Test-First Dispatch` |
+
+### Swarm Execution & Model Economics
+
+| Feature | Size | Description |
+|---------|------|-------------|
+| **Swarm Dispatch** | `[XL]` | Execute the plan by spawning parallel agent sessions. Each task gets: focused prompt (from tasks.md), file context (shared memory via filesystem), tool access (MCP + bash), model assignment (cheap by default). Live task board: green ✓ done, blue ◐ running, red ✗ failed, grey ○ queued. `dep: Plan Decomposition` |
+| **Self-Service Model Escalation** | `[M]` | Any sub-agent can request model upgrade via proxy. When stuck (loop detection, repeated failures, or agent explicitly asks): `haiku → sonnet-4 → opus`. When a smart model finishes quickly with high confidence, suggests downgrading for similar tasks. Surface in UI: "Session 3 upgraded haiku → sonnet-4: stuck on regex." `dep: Proxy Integration` |
+| **Cross-Agent Coordination** | `[L]` | Prime detects when swarm agents conflict (same file, circular deps) and intervenes: pause one, redirect, or merge. File-system lock prevents simultaneous writes to same file. Enables: "Agent A builds API, Agent B writes tests, Agent C reviews — C waits for A and B." `dep: Swarm Dispatch, Hook-Based Status` |
+| **Model Fallback Chain** | `[S]` | Configure fallback per session: `sonnet-4 → gpt-4o → haiku`. Auto-retry on rate limit or error. Stored in provider config. `dep: Proxy Integration` |
 
 ### Proxy Integration & Compression (infrastructure)
 
 | Feature | Size | Description |
 |---------|------|-------------|
-| **Proxy Integration** | `[L]` | The proxy already works standalone — arbitrary model routing across any provider. Needs: (1) IPC bridge from Switchboard sessions to proxy, (2) model selector UI in session config, (3) proxy config stored in `~/.switchboard/providers.json`. No proxy code to write — just wiring. |
+| **Proxy Integration** | `[L]` | Proxy already works standalone — arbitrary model routing across any provider. Needs: (1) IPC bridge from Switchboard to proxy, (2) model selector UI in session config, (3) `~/.switchboard/providers.json` config. No proxy code to write — just wiring. |
 | **Proxy Telemetry Reporting** | `[M]` | Proxy already tracks tokens, costs, latency per request. Needs: (1) telemetry endpoint Switchboard polls/subscribes to, (2) display per-session in sidebar (token count, cost, model badge), (3) cost-per-task attribution for swarm runs. |
-| **Input/Output Compression** | `[L]` | 70-80% token reduction on prompts and responses via AST-aware code dedup and semantic compression. Integrates at the proxy intercept point — compressed requests go through the existing proxy, so no new routing code needed. Per-session compression config with ratio badges. Target: slash costs on swarm runs where cheap models process large contexts. |
-| **Model Fallback Chain** | `[S]` | Configure fallback chains per session: `sonnet-4 → gpt-4o → haiku`. Auto-retry on rate limit or error. Stored in provider config. |
+| **Input/Output Compression** | `[L]` | 70-80% token reduction on prompts and responses. Integrates at proxy intercept point — compressed requests through existing proxy, no new routing code. Per-session config with ratio badges. Target: slash costs on swarm runs where cheap models process large contexts. |
+
+### Shared Memory & Status Reporting
+
+| Feature | Size | Description |
+|---------|------|-------------|
+| **File-System Shared Memory** | `[L]` | The MACS architecture uses the filesystem as "long-term memory" between agents. Each swarm agent writes results to `specs/NNN-task-name/output.md`. The Prime reads all outputs to synthesize the final result. File-system locks prevent write conflicts. This is the **continuity of self** that survives individual agent death. `dep: Swarm Dispatch` |
+| **Hook-Based Status Reporting** | `[L]` | PostToolUse hook fires HTTP events to the Prime when any agent executes a tool. This is the council's real-time eyes. Extends beyond tool events: heartbeat pings, task completion signals, error detection. IPC: `orchestrator-subscribe`, `orchestrator-unsubscribe`, `orchestrator-get-state`. |
 
 ### The UI Challenge: Displaying Everything Cleanly
 
-The hardest part of Block 0 isn't the code — it's **displaying a deliberative council, a swarm of agents, their test results, model escalations, and the verification pipeline** without overwhelming the user.
+The hardest part isn't the code — it's **displaying a deliberative council, a swarm of agents, their test results, model escalations, and the verification pipeline** without overwhelming the user.
 
 **Design principles:**
-1. **Progressive disclosure** — Top-level shows "Building auth API: 3/7 tasks done, $0.42 so far." Click to expand shows the task graph. Click a task to see the council deliberation, agent output, and test results.
-2. **Color by state, not by type** — Green = passing, yellow = in-progress, red = failing, grey = queued. One color language across tasks, tests, agents, and pipeline stages.
-3. **Cost always visible** — A running total in the top-right of the orchestrator panel: "$0.42 · 84k tokens · haiku (3), sonnet (1)."
-4. **User stays in control** — The orchestrator proposes, the user approves or edits. No autonomous execution without consent. Override any model choice, skip any task, merge any branches.
-5. **The scheduler is the canvas** — Existing scheduler UI (task list, execution overlay, pattern editor) becomes the orchestrator's interface. No new panel — just a richer view of the same data.
+1. **Progressive disclosure** — Top-level: "Building auth API: 3/7 tasks done, $0.42 so far." Click → task graph. Click task → council deliberation, agent output, test results.
+2. **Color by state, not by type** — Green = passing, yellow = in-progress, red = failing, grey = queued. One language across tasks, tests, agents, pipeline stages.
+3. **Cost always visible** — Top-right: "$0.42 · 84k tokens · haiku(3), sonnet(1)."
+4. **User stays in COMMAND** — One approval (the plan), then autonomous. Override any model, skip any task, merge any branches. Command means setting objectives and constraints. Control means touching every lever.
+5. **The scheduler is the canvas** — Existing scheduler UI becomes the orchestrator's interface. No new panel — richer view of the same data.
 
 ### Multi-Monitor Scaling: The Ant Colony View
 
-**The goal:** You sit in front of a 49" ultrawide + three 27" monitors. Every agent session is visible at once — like watching an ant colony work. Terminals, test output, council deliberation, task graphs — all laid out across the available real estate. Nothing hidden behind tabs. Nothing clipped to 1920×1080.
+**The goal:** 49" ultrawide + three 27" monitors. Every agent session visible at once — like watching an ant colony work. Nothing hidden behind tabs. Nothing clipped.
 
 **Three scaling modes:**
 
 | Mode | Use case | Behavior |
 |------|----------|----------|
-| **Contained** | Laptop, single monitor | All features in the sidebar. Terminal panel switches between sessions. Compact mode for small screens. |
-| **Detached** | Two monitors | Pop individual sessions into independent Electron windows. Each window is a full terminal with its own controls. Arrange manually across screens. |
-| **Ant Colony** | Three+ monitors (49" ultrawide + extras) | **Tiled layout engine** — all active agent sessions tile across the available screen space in a configurable grid. Each tile shows: live terminal output (last 20 lines), task name, progress bar, model badge, cost ticker, test status. Tiles auto-resize to fill the combined monitor area. New agents spawn new tiles. Completed agents fade to half-opacity but stay visible. Failed agents flash red until acknowledged. |
+| **Contained** | Laptop, single monitor | All features in the sidebar. Terminal panel switches between sessions. |
+| **Detached** | Two monitors | Pop sessions into independent Electron windows. Manual arrangement. |
+| **Ant Colony** | Three+ monitors | **Tiled layout engine** — all active agents tile across combined screen space. Each tile: live terminal (last 20 lines), task name, progress bar, model badge, cost ticker, test status. Auto-resize to fill. New agents → new tiles. Completed → fade half-opacity. Failed → flash red until acknowledged. |
 
-**Ant Colony layout specifics:**
-- **Adaptive grid** — detects total pixel dimensions of all monitors combined. Calculates optimal tile size: `floor(sqrt(totalAgents / aspectRatio))` columns × rows.
-- **Per-tile density control** — click a tile to expand it to 2×2 or 4×4 size (merges with neighbors). Click again to collapse. Pin tiles to keep them large.
-- **Session minimization** — idle agents shrink to a single line: "✓ Session 3 · haiku · auth tests · $0.02" — takes 30px instead of 300px.
-- **Global status bar** — a thin bar across the top of the combined display: total cost, total tokens, running/queued/failed counts, current swarm phase.
-- **Cross-monitor window spanning** — Electron windows request `frameless` + `fullscreen` on each monitor, with transparent borders so the grid flows seamlessly across bezels.
-- **Zoom per panel** — Ctrl+scroll or pinch-zoom on any tile to scale its font size. Each tile tracks its own zoom level independently.
-
-**The dream:** You're watching 8 agents work in parallel. Three are running tests (green bars filling), two are writing code (terminal scrolling), one is stuck and escalated to a smarter model (yellow badge, ↑ arrow), one is reviewing another agent's output (side-by-side diff), and the orchestrator council is deliberating the next phase (mini conversation view in their tile). Total cost ticker ticking up in real-time. And you can click any tile to see the full terminal, intervene, send a command, or promote/demote the model.
-
-**Implementation note:** This extends the existing multi-window system (detach sessions) with a **coordinated layout engine** — not independent windows, but a single orchestrator view split across multiple monitors. The layout engine knows about all monitors, calculates tile positions, and tells each Electron window where to place itself and what to render.
+**Ant Colony specifics:**
+- **Adaptive grid** — detects total pixel dimensions, calculates optimal columns × rows
+- **Per-tile density control** — click to expand 2×2 or 4×4, pin to lock size
+- **Session minimization** — idle agents shrink to 30px: "✓ Session 3 · haiku · auth tests · $0.02"
+- **Global status bar** — thin top bar: total cost, tokens, running/queued/failed, swarm phase
+- **Cross-monitor spanning** — frameless fullscreen per monitor, seamless bezel flow
+- **Zoom per panel** — each tile tracks independent font scaling
 
 ### Implementation Order
 
+**Build the hands before the brain. Quality gates first, orchestration on top.**
+
 ```
-1. Proxy Integration             → wire up existing proxy (foundation for everything)
-2. Proxy Telemetry Reporting     → surface token/cost/model data in UI
-3. Hook-Based Status Reporting   → feeds orchestrator from existing hook mechanic
-4. Orchestrator Agent + Council  → deliberative decomposition engine
-5. Plan Decomposition & Viz      → task graph UI (extends scheduler)
-6. Swarm Dispatch                → execute plan as parallel agent sessions
-7. TDD Gated Specs               → test-first quality gates
-8. Test Generation Council       → QA writes tests before code
-9. Self-Service Model Escalation → sub-agents request model changes via proxy
-10. Cross-Agent Coordination     → orchestrator resolves conflicts
-11. Continuous Verification Loop → lint → test → smoke pipeline
-12. Input/Output Compression     → 70-80% token cost reduction
-13. Model Fallback Chain         → reliability on top of proxy
-14. Ant Colony Layout Engine     → multi-monitor tiling, adaptive grid, density control
+1. Proxy Integration             → wire up existing proxy (foundation)
+2. Proxy Telemetry Reporting     → surface token/cost/model data
+3. Hook-Based Status Reporting   → PostToolUse → Prime event stream
+4. File-System Shared Memory     → shared workspace for swarm agents
+5. Gated Specs (Speckit)         → constitution, spec, tests before code
+6. Test-First Dispatch           → cheap model implements, tests gate it
+7. Swarm Dispatch                → parallel agent sessions per task
+8. Self-Service Model Escalation → sub-agents request upgrades via proxy
+9. Cross-Agent Coordination      → Prime resolves file conflicts, deps
+10. Continuous Verification      → lint → test → smoke pipeline
+11. Input/Output Compression     → 70-80% token reduction
+12. Model Fallback Chain         → reliability on top of proxy
+13. Council (Deliberative)       → Architect, Decomposer, QA, etc. — plan quality
+14. Ant Colony Layout Engine     → multi-monitor tiling, adaptive grid
 ```
 
 ### Architecture Diagram
@@ -104,14 +109,77 @@ The hardest part of Block 0 isn't the code — it's **displaying a deliberative 
 │                    Switchboard UI                           │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────┐   │
-│  │              Orchestrator Panel                      │   │
+│  │           MACS Orchestrator Panel                    │   │
+│  │                                                      │   │
 │  │  ┌───────────┐  ┌─────────────┐  ┌───────────────┐ │   │
-│  │  │ Delibera- │  │   Plan      │  │    Swarm      │ │   │
-│  │  │  tive     │→ │   Graph     │→ │  Task Board   │ │   │
-│  │  │  Council  │  │  (editable) │  │  (live)       │ │   │
+│  │  │ Council   │  │   Plan      │  │    Swarm      │ │   │
+│  │  │ (Prime +  │→ │   Graph     │→ │  Task Board   │ │   │
+│  │  │  7 Roles) │  │  (editable) │  │  (live)       │ │   │
 │  │  └───────────┘  └─────────────┘  └───────┬───────┘ │   │
 │  │                                          │          │   │
 │  │  ┌───────────────────────────────────────┤          │   │
+│  │  │ Verification Pipeline                  │          │   │
+│  │  │ spec → unit → integration → smoke     │          │   │
+│  │  └───────────────────────────────────────┘          │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│  $0.42 · 84k tokens · haiku(3) sonnet(1)  ← always visible │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+          ┌────────────────┼────────────────┐
+          ▼                ▼                ▼
+┌─────────────────┐ ┌──────────────┐ ┌──────────────────┐
+│ Proxy (existing)│ │ Agent Session│ │  Test Runner     │
+│ ┌─────────────┐ │ │ (per task)   │ │ (gate: pass/fail)│
+│ │ Model Router│ │ │ haiku/sonnet │ │                  │
+│ │ Fallback    │ │ │ auto-escalate│ │ unit/integration │
+│ │ Compression │ │ │              │ │ smoke/lint       │
+│ └──────┬──────┘ │ └──────────────┘ └──────────────────┘
+│        │        │
+└────────┼────────┘
+         │
+         ▼
+┌──────────────┐  ┌────────────┐  ┌────────────┐
+│  Anthropic   │  │   OpenAI   │  │  Ollama /  │
+│  Claude API  │  │   GPT API  │  │  Local LLM │
+└──────────────┘  └────────────┘  └────────────┘
+
+  ▲
+  │ Hook Events (PostToolUse → HTTP → Prime Orchestrator)
+  │ Tool calls, heartbeats, errors, completion signals
+
+┌─────────────────────────────────────────────────────────────┐
+│           Ant Colony: Multi-Monitor Layout Engine           │
+│                                                             │
+│  ┌──────────┬──────────┬──────────┬──────────────────────┐  │
+│  │ Agent 1  │ Agent 2  │ Agent 3  │ Agent 4 (expanded)  │  │
+│  │ haiku    │ sonnet   │ haiku    │ opus (↑ from haiku) │  │
+│  │ █████░░░ │ ████░░░░ │ ██████░░ │ ░░░░░░░░ (idle)     │  │
+│  │ $0.04    │ $0.18    │ $0.02    │ $0.31               │  │
+│  ├──────────┼──────────┼──────────┼──────────────────────┤  │
+│  │ Agent 5  │ Agent 6  │ Council  │ Verification Pipe.   │  │
+│  │ haiku    │ gpt-4o   │ deliber. │ ✓ unit ✓ integ       │  │
+│  │ ██░░░░░░ │ █████░░░ │ thinking │ ◐ smoke              │  │
+│  │ $0.01    │ $0.12    │          │ $0.42 total          │  │
+│  └──────────┴──────────┴──────────┴──────────────────────┘  │
+│                                                             │
+│  Tiles auto-adapt to combined monitor resolution            │
+│  Click to expand 2×2 or 4×4  ·  Pin to lock size            │
+│  Idle → minimized (30px)  ·  Failed → flash red             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Estimated total:** ~3000 lines across orchestrator.js, council agents, plan graph UI, swarm dispatcher, TDD gate runner, proxy integration, compression, multi-monitor layout engine, and UI.
+
+**External dependencies:**
+- Proxy service running and accessible (already functional standalone)
+- Speckit (github/spec-kit) installed — provides constitution, spec, plan, tasks, checklists
+- PostToolUse hook installed in agent configs (already done for Claude Code)
+- Test runner infrastructure (can use existing scheduler patterns + `waitForOutput`)
+
+---
+
+## Legend
 │  │  │ Verification Pipeline                  │          │   │
 │  │  │ spec → unit → integration → smoke     │          │   │
 │  │  └───────────────────────────────────────┘          │   │
@@ -304,7 +372,7 @@ Lower priority features that become valuable once Blocks 1-5 are solid.
 
 | Phase | Block | Features | Est. Lines | Complexity |
 |-------|-------|----------|------------|------------|
-| **NOW** | 0. Orchestrator + Swarms + TDD | Orchestrator+Council, Swarm, TDD Gates, Proxy, Compression (13 features) | ~2500+ | XL |
+| **NOW** | 0. MACS Integration | Prime/Council/Swarm, TDD Gates, Proxy, Compression, Ant Colony (14 features) | ~3000+ | XL |
 | **Next** | 1. Resilience | Retry, Error Watcher, Health Monitor, WAIT_FOR_IDLE | ~400 | Medium |
 | **Next** | 2. Patterns | Quick Send, YAML/CSV, Nested, Matrix, Git Storage | ~500 | Low-Medium |
 | **Then** | 3. Visualization | History+, Timeline, Dashboard, Analytics | ~800 | Medium |
@@ -312,27 +380,28 @@ Lower priority features that become valuable once Blocks 1-5 are solid.
 | **Later** | 5. Proxy Telemetry | Cost Attribution, Security Filtering, Fidelity | ~600+ | High |
 | **Future** | 6. Advanced | Sharing, Protocol, Checkpoint, Multi-Project, Collab | ~1500+ | High-XL |
 
-**Total remaining:** ~7,000+ lines across all blocks.
+**Total remaining:** ~7,500+ lines across all blocks.
 
 ---
 
 ## Dependencies Graph
 
 ```
-Block 0: Orchestrator + Swarms + TDD
+Block 0: MACS Integration (Prime → Council → Swarm)
   Proxy Integration ─────────────────────────┐
   Proxy Telemetry ───────────────────────────┤
   Hook-Based Status ─────────────────────────┤
-  Orchestrator Agent + Council ──────────────┤
-  Plan Decomposition & Viz ──────────────────┤
+  File-System Shared Memory ─────────────────┤
+  Gated Specs (Speckit) ─────────────────────┤
+  Test-First Dispatch ── dep: Gated Specs    │
   Swarm Dispatch ────────────────────────────┤
-  TDD Gated Specs ───────────────────────────┤
-  Test Generation Council ─── dep: Council    │
-  Self-Service Model Escalation ── dep: Proxy│
+  Self-Service Escalation ── dep: Proxy      │
   Cross-Agent Coordination ── dep: Swarm     │
-  Continuous Verification ─── dep: TDD Gates │
-  Input/Output Compression ─── dep: Proxy    │
-  Model Fallback Chain ────── dep: Proxy     │
+  Continuous Verification ── dep: TDD Gates  │
+  Input/Output Compression ── dep: Proxy     │
+  Model Fallback Chain ──── dep: Proxy       │
+  Council (Deliberative) ── dep: Speckit     │
+  Ant Colony Layout Engine ──────────────────┤
                                              │
 Block 1: Resilience                          │
   23 Retry ──────────────────────────────────┐   │
@@ -375,7 +444,7 @@ Block 6: Advanced
 
 ## Notes
 
-- **Block 0 is the priority** — Orchestrator + Swarms + TDD is the killer feature set. Everything else extends it.
+- **Block 0 is the priority** — MACS (Prime → Council → Swarm) is the killer feature set. Built on the Context-Injected Orchestration pattern with filesystem shared memory, Speckit quality gates, and the proxy for model routing.
 - **Block 1 and 2 can be developed in parallel** — they share no dependencies.
 - **Block 3 depends on Block 1** (health data for dashboard) but can start with Timeline independently.
 - **Block 4 depends on having a `runPatternByName` extraction** — do this refactor first.
