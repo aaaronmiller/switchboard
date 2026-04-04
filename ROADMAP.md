@@ -54,6 +54,30 @@ The hardest part of Block 0 isn't the code — it's **displaying a deliberative 
 4. **User stays in control** — The orchestrator proposes, the user approves or edits. No autonomous execution without consent. Override any model choice, skip any task, merge any branches.
 5. **The scheduler is the canvas** — Existing scheduler UI (task list, execution overlay, pattern editor) becomes the orchestrator's interface. No new panel — just a richer view of the same data.
 
+### Multi-Monitor Scaling: The Ant Colony View
+
+**The goal:** You sit in front of a 49" ultrawide + three 27" monitors. Every agent session is visible at once — like watching an ant colony work. Terminals, test output, council deliberation, task graphs — all laid out across the available real estate. Nothing hidden behind tabs. Nothing clipped to 1920×1080.
+
+**Three scaling modes:**
+
+| Mode | Use case | Behavior |
+|------|----------|----------|
+| **Contained** | Laptop, single monitor | All features in the sidebar. Terminal panel switches between sessions. Compact mode for small screens. |
+| **Detached** | Two monitors | Pop individual sessions into independent Electron windows. Each window is a full terminal with its own controls. Arrange manually across screens. |
+| **Ant Colony** | Three+ monitors (49" ultrawide + extras) | **Tiled layout engine** — all active agent sessions tile across the available screen space in a configurable grid. Each tile shows: live terminal output (last 20 lines), task name, progress bar, model badge, cost ticker, test status. Tiles auto-resize to fill the combined monitor area. New agents spawn new tiles. Completed agents fade to half-opacity but stay visible. Failed agents flash red until acknowledged. |
+
+**Ant Colony layout specifics:**
+- **Adaptive grid** — detects total pixel dimensions of all monitors combined. Calculates optimal tile size: `floor(sqrt(totalAgents / aspectRatio))` columns × rows.
+- **Per-tile density control** — click a tile to expand it to 2×2 or 4×4 size (merges with neighbors). Click again to collapse. Pin tiles to keep them large.
+- **Session minimization** — idle agents shrink to a single line: "✓ Session 3 · haiku · auth tests · $0.02" — takes 30px instead of 300px.
+- **Global status bar** — a thin bar across the top of the combined display: total cost, total tokens, running/queued/failed counts, current swarm phase.
+- **Cross-monitor window spanning** — Electron windows request `frameless` + `fullscreen` on each monitor, with transparent borders so the grid flows seamlessly across bezels.
+- **Zoom per panel** — Ctrl+scroll or pinch-zoom on any tile to scale its font size. Each tile tracks its own zoom level independently.
+
+**The dream:** You're watching 8 agents work in parallel. Three are running tests (green bars filling), two are writing code (terminal scrolling), one is stuck and escalated to a smarter model (yellow badge, ↑ arrow), one is reviewing another agent's output (side-by-side diff), and the orchestrator council is deliberating the next phase (mini conversation view in their tile). Total cost ticker ticking up in real-time. And you can click any tile to see the full terminal, intervene, send a command, or promote/demote the model.
+
+**Implementation note:** This extends the existing multi-window system (detach sessions) with a **coordinated layout engine** — not independent windows, but a single orchestrator view split across multiple monitors. The layout engine knows about all monitors, calculates tile positions, and tells each Electron window where to place itself and what to render.
+
 ### Implementation Order
 
 ```
@@ -70,6 +94,7 @@ The hardest part of Block 0 isn't the code — it's **displaying a deliberative 
 11. Continuous Verification Loop → lint → test → smoke pipeline
 12. Input/Output Compression     → 70-80% token cost reduction
 13. Model Fallback Chain         → reliability on top of proxy
+14. Ant Colony Layout Engine     → multi-monitor tiling, adaptive grid, density control
 ```
 
 ### Architecture Diagram
@@ -116,9 +141,29 @@ The hardest part of Block 0 isn't the code — it's **displaying a deliberative 
   ▲
   │ Hook Events (PostToolUse → HTTP → Orchestrator)
   │ Tool calls, heartbeats, errors, completion signals
+
+┌─────────────────────────────────────────────────────────────┐
+│           Ant Colony: Multi-Monitor Layout Engine           │
+│                                                             │
+│  ┌──────────┬──────────┬──────────┬──────────────────────┐  │
+│  │ Agent 1  │ Agent 2  │ Agent 3  │ Agent 4 (expanded)  │  │
+│  │ haiku    │ sonnet   │ haiku    │ opus (↑ from haiku) │  │
+│  │ █████░░░ │ ████░░░░ │ ██████░░ │ ░░░░░░░░ (idle)     │  │
+│  │ $0.04    │ $0.18    │ $0.02    │ $0.31               │  │
+│  ├──────────┼──────────┼──────────┼──────────────────────┤  │
+│  │ Agent 5  │ Agent 6  │ Council  │ Verification Pipe.   │  │
+│  │ haiku    │ gpt-4o   │ deliber. │ ✓ unit ✓ integ       │  │
+│  │ ██░░░░░░ │ █████░░░ │ thinking │ ◐ smoke              │  │
+│  │ $0.01    │ $0.12    │          │ $0.42 total          │  │
+│  └──────────┴──────────┴──────────┴──────────────────────┘  │
+│                                                             │
+│  Tiles auto-adapt to combined monitor resolution            │
+│  Click to expand 2×2 or 4×4  ·  Pin to lock size            │
+│  Idle → minimized (30px)  ·  Failed → flash red             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Estimated total:** ~2500 lines across orchestrator.js, council agents, plan graph UI, swarm dispatcher, TDD gate runner, proxy integration, compression, and UI.
+**Estimated total:** ~3000 lines across orchestrator.js, council agents, plan graph UI, swarm dispatcher, TDD gate runner, proxy integration, compression, multi-monitor layout engine, and UI.
 
 **External dependencies:**
 - Proxy service running and accessible (already functional standalone)
