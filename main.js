@@ -6,7 +6,7 @@ const os = require('os');
 const pty = require('node-pty');
 const log = require('electron-log');
 const { getFolderIndexMtimeMs } = require('./folder-index-state');
-const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolvePendingDiff, rekeyMcpServer, cleanStaleLockFiles } = require('./mcp-bridge');
+const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolvePendingDiff, rekeyMcpServer } = require('./mcp-bridge');
 const { fetchAndTransformUsage } = require('./claude-auth');
 log.transports.file.level = app.isPackaged ? 'info' : 'debug';
 log.transports.console.level = app.isPackaged ? 'info' : 'debug';
@@ -24,6 +24,114 @@ const cleanPtyEnv = Object.fromEntries(
     k !== 'WT_SESSION'
   )
 );
+
+// --- Git status cache and discovery (F5) ---
+const gitStatusCache = new Map(); // projectPath -> { data, timestamp }
+const GIT_CACHE_TTL = 60_000; // 60 seconds
+
+// Agent history scan cache — avoids full filesystem walks on every IPC call
+const agentScanCache = new Map(); // agentId -> { sessions, timestamp }
+const AGENT_SCAN_CACHE_TTL = 30_000; // 30 seconds
+
+function getProjectGitStatus(projectPath) {
+  const unknown = { status: 'unknown', branch: null, ahead: 0, behind: 0, dirty: false };
+  if (!projectPath) return unknown;
+  try {
+    const gitDir = path.join(projectPath, '.git');
+    if (!fs.existsSync(gitDir)) return unknown;
+
+    const { spawnSync } = require('child_process');
+
+    // Single call: get branch info + dirty status in one shot
+    const result = spawnSync('git', ['status', '--branch', '--porcelain'], {
+      cwd: projectPath,
+      timeout: 10_000,
+      encoding: 'utf8',
+    });
+    if (result.error) return unknown; // git not installed or other error
+
+    const output = result.stdout;
+    if (!output || !output.trim()) return unknown;
+
+    const lines = output.trim().split('\n');
+    const branchLine = lines[0];
+
+    // Parse branch line: ## branchName...upstreamName [ahead N, behind M]
+    // or just:           ## branchName  (no upstream configured)
+    const branchMatch = branchLine.match(/^##\s+(\S+)/);
+    if (!branchMatch) return unknown;
+
+    const branchInfo = branchMatch[1];
+    const aheadBehindMatch = branchInfo.match(/^(.+?)\.\.\.(.+?)\s+\[ahead\s+(\d+),\s*behind\s+(\d+)\]/);
+
+    let branch, ahead, behind, status;
+
+    if (aheadBehindMatch) {
+      // Has upstream info
+      branch = aheadBehindMatch[1];
+      ahead = parseInt(aheadBehindMatch[3], 10) || 0;
+      behind = parseInt(aheadBehindMatch[4], 10) || 0;
+    } else {
+      // No upstream — just branch name
+      branch = branchInfo.split('...')[0];
+      ahead = 0;
+      behind = 0;
+    }
+
+    // Determine status
+    if (ahead > 0 && behind === 0) {
+      status = 'ahead';
+    } else if (behind > 0 && ahead === 0) {
+      status = 'behind';
+    } else if (ahead > 0 && behind > 0) {
+      status = 'diverged';
+    } else {
+      status = 'current';
+    }
+
+    // Check for dirty files (any lines after the branch line)
+    const dirty = lines.length > 1;
+
+    return { status, branch, ahead, behind, dirty };
+  } catch {
+    return { status: 'unknown', branch: null, ahead: 0, behind: 0, dirty: false };
+  }
+}
+
+function getCachedGitStatus(projectPath, forceRefresh = false) {
+  if (!forceRefresh) {
+    const cached = gitStatusCache.get(projectPath);
+    if (cached && (Date.now() - cached.timestamp) < GIT_CACHE_TTL) {
+      return cached.data;
+    }
+  }
+  const data = getProjectGitStatus(projectPath);
+  gitStatusCache.set(projectPath, { data, timestamp: Date.now() });
+  return data;
+}
+
+function clearGitCache() {
+  gitStatusCache.clear();
+}
+
+// Evict stale git cache entries every 5 minutes
+const gitCacheEvictTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of gitStatusCache) {
+    if (now - val.timestamp > GIT_CACHE_TTL * 5) {
+      gitStatusCache.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
+
+// Force-refresh the agent scan cache for a given agent (or all agents)
+function clearAgentScanCache(agentId) {
+  if (agentId) {
+    agentScanCache.delete(agentId);
+  } else {
+    agentScanCache.clear();
+  }
+}
 
 // --- Cross-platform shell resolution ---
 const isWindows = process.platform === 'win32';
@@ -238,16 +346,18 @@ const {
   getAllMeta, toggleStar, setName, setArchived,
   isCachePopulated, getAllCached, getCachedByFolder, getCachedFolder, getCachedSession, upsertCachedSessions,
   deleteCachedSession, deleteCachedFolder,
-  getFolderMeta, getAllFolderMeta, setFolderMeta,
+  setFolderMeta,
   upsertSearchEntries, updateSearchTitle, deleteSearchSession, deleteSearchFolder, deleteSearchType,
   searchByType, isSearchIndexPopulated,
   getSetting, setSetting, deleteSetting,
   closeDb,
   // Peers broker
-  peerRegister, peerHeartbeat, peerSetSummary, peerUnregister, peerUnregisterBySession,
+  peerRegister, peerHeartbeat, peerSetSummary, peerUnregister,
   peerListAll, peerListByDir, peerListByRepo, peerGetById,
   peerSendMessage, peerPollMessages, peerCleanStale,
-  upsertSessionTokens, getSessionTokens, getAllSessionTokens, deleteSessionTokens,
+  upsertSessionTokens, getSessionTokens, getAllSessionTokens,
+  upsertSessionLoops, getSessionLoops, getAllSessionLoops,
+  saveTemplate, getTemplate, getAllTemplates, deleteTemplate, incrementTemplateUse,
 } = require('./db');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -459,7 +569,7 @@ function buildMenu() {
 // --- Session cache helpers ---
 
 /** Derive the real project path by reading cwd from the first JSONL entry in the folder */
-function deriveProjectPath(folderPath, folder) {
+function deriveProjectPath(folderPath) {
   try {
     const entries = fs.readdirSync(folderPath, { withFileTypes: true });
     // Check direct .jsonl files first
@@ -548,24 +658,6 @@ function readSessionFile(filePath, folder, projectPath) {
   }
 }
 
-/** Read one folder from filesystem by scanning .jsonl files directly */
-function readFolderFromFilesystem(folder) {
-  const folderPath = path.join(PROJECTS_DIR, folder);
-  const projectPath = deriveProjectPath(folderPath, folder);
-  if (!projectPath) return { projectPath: null, sessions: [] };
-  const sessions = [];
-
-  try {
-    const jsonlFiles = fs.readdirSync(folderPath).filter(f => f.endsWith('.jsonl'));
-    for (const file of jsonlFiles) {
-      const s = readSessionFile(path.join(folderPath, file), folder, projectPath);
-      if (s) sessions.push(s);
-    }
-  } catch {}
-
-  return { projectPath, sessions };
-}
-
 /** Refresh a single folder incrementally: only re-read changed/new .jsonl files */
 function refreshFolder(folder) {
   const folderPath = path.join(PROJECTS_DIR, folder);
@@ -594,7 +686,6 @@ function refreshFolder(folder) {
   } catch { return; }
 
   const currentIds = new Set();
-  let changed = false;
 
   // Collect all changes first, then batch DB writes to minimize lock duration
   const sessionsToUpsert = [];
@@ -625,14 +716,12 @@ function refreshFolder(folder) {
       });
       if (s.customTitle) namesToSet.push({ id: s.sessionId, name: s.customTitle });
     }
-    changed = true;
   }
 
   // Remove sessions whose .jsonl files were deleted
   for (const sessionId of cachedMap.keys()) {
     if (!currentIds.has(sessionId)) {
       sessionsToDelete.push(sessionId);
-      changed = true;
     }
   }
 
@@ -656,21 +745,6 @@ function refreshFolder(folder) {
 
   // Update folder mtime
   setFolderMeta(folder, projectPath, getFolderIndexMtimeMs(folderPath));
-}
-
-/** Populate entire cache from filesystem (cold start) */
-function populateCacheFromFilesystem() {
-  try {
-    const folders = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true })
-      .filter(d => d.isDirectory() && d.name !== '.git')
-      .map(d => d.name);
-
-    for (const folder of folders) {
-      refreshFolder(folder);
-    }
-  } catch (err) {
-    console.error('Error populating cache:', err);
-  }
 }
 
 /** Build projects response from cached data */
@@ -790,15 +864,6 @@ function safeSendToSession(sessionId, channel, ...args) {
   }
   // Fallback: broadcast (session not yet assigned or window gone)
   safeSend(channel, ...args);
-}
-
-// Send to a specific BrowserWindow by reference
-function safeSendToWindow(win, channel, ...args) {
-  try {
-    if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
-      win.webContents.send(channel, ...args);
-    }
-  } catch {}
 }
 
 // Register a window in the registry
@@ -962,6 +1027,18 @@ function populateCacheViaWorker() {
             updatedAt: new Date().toISOString(),
           }));
         if (tokenEntries.length > 0) upsertSessionTokens(tokenEntries);
+        // Persist loop detection data
+        const loopEntries = sessions
+          .filter(s => s.loopCount > 0)
+          .map(s => ({
+            sessionId: s.sessionId,
+            loopCount: s.loopCount,
+            lastLoopAt: s.lastLoopAt || null,
+            lastLoopTool: s.lastLoopTool || null,
+            lastLoopReason: s.lastLoopReason || null,
+            updatedAt: new Date().toISOString(),
+          }));
+        if (loopEntries.length > 0) upsertSessionLoops(loopEntries);
       }
       setFolderMeta(folder, projectPath, indexMtimeMs);
     }
@@ -1179,6 +1256,12 @@ ipcMain.handle('get-agent-sessions', (_event, agentId) => {
     const history = AGENT_HISTORY[agentId];
     if (!history) return [];
 
+    // Check scan cache before doing expensive filesystem walk
+    const cached = agentScanCache.get(agentId);
+    if (cached && (Date.now() - cached.timestamp) < AGENT_SCAN_CACHE_TTL) {
+      return cached.sessions;
+    }
+
     const rawSessions = history.getSessions();
     if (!rawSessions || rawSessions.length === 0) return [];
 
@@ -1223,17 +1306,87 @@ ipcMain.handle('get-agent-sessions', (_event, agentId) => {
       }
 
       const meta = metaMap.get(raw.id);
-      const messageCount = raw.size ? Math.max(1, Math.round(raw.size / 500)) : 0;
-
       const summary = extractSessionSummary(raw.file, agentId);
+
+      // Parse session file for accurate message counts and timestamps
+      let messageCount = 0;
+      let turnCount = 0;
+      let startTime = '';
+      let endTime = '';
+      try {
+        const parsed = history.parseSession(raw.file);
+        if (parsed) {
+          messageCount = (parsed.userMessages || 0) + (parsed.assistantMessages || 0);
+          turnCount = Math.min(parsed.userMessages || 0, parsed.assistantMessages || 0);
+        }
+      } catch {}
+
+      // If parsing yielded no messages, fall back to size-based estimate
+      if (messageCount === 0 && raw.size) {
+        messageCount = Math.max(1, Math.round(raw.size / 500));
+      }
+
+      // Extract timestamps from file mtime (most reliable universal signal)
+      const mtime = raw.modified ? new Date(raw.modified) : new Date();
+      endTime = mtime.toISOString();
+
+      // Try to find actual start time from first line timestamp
+      try {
+        const fd = fs.openSync(raw.file, 'r');
+        const buf = Buffer.alloc(8192);
+        const bytesRead = fs.readSync(fd, buf, 0, 8192, 0);
+        fs.closeSync(fd);
+        const firstChunk = buf.toString('utf8', 0, bytesRead);
+        const firstLine = firstChunk.split('\n').filter(Boolean)[0];
+        if (firstLine) {
+          const obj = JSON.parse(firstLine);
+          // Check common timestamp fields
+          const ts = obj.timestamp || obj.created_at || obj.createdAt || obj.time || obj.created;
+          if (ts) {
+            startTime = new Date(ts).toISOString();
+          }
+        }
+      } catch {}
+
+      // Default startTime to file ctime if we couldn't extract one
+      if (!startTime) {
+        try {
+          const stat = fs.statSync(raw.file);
+          startTime = stat.birthtime ? stat.birthtime.toISOString() : new Date(stat.ctime).toISOString();
+        } catch {
+          startTime = endTime;
+        }
+      }
+
+      // Determine session status: "running" if file modified within last 2 minutes
+      const now = Date.now();
+      const timeSinceModified = now - mtime.getTime();
+      const status = timeSinceModified < 2 * 60 * 1000 ? 'running' : 'completed';
+
+      // Enrich with git status (F5)
+      let gitStatus = 'unknown';
+      let gitBranch = null;
+      if (projectPath) {
+        const gitData = getCachedGitStatus(projectPath);
+        gitStatus = gitData.status;
+        gitBranch = gitData.branch;
+      }
+
       folderMap.get(projectPath).sessions.push({
         sessionId: raw.id,
         summary,
         firstPrompt: summary,
-        created: raw.modified ? new Date(raw.modified).toISOString() : '',
-        modified: raw.modified ? new Date(raw.modified).toISOString() : '',
+        startTime,
+        endTime,
+        created: startTime,
+        modified: endTime,
         messageCount,
+        turnCount,
+        size: raw.size || 0,
+        status,
         projectPath,
+        gitStatus,
+        gitBranch,
         slug: null,
         name: meta?.name || null,
         starred: meta?.starred || 0,
@@ -1253,11 +1406,21 @@ ipcMain.handle('get-agent-sessions', (_event, agentId) => {
       const bDate = b.sessions[0]?.modified || '';
       return new Date(bDate) - new Date(aDate);
     });
+
+    // Cache the result before returning
+    agentScanCache.set(agentId, { sessions: projects, timestamp: Date.now() });
+
     return projects;
   } catch (err) {
     log.error(`Error getting ${agentId} sessions:`, err);
     return [];
   }
+});
+
+// --- IPC: get-git-status ---
+// Returns cached git status for a project path (F5).
+ipcMain.handle('get-git-status', (_event, projectPath) => {
+  return getCachedGitStatus(projectPath, false);
 });
 
 // --- IPC: install-activity-hook ---
@@ -1384,7 +1547,7 @@ ipcMain.handle('save-plan', (_event, filePath, content) => {
 });
 
 // --- IPC: get-session-tokens ---
-const { estimateCostCents, formatTokens, formatCost } = require('./tokens');
+const { estimateCostCents } = require('./tokens');
 
 ipcMain.handle('get-session-tokens', (_event, sessionId) => {
   const row = getSessionTokens(sessionId);
@@ -1400,6 +1563,56 @@ ipcMain.handle('get-all-session-tokens', () => {
     result[sessionId] = { ...row, costCents: estimateCostCents(row) };
   }
   return result;
+});
+
+// --- IPC: loop detection ---
+ipcMain.handle('get-session-loops', (_event, sessionId) => {
+  return getSessionLoops(sessionId);
+});
+
+ipcMain.handle('get-all-session-loops', () => {
+  const map = getAllSessionLoops();
+  const result = {};
+  for (const [sessionId, row] of map) result[sessionId] = row;
+  return result;
+});
+
+// --- IPC: session templates ---
+ipcMain.handle('save-template', (_event, data) => {
+  try {
+    const id = saveTemplate(data);
+    return { ok: true, id };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('get-templates', () => {
+  try {
+    return { ok: true, templates: getAllTemplates() };
+  } catch (err) {
+    return { ok: false, templates: [], error: err.message };
+  }
+});
+
+ipcMain.handle('delete-template', (_event, id) => {
+  try {
+    deleteTemplate(id);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('use-template', (_event, id) => {
+  try {
+    const tpl = getTemplate(id);
+    if (!tpl) return { ok: false, error: 'not found' };
+    incrementTemplateUse(id);
+    return { ok: true, template: tpl };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });
 
 // --- IPC: get-stats ---
@@ -2572,8 +2785,17 @@ let peersCleanupTimer = null;
 // Map peerId -> sessionId for delivering messages via IPC
 const peerSessionMap = new Map();
 
+const {
+  startLanDiscovery, stopLanDiscovery,
+  getRemoteBrokers, fetchRemotePeers, proxySendMessage: proxyLanMessage,
+  checkAuth, getLocalIp,
+} = require('./lan-peers');
+
 function startPeersBroker() {
   const http = require('http');
+  const globalSettings = getSetting('global') || {};
+  const lanEnabled = !!globalSettings.lanPeers;
+  const lanToken = globalSettings.lanPeersToken || '';
 
   peersHttpServer = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -2581,10 +2803,10 @@ function startPeersBroker() {
     if (req.method === 'GET') {
       if (req.url === '/health') {
         const peers = peerListAll();
-        res.end(JSON.stringify({ status: 'ok', peers: peers.length }));
+        res.end(JSON.stringify({ status: 'ok', peers: peers.length, lan: lanEnabled, machine: require('os').hostname() }));
         return;
       }
-      res.end(JSON.stringify({ name: 'switchboard-peers-broker' }));
+      res.end(JSON.stringify({ name: 'switchboard-peers-broker', lan: lanEnabled }));
       return;
     }
 
@@ -2594,9 +2816,16 @@ function startPeersBroker() {
       return;
     }
 
+    // Auth check (skips loopback if lanPeersToken is set)
+    if (!checkAuth(req, lanToken)) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+
     let body = '';
     req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const data = JSON.parse(body);
         const url = new URL(req.url, `http://localhost:${PEERS_PORT}`);
@@ -2625,17 +2854,34 @@ function startPeersBroker() {
               case 'repo': peers = data.git_root ? peerListByRepo(data.git_root, data.exclude_id) : peerListByDir(data.cwd, data.exclude_id); break;
               default: peers = peerListAll(data.exclude_id);
             }
-            // Verify PIDs are alive
+            // Verify local PIDs are still alive
             peers = peers.filter(p => {
               try { process.kill(p.pid, 0); return true; } catch { peerUnregister(p.id); return false; }
             });
+            // Merge remote peers from LAN brokers
+            if (lanEnabled) {
+              try {
+                const remote = await fetchRemotePeers(lanToken, {
+                  scope: data.scope, cwd: data.cwd, gitRoot: data.git_root, excludeId: data.exclude_id,
+                });
+                peers = [...peers, ...remote];
+              } catch {}
+            }
             res.end(JSON.stringify(peers));
             break;
           }
           case '/send-message': {
-            const result = peerSendMessage(data.from_id, data.to_id, data.text);
-            res.end(JSON.stringify(result));
-            if (result.ok) deliverPeerMessage(data.to_id, data.from_id, data.text);
+            const localResult = peerSendMessage(data.from_id, data.to_id, data.text);
+            if (localResult.ok) {
+              deliverPeerMessage(data.to_id, data.from_id, data.text);
+              res.end(JSON.stringify(localResult));
+            } else if (lanEnabled) {
+              // Target might be on a remote machine
+              const remoteResult = await proxyLanMessage(lanToken, { fromId: data.from_id, toId: data.to_id, text: data.text });
+              res.end(JSON.stringify(remoteResult));
+            } else {
+              res.end(JSON.stringify(localResult));
+            }
             break;
           }
           case '/poll-messages': {
@@ -2651,8 +2897,6 @@ function startPeersBroker() {
             break;
 
           // --- Hook-based session activity events ---
-          // Accepts: { session_id, tool_name, tool_result?, error?, agent? }
-          // Used by Claude Code PostToolUse hook and other CLI integrations.
           case '/session-event': {
             const sessionId = data.session_id;
             if (!sessionId) {
@@ -2683,8 +2927,21 @@ function startPeersBroker() {
     });
   });
 
-  peersHttpServer.listen(PEERS_PORT, '127.0.0.1', () => {
-    log.info(`[peers-broker] Listening on 127.0.0.1:${PEERS_PORT}`);
+  const bindAddr = lanEnabled ? '0.0.0.0' : '127.0.0.1';
+  peersHttpServer.listen(PEERS_PORT, bindAddr, () => {
+    const localIp = lanEnabled ? getLocalIp() : '127.0.0.1';
+    log.info(`[peers-broker] Listening on ${bindAddr}:${PEERS_PORT}${lanEnabled ? ` (LAN — ${localIp})` : ''}`);
+    if (lanEnabled) {
+      startLanDiscovery({
+        brokerPort: PEERS_PORT,
+        token: lanToken,
+        onDiscover: (b) => {
+          log.info(`[lan-peers] Discovered remote broker: ${b.host} (${b.ip}:${b.port})`);
+          safeSend('lan-peer-discovered', b);
+        },
+        log,
+      });
+    }
   });
 
   peersHttpServer.on('error', (err) => {
@@ -2714,6 +2971,7 @@ function startPeersBroker() {
 }
 
 function stopPeersBroker() {
+  stopLanDiscovery();
   if (peersCleanupTimer) { clearInterval(peersCleanupTimer); peersCleanupTimer = null; }
   if (peersHttpServer) { peersHttpServer.close(); peersHttpServer = null; }
 }
@@ -2925,7 +3183,6 @@ function normalizeClaudeConversation(entries) {
 
     if (entry.type === 'user' && Array.isArray(entry.message?.content)) {
       const textBlocks = entry.message.content.filter(b => b.type === 'text');
-      const hasToolResults = entry.message.content.some(b => b.type === 'tool_result');
       // Only emit user message if it has real text (not just tool results)
       if (textBlocks.length > 0) {
         const text = textBlocks.map(b => b.text || '').join('\n');
@@ -3066,7 +3323,6 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
   // WSL profiles only work for plain terminals — Claude CLI sessions need the
   // Windows shell because session data lives on the Windows filesystem.
   const requestedProfile = resolveShell(effectiveProfileId);
-  const useWslProfile = isWslShell(requestedProfile.path) && isPlainTerminal;
   const shellProfile = (isWslShell(requestedProfile.path) && !isPlainTerminal)
     ? resolveShell('auto')
     : requestedProfile;
@@ -3663,7 +3919,7 @@ ipcMain.handle('get-window-sessions', (_event) => {
 // Broadcast a command/input to all running PTY sessions
 ipcMain.handle('broadcast-input', (_event, text) => {
   let count = 0;
-  for (const [sessionId, session] of activeSessions) {
+  for (const session of activeSessions.values()) {
     if (session.pty && !session.exited) {
       try {
         session.pty.write(text);
@@ -3686,6 +3942,18 @@ ipcMain.handle('get-windows', (_event) => {
   }));
 });
 
+// LAN peers status
+ipcMain.handle('get-lan-status', () => {
+  const globalSettings = getSetting('global') || {};
+  return {
+    enabled: !!globalSettings.lanPeers,
+    token: globalSettings.lanPeersToken ? true : false, // boolean only — don't expose token to renderer
+    localIp: getLocalIp(),
+    port: PEERS_PORT,
+    remoteBrokers: getRemoteBrokers(),
+  };
+});
+
 // Focus/bring a window to front by window ID
 ipcMain.handle('focus-window', (_event, windowId) => {
   const entry = windowRegistry.get(windowId);
@@ -3693,6 +3961,38 @@ ipcMain.handle('focus-window', (_event, windowId) => {
   entry.window.show();
   entry.window.focus();
   return { ok: true };
+});
+
+// Reattach a detached session back to the main window
+ipcMain.handle('reattach-session', (_event, sessionId) => {
+  const mainEntry = [...windowRegistry.values()].find(e => e.isMain);
+  if (!mainEntry || mainEntry.window.isDestroyed()) return { ok: false, error: 'main window not found' };
+  assignSessionToWindow(sessionId, mainEntry.window.id);
+  safeSend('session-reattached', sessionId);
+  mainEntry.window.show();
+  mainEntry.window.focus();
+  return { ok: true };
+});
+
+// Toggle always-on-top (pin) for the calling window
+ipcMain.handle('toggle-window-pin', (_event) => {
+  const senderWindow = BrowserWindow.fromWebContents(_event.sender);
+  if (!senderWindow || senderWindow.isDestroyed()) return { ok: false, pinned: false };
+  const pinned = !senderWindow.isAlwaysOnTop();
+  senderWindow.setAlwaysOnTop(pinned);
+  return { ok: true, pinned };
+});
+
+// Targeted broadcast — filter by agentId and/or projectPath
+ipcMain.handle('broadcast-input-targeted', (_event, text, agentFilter, projectFilter) => {
+  let count = 0;
+  for (const session of activeSessions.values()) {
+    if (!session.pty || session.exited) continue;
+    if (agentFilter !== 'all' && session.cliAgent !== agentFilter) continue;
+    if (projectFilter !== 'all' && session.projectPath !== projectFilter) continue;
+    try { session.pty.write(text); count++; } catch {}
+  }
+  return { ok: true, count };
 });
 
 // --- IPC: auto-updater ---
@@ -3726,6 +4026,42 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+
+  // Window arrangement shortcuts
+  const { globalShortcut } = require('electron');
+
+  function focusWindowByIndex(index) {
+    const windows = [...windowRegistry.values()]
+      .filter(e => !e.window.isDestroyed())
+      .map(e => e.window);
+    const win = windows[index];
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  }
+
+  function arrangeWindows() {
+    const windows = [...windowRegistry.values()]
+      .filter(e => !e.window.isDestroyed())
+      .map(e => e.window);
+    if (windows.length === 0) return;
+    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    const step = 30;
+    let ox = 0, oy = 0;
+    for (const win of windows) {
+      if (win.isMinimized()) win.restore();
+      win.setPosition(ox, oy, false);
+      ox += step;
+      oy += step;
+      if (ox + 600 > width || oy + 400 > height) { ox = 0; oy = 0; }
+    }
+  }
+
+  globalShortcut.register('CommandOrControl+Shift+1', () => focusWindowByIndex(0));
+  globalShortcut.register('CommandOrControl+Shift+2', () => focusWindowByIndex(1));
+  globalShortcut.register('CommandOrControl+Shift+3', () => focusWindowByIndex(2));
+  globalShortcut.register('CommandOrControl+Shift+0', () => arrangeWindows());
 });
 
 app.on('window-all-closed', () => {

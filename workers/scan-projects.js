@@ -68,6 +68,10 @@ function readFolderFromFilesystem(folder) {
       let cacheReadTokens = 0;
       let cacheWriteTokens = 0;
       let lastModel = null;
+      let loopCount = 0;
+      let lastLoopAt = null;
+      let lastLoopTool = null;
+      let lastLoopReason = null;
       try {
         const content = fs.readFileSync(filePath, 'utf8');
         const lines = content.split('\n').filter(Boolean);
@@ -82,6 +86,7 @@ function readFolderFromFilesystem(folder) {
             messageCount++;
           }
           // Token accumulation from assistant messages (Claude JSONL format)
+          // Loop detection: Claude emits system messages with subtype 'loop' or 'loop_tool_call'
           if (entry.type === 'assistant' && entry.message?.usage) {
             const u = entry.message.usage;
             inputTokens += u.input_tokens || 0;
@@ -100,6 +105,24 @@ function readFolderFromFilesystem(folder) {
           if (text && textContent.length < 8000) {
             textContent += text.slice(0, 500) + '\n';
           }
+          // Loop detection: Claude emits system messages with subtype 'loop' or 'loop_tool_call'
+          if (entry.type === 'system' && (entry.subtype === 'loop' || entry.subtype === 'loop_tool_call')) {
+            loopCount++;
+            lastLoopAt = entry.timestamp || null;
+            // Extract tool name from the system message
+            if (entry.system && typeof entry.system === 'object') {
+              const s = entry.system;
+              if (s.loop_tool) lastLoopTool = s.loop_tool;
+              else if (s.tool) lastLoopTool = s.tool;
+              if (s.loop_reason || s.reason) lastLoopReason = s.loop_reason || s.reason;
+            } else if (typeof entry.system === 'string') {
+              // Fallback: extract tool name from text
+              const m = entry.system.match(/\b(Bash|Read|Search|Write|Edit|Glob|MCP|Task|Browse)\b/);
+              if (m) lastLoopTool = m[1];
+              const rm = entry.system.match(/reason[:\s]+([^.\n]{1,100})/i);
+              if (rm) lastLoopReason = rm[1].trim();
+            }
+          }
         }
       } catch {}
       if (!summary || messageCount < 1) continue;
@@ -110,6 +133,7 @@ function readFolderFromFilesystem(folder) {
         modified: stat.mtime.toISOString(),
         messageCount, textContent, slug, customTitle,
         inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, model: lastModel,
+        loopCount, lastLoopAt, lastLoopTool, lastLoopReason,
       });
     }
   } catch {}

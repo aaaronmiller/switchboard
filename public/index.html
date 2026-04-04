@@ -19,6 +19,30 @@
         <button id="global-settings-btn" title="Global settings"></button>
       </div>
       <div id="agent-selector" style="display:none;"></div>
+      <div id="time-filter-bar" class="time-filter-bar">
+        <button data-days="3" class="time-filter-btn">3d</button>
+        <button data-days="7" class="time-filter-btn active">7d</button>
+        <button data-days="30" class="time-filter-btn">1m</button>
+        <button data-days="90" class="time-filter-btn">3m</button>
+        <button data-days="0" class="time-filter-btn">All</button>
+        <button class="time-filter-btn" id="custom-days-btn" title="Custom days">&#x25A2;</button>
+      </div>
+      <div class="custom-days-input" id="custom-days-input" style="display:none">
+        <input type="number" id="custom-days-field" min="1" max="3650" placeholder="Days">
+        <button id="custom-days-apply">Go</button>
+      </div>
+      <div class="session-sort-row" id="session-sort-row">
+        <label for="session-sort">Sort:</label>
+        <select id="session-sort" class="session-sort">
+          <option value="date-desc">Newest first</option>
+          <option value="date-asc">Oldest first</option>
+          <option value="size-desc">Largest first</option>
+          <option value="size-asc">Smallest first</option>
+          <option value="msgs-desc">Most messages first</option>
+          <option value="project">By project</option>
+          <option value="git">By git status</option>
+        </select>
+      </div>
       <div id="session-filters">
         <button id="running-toggle" title="Show running only"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="4"/></svg></button>
         <button id="star-toggle" title="Show pinned only"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707c-.28-.28-.576-.49-.888-.656L10.073 9.333l-.07 3.181a.5.5 0 0 1-.853.354l-3.535-3.536-4.243 4.243a.5.5 0 1 1-.707-.707l4.243-4.243L1.372 5.11a.5.5 0 0 1 .354-.854l3.18-.07L8.37.722A3.37 3.37 0 0 1 9.12.074a.5.5 0 0 1 .708.002l-.707.707z"/></svg></button>
@@ -120,6 +144,9 @@
         </div>
       </div>
       <div id="terminals"></div>
+      <div id="terminal-loading" class="terminal-loading" style="display:none">
+        <div class="spinner"></div>
+      </div>
       <div id="conversation-viewer" style="display:none;">
         <div id="cv-header">
           <div id="cv-header-info">
@@ -127,6 +154,7 @@
             <span id="cv-session-meta"></span>
           </div>
           <div id="cv-header-actions">
+            <button id="cv-save-template-btn" title="Save as Template">Save Template</button>
             <button id="cv-export-md-btn" title="Export as Markdown">Export MD</button>
             <button id="cv-copy-btn" title="Copy to clipboard">Copy</button>
             <button id="cv-resume-btn" title="Resume this session">Resume</button>

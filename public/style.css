@@ -5,6 +5,21 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+/* Focus-visible outlines (F9) */
+*:focus { outline: none; }
+*:focus-visible {
+  outline: 2px solid #8088ff;
+  outline-offset: 2px;
+}
+.session-item:focus-visible {
+  outline: 2px solid #8088ff;
+  outline-offset: -2px;
+}
+button:focus-visible {
+  outline: 2px solid #8088ff;
+  outline-offset: 2px;
+}
+
 html, body {
   height: 100%;
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
@@ -431,6 +446,90 @@ body { display: flex; flex-direction: column; }
   color: #50b4ff;
 }
 
+/* ---- Time range filter bar ---- */
+.time-filter-bar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  flex-wrap: wrap;
+}
+.time-filter-btn {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #8888a0;
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.time-filter-btn:hover {
+  background: rgba(255,255,255,0.1);
+  color: #aaaabe;
+}
+.time-filter-btn.active {
+  background: rgba(99, 130, 255, 0.15);
+  border-color: rgba(99, 130, 255, 0.4);
+  color: #99aaff;
+}
+.custom-days-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.custom-days-input input {
+  width: 60px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 4px;
+  color: #ccc;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+.custom-days-input button {
+  background: rgba(99, 130, 255, 0.2);
+  border: 1px solid rgba(99, 130, 255, 0.3);
+  color: #99aaff;
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.custom-days-input button:hover {
+  background: rgba(99, 130, 255, 0.3);
+}
+
+/* ---- Session sort row ---- */
+.session-sort-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 11px;
+  color: #666680;
+}
+.session-sort {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #aaaabe;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.session-sort:focus {
+  border-color: rgba(99, 130, 255, 0.4);
+  outline: none;
+}
+.session-sort option {
+  background: #1a1a2e;
+  color: #ccc;
+}
+
 /* ---- Search ---- */
 #search-bar {
   padding: 0 16px 14px;
@@ -770,6 +869,8 @@ body { display: flex; flex-direction: column; }
   padding: 0 12px;
   cursor: pointer;
   transition: all 0.12s;
+  position: relative;
+  border-left: 2px solid transparent;
 }
 
 .session-item .session-row {
@@ -788,6 +889,79 @@ body { display: flex; flex-direction: column; }
 
 .session-item.active .session-row {
   background: rgba(120,130,255,0.14);
+}
+
+/* ---- Activity-based border colors (F5) ---- */
+.session-item.activity-recent {
+  border-left-color: #22c55e; /* green — active within 5 min */
+}
+.session-item.activity-recent::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: #22c55e;
+  animation: pulse-green 2s ease-in-out infinite;
+}
+@keyframes pulse-green {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.session-item.activity-recent-hour {
+  border-left-color: #eab308; /* yellow — active within 1 hour */
+}
+
+.session-item.activity-stale {
+  border-left-color: #444460; /* grey — older */
+}
+
+/* ---- Git status border overrides (take priority over activity) ---- */
+.session-item.git-ahead {
+  border-left-color: #3b82f6 !important; /* blue */
+  border-left-width: 3px;
+}
+.session-item.git-ahead::before {
+  content: '\2191'; /* ↑ */
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 10px;
+  color: #3b82f6;
+  z-index: 1;
+}
+
+.session-item.git-current {
+  border-left-color: #22c55e !important; /* green */
+  border-left-width: 2px;
+}
+
+.session-item.git-behind,
+.session-item.git-diverged {
+  border-left-color: #f97316 !important; /* orange */
+  border-left-width: 2px;
+}
+.session-item.git-behind::before,
+.session-item.git-diverged::before {
+  content: '\2193'; /* ↓ */
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 10px;
+  color: #f97316;
+  z-index: 1;
+}
+
+.session-item.git-dirty {
+  border-left-color: #a855f7 !important; /* purple — uncommitted changes */
+  border-left-width: 2px;
+}
+
+.session-item.git-unknown {
+  border-left-color: #444460 !important; /* grey — no git info */
+  border-left-width: 1px;
 }
 
 /* ---- Pin ---- */
@@ -895,6 +1069,22 @@ body { display: flex; flex-direction: column; }
   font-size: 10px;
   color: #707088;
   margin-top: 3px;
+}
+
+.session-project-label {
+  font-size: 10px;
+  color: #666680;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+  letter-spacing: -0.01em;
+}
+
+.dark .session-project-label,
+[data-theme="dark"] .session-project-label {
+  color: #5a5a72;
 }
 
 /* ---- Session action buttons ---- */
@@ -1226,6 +1416,57 @@ body { display: flex; flex-direction: column; }
   flex: 1;
   position: relative;
   margin-right: -20px;
+}
+
+/* Detached window header */
+#detached-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  background: #16161e;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 11px;
+  color: #707088;
+  flex-shrink: 0;
+}
+
+#detached-title {
+  font-weight: 600;
+  color: #8888a0;
+  font-size: 11px;
+}
+
+#detached-controls {
+  display: flex;
+  gap: 6px;
+}
+
+#detached-reattach-btn,
+#detached-pin-btn {
+  font-size: 10px;
+  font-family: inherit;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 4px;
+  color: #8888a0;
+  cursor: pointer;
+  padding: 2px 8px;
+  transition: all 0.15s;
+}
+
+#detached-reattach-btn:hover {
+  background: rgba(128,136,255,0.12);
+  border-color: rgba(128,136,255,0.3);
+  color: #9090e0;
+}
+
+#detached-pin-btn:hover,
+#detached-pin-btn.pinned {
+  background: rgba(255,200,80,0.1);
+  border-color: rgba(255,200,80,0.3);
+  color: #ffc850;
+}
 }
 
 .terminal-container {
@@ -3139,6 +3380,173 @@ body { display: flex; flex-direction: column; }
   color: rgba(224,80,112,0.5);
 }
 
+/* Template selector */
+.template-section {
+  margin-bottom: 16px;
+}
+
+.template-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.template-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #8888a0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.template-add-btn {
+  font-size: 10px;
+  color: #8088ff;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: inherit;
+  transition: background 0.15s;
+}
+
+.template-add-btn:hover {
+  background: rgba(128,136,255,0.1);
+}
+
+.template-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.template-option {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #8888a0;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: left;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.template-option:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(255,255,255,0.1);
+  color: #b0b0c4;
+}
+
+.template-option.selected {
+  background: rgba(128,136,255,0.1);
+  border-color: rgba(128,136,255,0.35);
+  color: #9090e0;
+}
+
+.template-option.none {
+  color: #707080;
+  font-style: italic;
+}
+
+.template-name {
+  font-weight: 600;
+  flex: 1;
+}
+
+.template-desc {
+  font-size: 10px;
+  color: #606078;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.template-uses {
+  font-size: 10px;
+  color: #505060;
+}
+
+.template-prompt-preview {
+  font-size: 10px;
+  color: #505060;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 2;
+  max-width: 200px;
+}
+
+.template-delete-btn {
+  font-size: 10px;
+  color: #a05060;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-family: inherit;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.template-option:hover .template-delete-btn {
+  opacity: 1;
+}
+
+.template-delete-btn:hover {
+  background: rgba(224,80,112,0.15);
+  color: #e05060;
+}
+
+/* Template save dialog */
+.template-save-dialog {
+  background: #1e1e2a;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  padding: 24px;
+  width: 360px;
+  max-width: 90vw;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.4);
+}
+
+.template-save-dialog h3 {
+  font-size: 14px;
+  color: #d0d0e8;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.template-save-dialog .settings-field {
+  margin-bottom: 12px;
+}
+
+.template-prompt-textarea {
+  width: 100%;
+  min-height: 80px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  padding: 8px;
+  color: #c0c0d0;
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.template-prompt-textarea:focus {
+  outline: none;
+  border-color: rgba(128,136,255,0.4);
+}
+
 /* Agent selector grid */
 .agent-grid {
   display: grid;
@@ -3299,6 +3707,20 @@ body { display: flex; flex-direction: column; }
   margin-left: 6px;
   vertical-align: middle;
   opacity: 0.8;
+}
+
+.loop-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border: 1px solid rgba(234,179,8,0.4);
+  border-radius: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+  color: #eab308;
+  background: rgba(234,179,8,0.08);
+  cursor: help;
 }
 
 .new-session-actions {
@@ -4905,3 +5327,61 @@ body { display: flex; flex-direction: column; }
 .scheduler-add-btn.add-condition:hover { border-color: rgba(251,146,60,0.3); color: #fb923c; background: rgba(251,146,60,0.05); }
 .scheduler-add-btn.add-peer:hover { border-color: rgba(96,165,250,0.3); color: #60a5fa; background: rgba(96,165,250,0.05); }
 .scheduler-add-btn.add-launch:hover { border-color: rgba(244,114,182,0.3); color: #f472b6; background: rgba(244,114,182,0.05); }
+
+/* LAN Peers settings */
+.settings-lan-machines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.lan-machine-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  background: rgba(96,165,250,0.12);
+  border: 1px solid rgba(96,165,250,0.25);
+  color: #60a5fa;
+  font-size: 11px;
+  font-family: monospace;
+}
+.lan-machine-ip {
+  color: rgba(96,165,250,0.6);
+  font-size: 10px;
+}
+
+/* Remote peer machine badge in peers popover */
+.peers-remote-badge {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: rgba(96,165,250,0.15);
+  color: #60a5fa;
+  font-size: 9px;
+  vertical-align: middle;
+}
+
+/* Terminal loading overlay (F6) */
+.terminal-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #111118;
+  z-index: 50;
+}
+.terminal-loading .spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(255,255,255,0.1);
+  border-top-color: #8088ff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

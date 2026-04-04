@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   saveMemory: (filePath, content) => ipcRenderer.invoke('save-memory', filePath, content),
   getProjects: (showArchived) => ipcRenderer.invoke('get-projects', showArchived),
   getAgentSessions: (agentId) => ipcRenderer.invoke('get-agent-sessions', agentId),
+  getGitStatus: (projectPath) => ipcRenderer.invoke('get-git-status', projectPath),
   getActiveSessions: () => ipcRenderer.invoke('get-active-sessions'),
   getActiveTerminals: () => ipcRenderer.invoke('get-active-terminals'),
   stopSession: (id) => ipcRenderer.invoke('stop-session', id),
@@ -25,6 +26,18 @@ contextBridge.exposeInMainWorld('api', {
   readSessionConversation: (sessionId, filePath, agentId) => ipcRenderer.invoke('read-session-conversation', sessionId, filePath, agentId),
   getSessionTokens: (sessionId) => ipcRenderer.invoke('get-session-tokens', sessionId),
   getAllSessionTokens: () => ipcRenderer.invoke('get-all-session-tokens'),
+  getSessionLoops: (sessionId) => ipcRenderer.invoke('get-session-loops', sessionId),
+  getAllSessionLoops: () => ipcRenderer.invoke('get-all-session-loops'),
+
+  // Templates
+  saveTemplate: (data) => ipcRenderer.invoke('save-template', data),
+  getTemplates: () => ipcRenderer.invoke('get-templates'),
+  deleteTemplate: (id) => ipcRenderer.invoke('delete-template', id),
+  useTemplate: (id) => ipcRenderer.invoke('use-template', id),
+
+  // Window management
+  reattachSession: (sessionId) => ipcRenderer.invoke('reattach-session', sessionId),
+  toggleWindowPin: () => ipcRenderer.invoke('toggle-window-pin'),
 
   // Settings
   getSetting: (key) => ipcRenderer.invoke('get-setting', key),
@@ -99,10 +112,20 @@ contextBridge.exposeInMainWorld('api', {
   detachSession: (sessionId) => ipcRenderer.invoke('detach-session', sessionId),
   getWindowSessions: () => ipcRenderer.invoke('get-window-sessions'),
   broadcastInput: (text) => ipcRenderer.invoke('broadcast-input', text),
+  broadcastInputTargeted: (text, agentFilter, projectFilter) => ipcRenderer.invoke('broadcast-input-targeted', text, agentFilter, projectFilter),
   getWindows: () => ipcRenderer.invoke('get-windows'),
   focusWindow: (windowId) => ipcRenderer.invoke('focus-window', windowId),
   onSessionDetached: (callback) => {
     ipcRenderer.on('session-detached', (_event, sessionId, windowId) => callback(sessionId, windowId));
+  },
+  onSessionReattached: (callback) => {
+    ipcRenderer.on('session-reattached', (_event, sessionId) => callback(sessionId));
+  },
+
+  // LAN peers
+  getLanStatus: () => ipcRenderer.invoke('get-lan-status'),
+  onLanPeerDiscovered: (callback) => {
+    ipcRenderer.on('lan-peer-discovered', (_event, broker) => callback(broker));
   },
 
   // Platform

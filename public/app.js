@@ -174,11 +174,17 @@ let showArchived = false;
 let showStarredOnly = false;
 let showRunningOnly = false;
 let showTodayOnly = false;
+let activeTimeFilter = (() => {
+  const saved = localStorage.getItem('activeTimeFilter');
+  return saved !== null ? parseInt(saved, 10) : 7;
+})(); // default: 7 days
+let activeSortMode = localStorage.getItem('activeSortMode') || 'date-desc';
 let cachedProjects = [];
 let cachedAllProjects = [];
 let activePtyIds = new Set();
 let sessionAgentMap = new Map(); // sessionId → cliAgent id
 let tokenCache = {}; // sessionId → { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, model, costCents }
+let loopCache = {}; // sessionId → { loopCount, lastLoopAt, lastLoopTool, lastLoopReason }
 let headlessState = new Map(); // sessionId → { events: [], lastAction: '', startTime }
 let sortedOrder = []; // [{ projectPath, itemIds: [itemId, ...] }, ...] — single source of truth for sidebar order
 let activeTab = 'sessions';
@@ -457,6 +463,15 @@ function scheduleFlush(sessionId, buf) {
 }
 
 window.api.onTerminalData((sessionId, data) => {
+  // Detect live loop events from terminal output (Claude echoes /loop when it detects one)
+  if (data.includes('/loop') || data.includes('loop detected') || data.includes('Loop detected')) {
+    if (!loopCache[sessionId]) loopCache[sessionId] = { loopCount: 0 };
+    loopCache[sessionId].loopCount = (loopCache[sessionId].loopCount || 0) + 1;
+    loopCache[sessionId].lastLoopAt = new Date().toISOString();
+    // Update sidebar badge immediately
+    refreshSessionCard(sessionId);
+  }
+
   const entry = openSessions.get(sessionId);
   if (entry) {
     let buf = terminalWriteBuffers.get(sessionId);
@@ -961,7 +976,7 @@ function showPeersPopover(sessionId, anchorEl) {
       btn.className = 'popover-option peers-popover-peer';
       btn.innerHTML = `
         <span class="popover-agent-dot" style="background:${agentColor}"></span>
-        <span class="peers-peer-label">${agentLabel} <span style="color:#555">${dirName}</span></span>
+        <span class="peers-peer-label">${agentLabel} <span style="color:#555">${dirName}</span>${peer._machine ? `<span class="peers-remote-badge">${escapeHtml(peer._machine)}</span>` : ''}</span>
         ${peer.summary ? `<span class="peers-peer-summary">${escapeHtml(peer.summary).slice(0, 60)}</span>` : ''}
       `;
       btn.onclick = () => {
@@ -992,6 +1007,140 @@ function showPeersPopover(sessionId, anchorEl) {
 
 // Initial load
 refreshPeers();
+
+// --- Time range filter ---
+function filterSessionsByDate(sessions, days) {
+  if (days === 0) return sessions; // "All" — no filtering
+  const cutoff = Date.now() - days * 86400000;
+  return sessions.filter(s => {
+    const t = s.endTime ? new Date(s.endTime).getTime() : (s.startTime ? new Date(s.startTime).getTime() : 0);
+    return t >= cutoff;
+  });
+}
+
+// Sort sessions by the given mode
+function sortSessions(sessions, mode) {
+  const sorted = [...sessions];
+  switch (mode) {
+    case 'date-desc':
+      sorted.sort((a, b) => new Date(b.endTime || b.startTime || 0) - new Date(a.endTime || a.startTime || 0));
+      break;
+    case 'date-asc':
+      sorted.sort((a, b) => new Date(a.startTime || a.endTime || 0) - new Date(b.startTime || b.endTime || 0));
+      break;
+    case 'size-desc':
+      sorted.sort((a, b) => (b.size || 0) - (a.size || 0));
+      break;
+    case 'size-asc':
+      sorted.sort((a, b) => (a.size || 0) - (b.size || 0));
+      break;
+    case 'msgs-desc':
+      sorted.sort((a, b) => (b.messageCount || b.turnCount || 0) - (a.messageCount || a.turnCount || 0));
+      break;
+    case 'project':
+      sorted.sort((a, b) => (a.projectPath || '').localeCompare(b.projectPath || ''));
+      break;
+    case 'git': {
+      const gitOrder = { ahead: 0, current: 1, behind: 2, dirty: 3, unknown: 4 };
+      sorted.sort((a, b) => (gitOrder[a.gitStatus || 'unknown'] ?? 4) - (gitOrder[b.gitStatus || 'unknown'] ?? 4));
+      break;
+    }
+  }
+  return sorted;
+}
+
+// Sync time filter button states with activeTimeFilter value
+function updateTimeFilterButtons() {
+  const bar = document.getElementById('time-filter-bar');
+  if (!bar) return;
+  const standardDays = [3, 7, 30, 90, 0];
+  bar.querySelectorAll('.time-filter-btn[data-days]').forEach(btn => {
+    const d = parseInt(btn.dataset.days, 10);
+    btn.classList.toggle('active', d === activeTimeFilter);
+  });
+  const customBtn = document.getElementById('custom-days-btn');
+  if (customBtn) {
+    const isCustom = !standardDays.includes(activeTimeFilter);
+    customBtn.classList.toggle('active', isCustom);
+    customBtn.textContent = isCustom ? '\u2713' : '\u25A2';
+  }
+}
+
+// Apply time filter button click handlers
+(function initTimeFilterBar() {
+  const bar = document.getElementById('time-filter-bar');
+  if (!bar) return;
+
+  bar.querySelectorAll('.time-filter-btn[data-days]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const days = parseInt(btn.dataset.days, 10);
+      activeTimeFilter = days;
+      localStorage.setItem('activeTimeFilter', String(days));
+      updateTimeFilterButtons();
+      // Hide custom input if visible
+      const customInput = document.getElementById('custom-days-input');
+      if (customInput) customInput.style.display = 'none';
+      // Clear today toggle when time filter is active
+      if (days !== 0 && showTodayOnly) {
+        showTodayOnly = false;
+        todayToggle.classList.remove('active');
+      }
+      refreshSidebar({ resort: true });
+    });
+  });
+
+  // Custom days toggle
+  const customBtn = document.getElementById('custom-days-btn');
+  const customInputDiv = document.getElementById('custom-days-input');
+  const customField = document.getElementById('custom-days-field');
+  const customApply = document.getElementById('custom-days-apply');
+
+  if (customBtn && customInputDiv) {
+    customBtn.addEventListener('click', () => {
+      const isVisible = customInputDiv.style.display !== 'none';
+      if (!isVisible) {
+        // Pre-fill with current custom value
+        if (customField) customField.value = activeTimeFilter || '';
+        customInputDiv.style.display = 'flex';
+        if (customField) customField.focus();
+      } else {
+        customInputDiv.style.display = 'none';
+      }
+    });
+  }
+
+  function applyCustomDays() {
+    const val = parseInt(customField?.value, 10);
+    if (!val || val < 1 || val > 3650) return;
+    activeTimeFilter = val;
+    localStorage.setItem('activeTimeFilter', String(val));
+    updateTimeFilterButtons();
+    customInputDiv.style.display = 'none';
+    refreshSidebar({ resort: true });
+  }
+
+  if (customApply) customApply.addEventListener('click', applyCustomDays);
+  if (customField) {
+    customField.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); applyCustomDays(); }
+    });
+  }
+
+  // Restore custom value display if stored
+  updateTimeFilterButtons();
+})();
+
+// Initialize sort dropdown
+(function initSortDropdown() {
+  const select = document.getElementById('session-sort');
+  if (!select) return;
+  select.value = activeSortMode;
+  select.addEventListener('change', () => {
+    activeSortMode = select.value;
+    localStorage.setItem('activeSortMode', activeSortMode);
+    refreshSidebar({ resort: true });
+  });
+})();
 
 // --- Single entry point for all sidebar renders ---
 // resort=true: re-sort items by priority+time (use for user-initiated actions)
@@ -1074,6 +1223,12 @@ runningToggle.addEventListener('click', () => {
 todayToggle.addEventListener('click', () => {
   showTodayOnly = !showTodayOnly;
   todayToggle.classList.toggle('active', showTodayOnly);
+  // Reset time filter when today toggle is on (they conflict)
+  if (showTodayOnly && activeTimeFilter !== 0) {
+    activeTimeFilter = 0;
+    localStorage.setItem('activeTimeFilter', '0');
+    updateTimeFilterButtons();
+  }
   refreshSidebar({ resort: true });
 });
 
@@ -1139,7 +1294,7 @@ searchInput.addEventListener('input', () => {
         refreshSidebar({ resort: true });
       }
     }
-  }, 200);
+  }, 150);
 });
 
 // --- Stop session helper ---
@@ -1495,19 +1650,47 @@ function renderProjects(projects, resort) {
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` === todayStr;
       });
     }
-    const anyFilterActive = showStarredOnly || showRunningOnly || showTodayOnly || searchMatchIds !== null;
+    // Time range filter (applies to all views including pinned/active)
+    if (activeTimeFilter > 0) {
+      filtered = filterSessionsByDate(filtered, activeTimeFilter);
+    }
+
+    // === STEP 1.5: User-selected sort (applies after filters, before priority grouping) ===
+    filtered = sortSessions(filtered, activeSortMode);
+
+    const anyFilterActive = showStarredOnly || showRunningOnly || showTodayOnly || activeTimeFilter > 0 || searchMatchIds !== null;
     if (filtered.length === 0 && (project.sessions.length > 0 || anyFilterActive)) continue;
     const fId = folderId(project.projectPath);
 
-    // === STEP 2: Sort ===
-    // Priority: pinned+running > running > pinned > rest (by modified desc)
+    // === STEP 2: Priority sort ===
+    // Priority: pinned+running > running > pinned > rest (within each tier, use user sort mode)
     filtered = [...filtered].sort((a, b) => {
       const aRunning = activePtyIds.has(a.sessionId) || pendingSessions.has(a.sessionId);
       const bRunning = activePtyIds.has(b.sessionId) || pendingSessions.has(b.sessionId);
       const aPri = (a.starred && aRunning ? 3 : aRunning ? 2 : a.starred ? 1 : 0);
       const bPri = (b.starred && bRunning ? 3 : bRunning ? 2 : b.starred ? 1 : 0);
       if (aPri !== bPri) return bPri - aPri;
-      return new Date(b.modified) - new Date(a.modified);
+      // Within same priority tier, use user-selected sort
+      switch (activeSortMode) {
+        case 'date-desc':
+          return new Date(b.endTime || b.startTime || 0) - new Date(a.endTime || a.startTime || 0);
+        case 'date-asc':
+          return new Date(a.startTime || a.endTime || 0) - new Date(b.startTime || b.endTime || 0);
+        case 'size-desc':
+          return (b.size || 0) - (a.size || 0);
+        case 'size-asc':
+          return (a.size || 0) - (b.size || 0);
+        case 'msgs-desc':
+          return (b.messageCount || b.turnCount || 0) - (a.messageCount || a.turnCount || 0);
+        case 'project':
+          return (a.projectPath || '').localeCompare(b.projectPath || '');
+        case 'git': {
+          const gitOrder = { ahead: 0, current: 1, behind: 2, dirty: 3, unknown: 4 };
+          return (gitOrder[a.gitStatus || 'unknown'] ?? 4) - (gitOrder[b.gitStatus || 'unknown'] ?? 4);
+        }
+        default:
+          return new Date(b.modified) - new Date(a.modified);
+      }
     });
 
     // === STEP 3: Slug grouping ===
@@ -1885,6 +2068,36 @@ function rebindSidebarEvents(projects) {
   }
 }
 
+// Refresh loop badge on an existing session card without full rebuild
+function refreshSessionCard(sessionId) {
+  const card = document.querySelector(`[data-session-id="${sessionId}"]`);
+  if (!card) return;
+  const summaryEl = card.querySelector('.session-summary');
+  if (!summaryEl) return;
+  // Remove existing loop badge
+  const existing = summaryEl.querySelector('.loop-badge');
+  if (existing) existing.remove();
+  // Add updated badge
+  const lp = loopCache[sessionId];
+  if (lp && lp.loopCount > 0) {
+    const loopBadge = document.createElement('span');
+    loopBadge.className = 'loop-badge';
+    loopBadge.title = `Loop detected ${lp.loopCount}x${lp.lastLoopTool ? ' with ' + lp.lastLoopTool : ''}${lp.lastLoopReason ? ': ' + lp.lastLoopReason : ''}`;
+    loopBadge.textContent = '\u21BB' + lp.loopCount;
+    summaryEl.appendChild(loopBadge);
+  }
+}
+
+// F5.6: Determine activity color class from session timestamp
+function getActivityClass(session) {
+  const ts = session.endTime || session.modified;
+  if (!ts) return 'activity-stale';
+  const age = Date.now() - new Date(ts).getTime();
+  if (age < 5 * 60 * 1000) return 'activity-recent';       // < 5 min
+  if (age < 60 * 60 * 1000) return 'activity-recent-hour'; // < 1 hour
+  return 'activity-stale';
+}
+
 function buildSessionItem(session) {
   const item = document.createElement('div');
   item.className = 'session-item';
@@ -1896,6 +2109,15 @@ function buildSessionItem(session) {
   if (errorSessions.has(session.sessionId)) item.classList.add('session-error');
   if (responseReadySessions.has(session.sessionId)) item.classList.add('response-ready');
   if (sessionBusyState.get(session.sessionId)) item.classList.add('cli-busy');
+
+  // F5.6: Activity color class
+  const activityClass = getActivityClass(session);
+  item.classList.add(activityClass);
+
+  // F5.6: Git status color class
+  const gitClass = session.gitStatus ? `git-${session.gitStatus}` : 'git-unknown';
+  item.classList.add(gitClass);
+
   item.dataset.sessionId = session.sessionId;
 
   const modified = lastActivityTime.get(session.sessionId) || new Date(session.modified);
@@ -1955,8 +2177,8 @@ function buildSessionItem(session) {
     summaryEl.prepend(badge);
   }
 
-  // Agent badge for non-claude sessions
-  const agentId = sessionAgentMap.get(session.sessionId);
+  // Agent badge — use session.agent (from IPC for non-Claude) or sessionAgentMap
+  const agentId = session.agent || sessionAgentMap.get(session.sessionId);
   if (agentId && agentId !== 'claude') {
     const agentBadge = document.createElement('span');
     agentBadge.className = 'agent-badge';
@@ -1964,6 +2186,28 @@ function buildSessionItem(session) {
     agentBadge.style.borderColor = AGENT_COLORS[agentId] || '#8888a0';
     agentBadge.textContent = AGENT_LABELS[agentId] || agentId;
     summaryEl.appendChild(agentBadge);
+  }
+
+  // Project/folder label — show truncated path below summary
+  if (session.projectPath) {
+    const projectLabel = document.createElement('div');
+    projectLabel.className = 'session-project-label';
+    const segments = session.projectPath.split('/').filter(Boolean);
+    const truncated = segments.length > 3
+      ? '\u2026/' + segments.slice(-3).join('/')
+      : session.projectPath;
+    projectLabel.textContent = truncated;
+    info.appendChild(projectLabel);
+  }
+
+  // Loop badge — orange warning indicator when Claude detected a repeat loop
+  const lp = loopCache[session.sessionId];
+  if (lp && lp.loopCount > 0) {
+    const loopBadge = document.createElement('span');
+    loopBadge.className = 'loop-badge';
+    loopBadge.title = `Loop detected ${lp.loopCount}x${lp.lastLoopTool ? ' with ' + lp.lastLoopTool : ''}${lp.lastLoopReason ? ': ' + lp.lastLoopReason : ''}`;
+    loopBadge.textContent = '\u21BB' + lp.loopCount;
+    summaryEl.appendChild(loopBadge);
   }
   info.appendChild(summaryEl);
   info.appendChild(idEl);
@@ -2064,7 +2308,7 @@ function startRename(summaryEl, session) {
   });
 }
 
-async function launchNewSession(project, sessionOptions) {
+async function launchNewSession(project, sessionOptions, initialPrompt) {
   const sessionId = crypto.randomUUID();
   const projectPath = project.projectPath;
   const session = {
@@ -2099,7 +2343,7 @@ async function launchNewSession(project, sessionOptions) {
   const entry = createTerminalEntry(session);
 
   // Open terminal in main process with session options
-  const result = await window.api.openTerminal(sessionId, projectPath, true, sessionOptions || null);
+  const result = await window.api.openTerminal(sessionId, projectPath, true, { ...sessionOptions, _initialPrompt: initialPrompt });
   if (!result.ok) {
     entry.terminal.write(`\r\nError: ${result.error}\r\n`);
     entry.closed = true;
@@ -2389,15 +2633,23 @@ async function openSession(session) {
   // Create new terminal entry (hidden until showSession)
   const entry = createTerminalEntry(session);
 
+  // Show loading overlay
+  const loadingEl = document.getElementById('terminal-loading');
+  if (loadingEl) loadingEl.style.display = 'flex';
+
   // Open terminal in main process
   const resumeOptions = await resolveDefaultSessionOptions({ projectPath });
-  const result = await window.api.openTerminal(sessionId, projectPath, false, resumeOptions);
-  if (!result.ok) {
-    entry.terminal.write(`\r\nError: ${result.error}\r\n`);
-    entry.closed = true;
-    return;
+  try {
+    const result = await window.api.openTerminal(sessionId, projectPath, false, resumeOptions);
+    if (!result.ok) {
+      entry.terminal.write(`\r\nError: ${result.error}\r\n`);
+      entry.closed = true;
+      return;
+    }
+    if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
+  } finally {
+    if (loadingEl) loadingEl.style.display = 'none';
   }
-  if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
 
   showSession(sessionId);
   pollActiveSessions();
@@ -2415,6 +2667,7 @@ const cvSessionMeta = document.getElementById('cv-session-meta');
 const cvExportMdBtn = document.getElementById('cv-export-md-btn');
 const cvCopyBtn = document.getElementById('cv-copy-btn');
 const cvResumeBtn = document.getElementById('cv-resume-btn');
+const cvSaveTemplateBtn = document.getElementById('cv-save-template-btn');
 
 let cvCurrentSession = null;
 let cvCurrentMessages = [];
@@ -2713,6 +2966,17 @@ cvResumeBtn.addEventListener('click', async () => {
   session._forceTerminal = true;
   await openSessionForced(session);
   session._forceTerminal = false;
+});
+
+cvSaveTemplateBtn.addEventListener('click', async () => {
+  if (!cvCurrentSession) return;
+  const session = cvCurrentSession;
+  const project = cachedProjects.find(p => p.projectPath === session.projectPath) || cachedAllProjects.find(p => p.projectPath === session.projectPath);
+  if (!project) return;
+  const opts = { cliAgent: sessionAgentMap.get(session.sessionId) || 'claude' };
+  // Extract first user message from conversation as prompt suggestion
+  const firstPrompt = cvCurrentMessages.find(m => m.role === 'user')?.text || '';
+  showSaveTemplateDialog(project, opts, firstPrompt);
 });
 
 // Open session directly as terminal (bypass conversation viewer)
@@ -4538,8 +4802,12 @@ async function launchHeadlessSession(project, prompt, extraOptions = {}) {
 }
 
 async function showNewSessionDialog(project) {
-  const effective = await window.api.getEffectiveSettings(project.projectPath);
-  const agents = await window.api.detectAgents();
+  const [effective, agents, templatesResult] = await Promise.all([
+    window.api.getEffectiveSettings(project.projectPath),
+    window.api.detectAgents(),
+    window.api.getTemplates(),
+  ]);
+  const templates = templatesResult.ok ? templatesResult.templates : [];
 
   const overlay = document.createElement('div');
   overlay.className = 'new-session-overlay';
@@ -4550,6 +4818,8 @@ async function showNewSessionDialog(project) {
   let selectedAgent = effective.cliAgent || 'claude';
   let selectedMode = effective.permissionMode || null;
   let dangerousSkip = effective.dangerouslySkipPermissions || false;
+  let selectedTemplateId = null;
+  let promptValue = '';
 
   const modes = [
     { value: null, label: 'Default', desc: 'Prompt for all actions' },
@@ -4575,70 +4845,136 @@ async function showNewSessionDialog(project) {
     `<button class="permission-option dangerous${dangerousSkip ? ' selected' : ''}" data-mode="dangerous-skip"><span class="perm-name">Dangerous Skip</span><span class="perm-desc">Skip all safety prompts (use with caution)</span></button>`;
   }
 
-  dialog.innerHTML = `
-    <h3>New Session — ${escapeHtml(project.projectPath.split('/').filter(Boolean).slice(-2).join('/'))}</h3>
-    <div class="settings-field">
-      <div class="settings-label">AI Agent</div>
-      <div class="agent-grid" id="nsd-agent-grid">${renderAgentGrid()}</div>
-    </div>
-    <div class="settings-field">
-      <div class="settings-label">Permission Mode</div>
-      <div class="permission-grid" id="nsd-mode-grid">${renderModeGrid()}</div>
-    </div>
-    <div class="settings-field">
-      <div class="settings-checkbox-row">
-        <input type="checkbox" id="nsd-worktree" ${effective.worktree ? 'checked' : ''}>
-        <label for="nsd-worktree">Worktree</label>
-        <input type="text" class="settings-input" id="nsd-worktree-name" placeholder="name (optional)" value="${escapeHtml(effective.worktreeName || '')}" style="width:160px;margin-left:8px;">
-      </div>
-    </div>
-    <div class="settings-field">
-      <div class="settings-checkbox-row">
-        <input type="checkbox" id="nsd-chrome" ${effective.chrome ? 'checked' : ''}>
-        <label for="nsd-chrome">Chrome</label>
-      </div>
-    </div>
-    <div class="settings-field">
-      <div class="settings-label">Pre-launch Command</div>
-      <input type="text" class="settings-input" id="nsd-pre-launch" placeholder="e.g. aws-vault exec profile --" value="${escapeHtml(effective.preLaunchCmd || '')}">
-    </div>
-    <div class="settings-field">
-      <div class="settings-label">Add Directories (comma-separated)</div>
-      <input type="text" class="settings-input" id="nsd-add-dirs" placeholder="/path/to/dir1, /path/to/dir2" value="${escapeHtml(effective.addDirs || '')}">
-    </div>
-    <div class="new-session-actions">
-      <button class="new-session-cancel-btn">Cancel</button>
-      <button class="new-session-start-btn">Start</button>
-    </div>
-  `;
-
-  overlay.appendChild(dialog);
-  document.body.appendChild(overlay);
-
-  // Bind agent grid clicks
-  const agentGrid = dialog.querySelector('#nsd-agent-grid');
-  agentGrid.addEventListener('click', (e) => {
-    const btn = e.target.closest('.agent-option:not(.disabled)');
-    if (!btn) return;
-    selectedAgent = btn.dataset.agent;
-    agentGrid.innerHTML = renderAgentGrid();
-  });
-
-  // Bind mode grid clicks
-  const modeGrid = dialog.querySelector('#nsd-mode-grid');
-  modeGrid.addEventListener('click', (e) => {
-    const btn = e.target.closest('.permission-option');
-    if (!btn) return;
-    const mode = btn.dataset.mode;
-    if (mode === 'dangerous-skip') {
-      dangerousSkip = !dangerousSkip;
-      if (dangerousSkip) selectedMode = null;
-    } else {
-      dangerousSkip = false;
-      selectedMode = mode === 'null' ? null : mode;
+  function renderTemplateGrid() {
+    let html = `<button class="template-option none${selectedTemplateId === null ? ' selected' : ''}" data-template="">No template</button>`;
+    for (const tpl of templates) {
+      html += `<button class="template-option${selectedTemplateId === tpl.id ? ' selected' : ''}" data-template="${tpl.id}"><span class="template-name">${escapeHtml(tpl.name)}</span><span class="template-desc">${escapeHtml(tpl.description || '')}</span><span class="template-uses">${tpl.useCount}x</span><button class="template-delete-btn" data-delete="${tpl.id}" title="Delete template">✕</button></button>`;
     }
-    modeGrid.innerHTML = renderModeGrid();
-  });
+    return html;
+  }
+
+  function renderPromptField() {
+    return `<div class="settings-field" id="nsd-prompt-wrap">
+      <div class="settings-label">Initial Prompt</div>
+      <textarea class="template-prompt-textarea" id="nsd-prompt" placeholder="What would you like to work on?" rows="3">${escapeHtml(promptValue)}</textarea>
+    </div>`;
+  }
+
+  function render() {
+    dialog.innerHTML = `
+      <h3>New Session — ${escapeHtml(project.projectPath.split('/').filter(Boolean).slice(-2).join('/'))}</h3>
+      <div class="settings-field">
+        <div class="settings-label">Template</div>
+        <div class="template-grid" id="nsd-template-grid">${renderTemplateGrid()}</div>
+      </div>
+      <div class="settings-field">
+        <div class="settings-label">AI Agent</div>
+        <div class="agent-grid" id="nsd-agent-grid">${renderAgentGrid()}</div>
+      </div>
+      ${renderPromptField()}
+      <div class="settings-field">
+        <div class="settings-label">Permission Mode</div>
+        <div class="permission-grid" id="nsd-mode-grid">${renderModeGrid()}</div>
+      </div>
+      <div class="settings-field">
+        <div class="settings-checkbox-row">
+          <input type="checkbox" id="nsd-worktree" ${effective.worktree ? 'checked' : ''}>
+          <label for="nsd-worktree">Worktree</label>
+          <input type="text" class="settings-input" id="nsd-worktree-name" placeholder="name (optional)" value="${escapeHtml(effective.worktreeName || '')}" style="width:160px;margin-left:8px;">
+        </div>
+      </div>
+      <div class="settings-field">
+        <div class="settings-checkbox-row">
+          <input type="checkbox" id="nsd-chrome" ${effective.chrome ? 'checked' : ''}>
+          <label for="nsd-chrome">Chrome</label>
+        </div>
+      </div>
+      <div class="settings-field">
+        <div class="settings-label">Pre-launch Command</div>
+        <input type="text" class="settings-input" id="nsd-pre-launch" placeholder="e.g. aws-vault exec profile --" value="${escapeHtml(effective.preLaunchCmd || '')}">
+      </div>
+      <div class="settings-field">
+        <div class="settings-label">Add Directories (comma-separated)</div>
+        <input type="text" class="settings-input" id="nsd-add-dirs" placeholder="/path/to/dir1, /path/to/dir2" value="${escapeHtml(effective.addDirs || '')}">
+      </div>
+      <div class="new-session-actions">
+        <button class="new-session-cancel-btn">Cancel</button>
+        <button class="new-session-start-btn">Start</button>
+      </div>
+    `;
+    bindEvents();
+  }
+
+  function bindEvents() {
+    const agentGrid = dialog.querySelector('#nsd-agent-grid');
+    agentGrid.addEventListener('click', (e) => {
+      const btn = e.target.closest('.agent-option:not(.disabled)');
+      if (!btn) return;
+      selectedAgent = btn.dataset.agent;
+      agentGrid.innerHTML = renderAgentGrid();
+    });
+
+    const modeGrid = dialog.querySelector('#nsd-mode-grid');
+    modeGrid.addEventListener('click', (e) => {
+      const btn = e.target.closest('.permission-option');
+      if (!btn) return;
+      const mode = btn.dataset.mode;
+      if (mode === 'dangerous-skip') {
+        dangerousSkip = !dangerousSkip;
+        if (dangerousSkip) selectedMode = null;
+      } else {
+        dangerousSkip = false;
+        selectedMode = mode === 'null' ? null : mode;
+      }
+      modeGrid.innerHTML = renderModeGrid();
+    });
+
+    const templateGrid = dialog.querySelector('#nsd-template-grid');
+    templateGrid.addEventListener('click', async (e) => {
+      if (e.target.classList.contains('template-delete-btn')) {
+        e.stopPropagation();
+        const id = e.target.dataset.delete;
+        if (confirm('Delete this template?')) {
+          await window.api.deleteTemplate(id);
+          const res = await window.api.getTemplates();
+          templates.length = 0;
+          if (res.ok) templates.push(...res.templates);
+          selectedTemplateId = null;
+          promptValue = '';
+          render();
+        }
+        return;
+      }
+      const btn = e.target.closest('.template-option');
+      if (!btn) return;
+      selectedTemplateId = btn.dataset.template || null;
+      if (selectedTemplateId) {
+        const tpl = templates.find(t => t.id === selectedTemplateId);
+        if (tpl) {
+          promptValue = tpl.prompt || '';
+          if (tpl.options) {
+            try {
+              const opts = JSON.parse(tpl.options);
+              if (opts.cliAgent) selectedAgent = opts.cliAgent;
+            } catch {}
+          }
+        }
+      } else {
+        promptValue = '';
+      }
+      render();
+    });
+
+    dialog.querySelector('.new-session-cancel-btn').onclick = close;
+    dialog.querySelector('.new-session-start-btn').onclick = start;
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    function onKey(e) {
+      if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+      if (e.key === 'Enter' && !e.target.matches('input,textarea')) { start(); document.removeEventListener('keydown', onKey); }
+    }
+    document.addEventListener('keydown', onKey);
+  }
 
   function close() {
     overlay.remove();
@@ -4663,20 +4999,71 @@ async function showNewSessionDialog(project) {
     if (preLaunch) options.preLaunchCmd = preLaunch;
     options.addDirs = dialog.querySelector('#nsd-add-dirs').value.trim();
     if (effective.mcpEmulation === false) options.mcpEmulation = false;
+    const prompt = (dialog.querySelector('#nsd-prompt') || {}).value || '';
     close();
-    launchNewSession(project, options);
+    if (selectedTemplateId) {
+      window.api.useTemplate(selectedTemplateId);
+    }
+    launchNewSession(project, options, prompt);
   }
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+  render();
+}
+
+// --- Template save from session ---
+async function showSaveTemplateDialog(project, sessionOptions, currentPrompt) {
+  const overlay = document.createElement('div');
+  overlay.className = 'new-session-overlay';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'template-save-dialog';
+  dialog.innerHTML = `
+    <h3>Save as Template</h3>
+    <div class="settings-field">
+      <div class="settings-label">Template Name</div>
+      <input type="text" class="settings-input" id="tpl-name" placeholder="e.g. Code Review, Bug Investigation" value="">
+    </div>
+    <div class="settings-field">
+      <div class="settings-label">Description</div>
+      <input type="text" class="settings-input" id="tpl-desc" placeholder="One-line description" value="">
+    </div>
+    <div class="settings-field">
+      <div class="settings-label">Initial Prompt</div>
+      <textarea class="template-prompt-textarea" id="tpl-prompt" placeholder="What would you like to work on?" rows="3">${escapeHtml(currentPrompt || '')}</textarea>
+    </div>
+    <div class="new-session-actions">
+      <button class="new-session-cancel-btn">Cancel</button>
+      <button class="new-session-start-btn">Save Template</button>
+    </div>
+  `;
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  function close() { overlay.remove(); }
 
   dialog.querySelector('.new-session-cancel-btn').onclick = close;
-  dialog.querySelector('.new-session-start-btn').onclick = start;
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  dialog.querySelector('.new-session-start-btn').onclick = async () => {
+    const name = dialog.querySelector('#tpl-name').value.trim();
+    const desc = dialog.querySelector('#tpl-desc').value.trim();
+    const prompt = dialog.querySelector('#tpl-prompt').value.trim();
+    if (!name) { alert('Template name is required'); return; }
+    const opts = { cliAgent: sessionOptions.cliAgent };
+    await window.api.saveTemplate({
+      id: 'tpl_' + Date.now(),
+      name,
+      description: desc,
+      projectPath: project.projectPath,
+      prompt,
+      options: JSON.stringify(opts),
+    });
+    close();
+  };
 
-  // Keyboard support
-  function onKey(e) {
-    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
-    if (e.key === 'Enter' && !e.target.matches('input')) { start(); document.removeEventListener('keydown', onKey); }
-  }
-  document.addEventListener('keydown', onKey);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  dialog.querySelector('#tpl-name').focus();
 }
 
 // --- Settings viewer ---
@@ -4742,12 +5129,16 @@ async function openSettingsViewer(scope, projectPath) {
   const mcpEmulationValue = fieldValue('mcpEmulation', true);
   const shellProfileValue = fieldValue('shellProfile', 'auto');
   const cliAgentValue = fieldValue('cliAgent', 'claude');
+  const lanPeersValue = fieldValue('lanPeers', false);
+  const lanTokenValue = fieldValue('lanPeersToken', '');
 
   // Discover available shell profiles and agents
   let shellProfiles = [];
   try { shellProfiles = await window.api.getShellProfiles(); } catch {};
   let detectedAgents = {};
   try { detectedAgents = await window.api.detectAgents(); } catch {};
+  let lanStatus = { enabled: false, localIp: '', port: 7899, remoteBrokers: [] };
+  if (!isProject) { try { lanStatus = await window.api.getLanStatus(); } catch {} }
 
   settingsViewerBody.innerHTML = `
     <div class="settings-form">
@@ -4948,6 +5339,33 @@ async function openSettingsViewer(scope, projectPath) {
           </div>
         </div>` : ''}
 
+      ${!isProject ? `<div class="settings-section">
+        <div class="settings-section-title">LAN Peers</div>
+        <div class="settings-hint">Let agents on other machines in your local network discover and message each other. Requires the same shared token on every machine.</div>
+
+        <div class="settings-field">
+          <div class="settings-checkbox-row">
+            <input type="checkbox" id="sv-lan-peers" ${lanPeersValue ? 'checked' : ''}>
+            <label for="sv-lan-peers">Enable LAN peer discovery</label>
+          </div>
+          <div class="settings-hint" id="sv-lan-ip-hint">${lanStatus.enabled ? `Broadcasting on ${lanStatus.localIp}:${lanStatus.port}` : 'Disabled — broker listens on localhost only'}</div>
+        </div>
+
+        <div class="settings-field">
+          <div class="settings-label">Shared Token</div>
+          <input type="password" class="settings-input" id="sv-lan-token" placeholder="Leave blank for open LAN mode" value="${escapeHtml(lanTokenValue)}" autocomplete="off">
+          <div class="settings-hint">Only machines with the same token will be federated. Blank = no auth (trusted home network).</div>
+        </div>
+
+        ${lanStatus.enabled && lanStatus.remoteBrokers.length > 0 ? `
+        <div class="settings-field">
+          <div class="settings-label">Discovered Machines</div>
+          <div class="settings-lan-machines">
+            ${lanStatus.remoteBrokers.map(b => `<span class="lan-machine-badge">${escapeHtml(b.host)} <span class="lan-machine-ip">${b.ip}</span></span>`).join('')}
+          </div>
+        </div>` : ''}
+      </div>` : ''}
+
       ${!isProject ? `<div class="settings-section settings-updates-section">
         <div class="settings-section-title">Updates</div>
         <div class="settings-updates-row">
@@ -5063,6 +5481,8 @@ async function openSettingsViewer(scope, projectPath) {
       settings.terminalTheme = settingsViewerBody.querySelector('#sv-terminal-theme').value || 'switchboard';
       settings.mcpEmulation = settingsViewerBody.querySelector('#sv-mcp-emulation').checked;
       settings.shellProfile = settingsViewerBody.querySelector('#sv-shell-profile').value || 'auto';
+      settings.lanPeers = settingsViewerBody.querySelector('#sv-lan-peers').checked;
+      settings.lanPeersToken = settingsViewerBody.querySelector('#sv-lan-token').value.trim();
       // Brightness sliders — persist to localStorage (instant, no restart needed)
       const ib = settingsViewerBody.querySelector('#sv-icon-brightness');
       const bb = settingsViewerBody.querySelector('#sv-border-brightness');
@@ -5100,6 +5520,16 @@ async function openSettingsViewer(scope, projectPath) {
         }
       }
       refreshSidebar();
+    }
+
+    // Notify if LAN Peers changed
+    if (!isProject && settings.lanPeers !== lanPeersValue) {
+      const notice = document.createElement('div');
+      notice.className = 'settings-notice';
+      notice.textContent = `LAN Peers ${settings.lanPeers ? 'enabled' : 'disabled'}. Restart Switchboard to apply.`;
+      const saveBtn = settingsViewerBody.querySelector('#sv-save-btn');
+      if (saveBtn) saveBtn.parentElement.insertBefore(notice, saveBtn);
+      setTimeout(() => notice.remove(), 8000);
     }
 
     // Notify if IDE Emulation changed
@@ -5206,17 +5636,40 @@ broadcastBtn.addEventListener('click', () => {
   showBroadcastDialog();
 });
 
-function showBroadcastDialog() {
+async function showBroadcastDialog() {
+  const [projects, agents] = await Promise.all([
+    window.api.getProjects(),
+    window.api.detectAgents(),
+  ]);
+
   const overlay = document.createElement('div');
   overlay.className = 'add-project-overlay';
 
   const dialog = document.createElement('div');
   dialog.className = 'add-project-dialog';
-  dialog.style.maxWidth = '480px';
+  dialog.style.maxWidth = '560px';
 
   dialog.innerHTML = `
     <h3>Broadcast Command</h3>
-    <div class="add-project-hint">Send a command to all currently running sessions simultaneously.</div>
+    <div class="add-project-hint">Send a command to running sessions. Filter by agent type or project.</div>
+
+    <div class="broadcast-filters">
+      <div class="broadcast-filter-group">
+        <label>Agent Type</label>
+        <div id="broadcast-agent-filter" class="filter-chips">
+          <button class="filter-chip active" data-agent="all">All Agents</button>
+          ${Object.entries(agents).map(([id, agent]) => `<button class="filter-chip" data-agent="${id}">${agent.name}</button>`).join('')}
+        </div>
+      </div>
+      <div class="broadcast-filter-group">
+        <label>Project</label>
+        <div id="broadcast-project-filter" class="filter-chips">
+          <button class="filter-chip active" data-project="all">All Projects</button>
+          ${projects.map(p => `<button class="filter-chip" data-project="${encodeURIComponent(p.projectPath)}">${escapeHtml(p.projectPath.split('/').filter(Boolean).slice(-2).join('/'))}</button>`).join('')}
+        </div>
+      </div>
+    </div>
+
     <div class="folder-input-row">
       <input type="text" id="broadcast-input" placeholder="e.g.  /compact  or  git status" autocomplete="off" spellcheck="false">
     </div>
@@ -5238,10 +5691,30 @@ function showBroadcastDialog() {
   const cancelBtn = dialog.querySelector('#broadcast-cancel-btn');
   const errorEl = dialog.querySelector('#broadcast-error');
   const newlineChk = dialog.querySelector('#broadcast-newline');
+  const agentFilter = dialog.querySelector('#broadcast-agent-filter');
+  const projectFilter = dialog.querySelector('#broadcast-project-filter');
+
+  let selectedAgent = 'all';
+  let selectedProject = 'all';
 
   input.focus();
 
   const close = () => overlay.remove();
+
+  // Filter chip handlers
+  agentFilter.addEventListener('click', (e) => {
+    const chip = e.target.closest('.filter-chip[data-agent]');
+    if (!chip) return;
+    selectedAgent = chip.dataset.agent;
+    agentFilter.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c === chip));
+  });
+
+  projectFilter.addEventListener('click', (e) => {
+    const chip = e.target.closest('.filter-chip[data-project]');
+    if (!chip) return;
+    selectedProject = chip.dataset.project === 'all' ? 'all' : decodeURIComponent(chip.dataset.project);
+    projectFilter.querySelectorAll('.filter-chip').forEach(c => c.classList.toggle('active', c === chip));
+  });
 
   cancelBtn.addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
@@ -5250,7 +5723,7 @@ function showBroadcastDialog() {
     const text = input.value;
     if (!text.trim()) { errorEl.textContent = 'Enter a command'; return; }
     const payload = newlineChk.checked ? text + '\r' : text;
-    const result = await window.api.broadcastInput(payload);
+    const result = await window.api.broadcastInputTargeted(payload, selectedAgent, selectedProject);
     if (result.ok) {
       statusBarActivity.textContent = `Broadcast sent to ${result.count} session${result.count !== 1 ? 's' : ''}`;
       setTimeout(() => { statusBarActivity.textContent = ''; }, 3000);
@@ -5423,6 +5896,14 @@ const CMD_ACTIONS = [
   { type: 'action', label: 'Broadcast command…', hint: 'Send to all running sessions', icon: '⋰', run: () => { showBroadcastDialog(); } },
   { type: 'action', label: 'Toggle grid view', hint: 'Show all terminals in grid', icon: '⊞', run: () => { toggleGridView(); } },
   { type: 'action', label: 'Global Settings', hint: 'Open settings panel', icon: '⚙', run: () => { document.getElementById('global-settings-btn')?.click(); } },
+  { type: 'action', label: 'Save as Template…', hint: 'Save current session as a reusable template', icon: '▣', run: () => {
+    if (!activeSessionId) return;
+    const session = sessionMap.get(activeSessionId);
+    if (!session) return;
+    const project = cachedProjects.find(p => p.projectPath === session.projectPath) || cachedProjects[0];
+    if (!project) return;
+    showSaveTemplateDialog(project, { cliAgent: sessionAgentMap.get(activeSessionId) || 'claude' }, '');
+  } },
 ];
 
 function cmdPaletteScore(query, text) {
@@ -5765,6 +6246,32 @@ if (_detachedSessionId) {
   document.getElementById('sidebar').style.display = 'none';
   document.getElementById('sidebar-resize-handle').style.display = 'none';
   document.getElementById('main').style.borderLeft = 'none';
+
+  // Inject a compact detached-header above the terminal
+  const detachedHeader = document.createElement('div');
+  detachedHeader.id = 'detached-header';
+  detachedHeader.innerHTML = `
+    <span id="detached-title">Detached</span>
+    <div id="detached-controls">
+      <button id="detached-reattach-btn" title="Move session back to main window">Reattach</button>
+      <button id="detached-pin-btn" title="Toggle always-on-top">Pin</button>
+    </div>
+  `;
+  document.getElementById('main').insertBefore(detachedHeader, document.getElementById('main').firstChild);
+
+  const detachReattachBtn = document.getElementById('detached-reattach-btn');
+  const detachPinBtn = document.getElementById('detached-pin-btn');
+
+  detachReattachBtn.addEventListener('click', async () => {
+    await window.api.reattachSession(_detachedSessionId);
+  });
+
+  detachPinBtn.addEventListener('click', async () => {
+    const pinned = await window.api.toggleWindowPin();
+    detachPinBtn.textContent = pinned ? 'Unpin' : 'Pin';
+    detachPinBtn.classList.toggle('pinned', pinned);
+  });
+
   // Load enough session data to open the terminal
   loadProjects().then(() => {
     const session = sessionMap.get(_detachedSessionId);
@@ -5813,13 +6320,15 @@ window.api.onProjectsChanged(() => {
   projectsChangedTimer = setTimeout(() => {
     projectsChangedTimer = null;
     loadProjects();
-    // Refresh token cache so new sessions get cost data
+    // Refresh caches so new sessions get cost + loop data
     window.api.getAllSessionTokens().then(data => { if (data) tokenCache = data; });
+    window.api.getAllSessionLoops().then(data => { if (data) loopCache = data; });
   }, 300);
 });
 
 // Load token cache on startup
 window.api.getAllSessionTokens().then(data => { if (data) tokenCache = data; });
+window.api.getAllSessionLoops().then(data => { if (data) loopCache = data; });
 
 // Status bar
 let activityTimer = null;

@@ -339,6 +339,124 @@ db.exec(`
 
 db.exec('CREATE INDEX IF NOT EXISTS idx_session_tokens_model ON session_tokens(model)');
 
+// --- Session templates ---
+db.exec(`
+  CREATE TABLE IF NOT EXISTS session_templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    projectPath TEXT,
+    prompt TEXT,
+    options TEXT,
+    createdAt TEXT,
+    useCount INTEGER DEFAULT 0
+  )
+`);
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_session_templates_name ON session_templates(name)');
+
+const tmplStmts = {
+  insert: db.prepare(`INSERT INTO session_templates (id, name, description, projectPath, prompt, options, createdAt, useCount) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`),
+  update: db.prepare(`UPDATE session_templates SET name = ?, description = ?, projectPath = ?, prompt = ?, options = ? WHERE id = ?`),
+  upsert: db.prepare(`INSERT INTO session_templates (id, name, description, projectPath, prompt, options, createdAt, useCount) VALUES (?, ?, ?, ?, ?, ?, ?, 0) ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = excluded.description, projectPath = excluded.projectPath, prompt = excluded.prompt, options = excluded.options`),
+  get: db.prepare('SELECT * FROM session_templates WHERE id = ?'),
+  getAll: db.prepare('SELECT * FROM session_templates ORDER BY useCount DESC, createdAt DESC'),
+  delete: db.prepare('DELETE FROM session_templates WHERE id = ?'),
+  incUse: db.prepare('UPDATE session_templates SET useCount = useCount + 1 WHERE id = ?'),
+};
+
+function generateTemplateId() {
+  return 'tmpl_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7);
+}
+
+function saveTemplate({ id, name, description, projectPath, prompt, options }) {
+  const tid = id || generateTemplateId();
+  const now = new Date().toISOString();
+  const opts = typeof options === 'string' ? options : JSON.stringify(options || {});
+  tmplStmts.upsert.run(tid, name, description || '', projectPath || '', prompt || '', opts, now);
+  return tid;
+}
+
+function getTemplate(id) {
+  const row = tmplStmts.get.get(id);
+  if (!row) return null;
+  try { row.options = JSON.parse(row.options); } catch { row.options = {}; }
+  return row;
+}
+
+function getAllTemplates() {
+  return tmplStmts.getAll.all().map(row => {
+    try { row.options = JSON.parse(row.options); } catch { row.options = {}; }
+    return row;
+  });
+}
+
+function deleteTemplate(id) {
+  tmplStmts.delete.run(id);
+}
+
+function incrementTemplateUse(id) {
+  tmplStmts.incUse.run(id);
+}
+
+// --- Loop detection ---
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS session_loops (
+    sessionId TEXT PRIMARY KEY,
+    loopCount INTEGER DEFAULT 0,
+    lastLoopAt TEXT,
+    lastLoopTool TEXT,
+    lastLoopReason TEXT,
+    updatedAt TEXT
+  )
+`);
+
+const loopStmts = {
+  upsert: db.prepare(`
+    INSERT INTO session_loops (sessionId, loopCount, lastLoopAt, lastLoopTool, lastLoopReason, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(sessionId) DO UPDATE SET
+      loopCount = excluded.loopCount,
+      lastLoopAt = excluded.lastLoopAt,
+      lastLoopTool = excluded.lastLoopTool,
+      lastLoopReason = excluded.lastLoopReason,
+      updatedAt = excluded.updatedAt
+  `),
+  get: db.prepare('SELECT * FROM session_loops WHERE sessionId = ?'),
+  getAll: db.prepare('SELECT * FROM session_loops'),
+  delete: db.prepare('DELETE FROM session_loops WHERE sessionId = ?'),
+};
+
+const upsertLoopsBatch = db.transaction((entries) => {
+  for (const e of entries) {
+    loopStmts.upsert.run(
+      e.sessionId, e.loopCount || 0,
+      e.lastLoopAt || null, e.lastLoopTool || null,
+      e.lastLoopReason || null, e.updatedAt || new Date().toISOString()
+    );
+  }
+});
+
+function upsertSessionLoops(entries) {
+  upsertLoopsBatch(entries);
+}
+
+function getSessionLoops(sessionId) {
+  return loopStmts.get.get(sessionId) || null;
+}
+
+function getAllSessionLoops() {
+  const rows = loopStmts.getAll.all();
+  const map = new Map();
+  for (const row of rows) map.set(row.sessionId, row);
+  return map;
+}
+
+function deleteSessionLoops(sessionId) {
+  loopStmts.delete.run(sessionId);
+}
+
 const tokenStmts = {
   upsert: db.prepare(`
     INSERT INTO session_tokens (sessionId, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, model, updatedAt)
@@ -529,6 +647,8 @@ module.exports = {
   closeDb,
   // Token tracking
   upsertSessionTokens, getSessionTokens, getAllSessionTokens, deleteSessionTokens,
+  // Loop detection
+  upsertSessionLoops, getSessionLoops, getAllSessionLoops, deleteSessionLoops,
   // Peers broker
   peerRegister, peerHeartbeat, peerSetSummary, peerUnregister, peerUnregisterBySession,
   peerListAll, peerListByDir, peerListByRepo, peerGetById,

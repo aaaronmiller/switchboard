@@ -5,6 +5,12 @@ All notable changes to Switchboard are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Card color coding (F5)** — Session cards in the sidebar now show color-coded left borders based on activity recency (green = <5 min with pulse animation, yellow = <1 hour, grey = stale) and git status (blue ↑ = ahead, green = current, orange ↓ = behind/diverged, purple = dirty, grey = unknown). Git status takes visual priority over activity coloring.
+- **Sort options for session sidebar** — Dropdown selector below the time filter bar with 7 sort modes: Newest first, Oldest first, Largest first, Smallest first, Most messages first, By project, By git status. Sort applies after time filtering but before priority grouping (pinned/running sessions still surface to top). Active sort mode persists in localStorage and applies to all views (per-agent, pinned, active).
+- **Time range filter bar** — Sidebar now has a filter bar below agent selectors with preset buttons: 3d, 7d, 1m, 3m, All, plus a custom days input (▢) for arbitrary ranges. Filter persists in localStorage and applies to all views (per-agent, pinned, active)
+- **Per-agent sidebar views (F1)** — Non-Claude agent sessions (Codex, Qwen, Gemini, Kimi, Hermes, etc.) now render in the sidebar with full metadata: accurate message/turn counts from parsed session files, start/end timestamps, file size, running/completed status, project path, and session summary
+- **Project path labels on session cards** — Each session card now shows a truncated project/folder path label below the summary in monospace muted text, making it easy to identify which project a session belongs to
+- **Agent badge wiring for non-Claude sessions** — Agent badges now use `session.agent` directly from IPC data (not just sessionAgentMap), ensuring non-Claude sessions loaded via `get-agent-sessions` display their colored agent badge correctly
 - **Sidebar meta-views** — "Active" and "Pinned" buttons in the agent selector aggregate running/starred sessions across ALL installed CLIs into unified views. Running/star filter buttons now switch to/from meta-views rather than filtering within a single CLI
 - **Agent selector tabs** — Switch between CLI agents (Claude, Codex, Qwen, Gemini, etc.) in the sidebar to view each agent's session history independently, with meta-views always visible
 - **Per-agent session discovery** — Backend `get-agent-sessions` IPC endpoint using `AGENT_HISTORY` to discover sessions for non-Claude CLI tools
@@ -29,6 +35,13 @@ All notable changes to Switchboard are documented in this file.
 - **Token + cost tracking** — Session scanner now extracts token usage (input/output/cache read/write) from Claude JSONL. Stored in new `session_tokens` SQLite table. `tokens.js` pricing module covers Claude 3/3.5/4 models with fuzzy model matching. Token counts and estimated cost shown on sidebar session cards and in the conversation viewer header.
 - **Command palette (Ctrl+K)** — Fuzzy search overlay across all sessions, projects, and quick actions. Arrow key navigation, Enter to execute. Actions include: new session, broadcast command, /compact active session, toggle grid view, settings.
 - **/compact button** — Quick `/compact` button in terminal header, visible only for running Claude sessions. One click to compress context.
+- **Loop detection** — Detects `/loop` events from both JSONL (system subtype 'loop'/'loop_tool_call') and live terminal output. Orange `⟳N` badge on session cards shows loop count with tooltip (tool name + reason). Persisted in `session_loops` table, live-updates as sessions run.
+- **Session templates** — Save and reuse prompt configurations across sessions. `session_templates` SQLite table stores name, description, initial prompt, and session options (agent type, permission mode, etc.). Template selector at the top of the new-session dialog. "Save as Template" button in conversation viewer header and command palette. Initial prompt auto-injected into PTY on launch. Templates sorted by usage count.
+- **Window arrangement shortcuts** — `Ctrl+Shift+1/2/3` focuses the 1st/2nd/3rd open window by creation order; `Ctrl+Shift+0` cascades all windows. Global shortcuts registered via Electron's `globalShortcut`.
+- **Reattach session** — `reattach-session` IPC handler moves a detached session back to the main window and focuses it. Exposed via `window.api.reattachSession()`.
+- **Window pin (always-on-top)** — `toggle-window-pin` IPC handler toggles always-on-top for the calling window. Exposed via `window.api.toggleWindowPin()`.
+- **Targeted broadcast** — `broadcast-input-targeted` IPC handler sends text to a filtered subset of running PTY sessions by agent type and/or project path. Exposed via `window.api.broadcastInputTargeted()`.
+- **LAN peer federation** — `lan-peers.js` module: UDP multicast discovery on `239.255.255.250:7898`, 30s announce interval, 90s stale TTL. Enable via Global Settings → LAN Peers toggle. Optional shared token (sha256-matched) restricts federation to trusted machines. Peers broker binds to `0.0.0.0` when LAN is on. Remote peers appear in the peers popover with a machine hostname badge. `/list-peers` merges local + remote; `/send-message` proxies to remote brokers. Zero new npm dependencies — uses Node built-ins only (`dgram`, `http`, `crypto`, `os`).
 
 ### Fixed
 - **Path traversal in `read-file-for-panel`** — File panel reads now sandboxed to PROJECTS_DIR, PLANS_DIR, CLAUDE_DIR, and active session project paths. Blocked attempts logged at warn level.
@@ -38,6 +51,7 @@ All notable changes to Switchboard are documented in this file.
 
 ### Changed
 - **Upstream merge** — Integrated 8 upstream commits: Electron 33→41, xterm.js 6.0, better-sqlite3 12, UI contrast improvements, grid stop button, scroll position fix, Linux multi-arch build fixes
+- **Code cleanup** — Removed dead functions (`readFolderFromFilesystem`, `populateCacheFromFilesystem`, `safeSendToWindow`) and unused variables (`hasToolResults`, `useWslProfile`, `changed`, `sessionId`) from `main.js`
 
 ## [0.0.17] - 2026-03-25
 

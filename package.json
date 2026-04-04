@@ -43,12 +43,14 @@
     "@codemirror/state": "^6.5.4",
     "@codemirror/view": "^6.39.16",
     "@ddietr/codemirror-themes": "^1.5.2",
+    "@eslint/js": "^10.0.1",
     "@napi-rs/canvas": "^0.1.62",
     "codemirror": "^6.0.2",
     "electron": "^41.0.0",
     "electron-builder": "^26.0.0",
     "electron-reloader": "^1.2.3",
     "esbuild": "^0.27.3",
+    "eslint": "^10.1.0",
     "png2icons": "^2.0.1"
   },
   "build": {
@@ -58,6 +60,7 @@
       "main.js",
       "preload.js",
       "db.js",
+      "lan-peers.js",
       "claude-auth.js",
       "mcp-bridge.js",
       "folder-index-state.js",
@@ -110,9 +113,26 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64", "arm64"] },
-        { "target": "deb",      "arch": ["x64", "arm64"] },
-        { "target": "rpm",      "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "rpm",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "category": "Development",
       "icon": "build/icon.png",

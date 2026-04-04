@@ -50,8 +50,8 @@ Natural companion to the viewer — shows cost data alongside conversations.
 Daily-driver polish.
 
 - [x] **Command palette (Ctrl+K)** — Fuzzy search overlay across sessions, projects, and quick actions (new session, broadcast, compact, grid view, settings). Arrow key navigation.
-- [ ] **Session templates** — `session_templates` table, save/load in new-session dialog. ~2 hr.
-- [ ] **/loop monitoring** — Terminal output regex + JSONL watcher detection. Loop badge on session cards. ~2 hr.
+- [x] **Session templates** — `session_templates` table with save/load/delete/increment-use. Template selector in new-session dialog (pick before session options). "Save as Template" button in conversation viewer header + command palette action. Initial prompt injected into PTY on launch. Templates store name, description, prompt, project path, and session options (agent type, permission mode, etc.).
+- [x] **/loop monitoring** — Detects loop events from JSONL (system subtype 'loop'/'loop_tool_call') and live terminal output. Stores loop count, last tool, last reason in `session_loops` table. Orange ⟳N badge on session cards with tooltip showing details. Live updates from terminal output for running sessions.
 - [x] **/compact sidebar button** — `/compact` button in terminal header, visible only for running Claude sessions.
 
 ## Phase 5: Multi-Window System
@@ -59,20 +59,55 @@ Daily-driver polish.
 Pop sessions into independent windows. Cross-window communication. Broadcast commands.
 
 ### Core
-- [ ] **Detach session to new window** — Right-click or button on any session to pop it into its own BrowserWindow. Window gets its own terminal panel, no sidebar (clean focus mode). PTY stays alive, IPC routes events to the correct window.
-- [ ] **`safeSend` → multi-window routing** — Replace single `mainWindow` target with a window registry. `safeSend` broadcasts to all windows, session-specific events route to the window that owns the session. Each window registers its owned sessionIds.
-- [ ] **Reattach to main window** — Drag a detached window back, or click "Reattach" to move the session back to the main window's tab system.
+- [x] **Detach session to new window** — Pop-out button on any session. Window gets its own terminal panel, no sidebar (clean focus mode). PTY stays alive, IPC routes events to the correct window.
+- [x] **`safeSend` → multi-window routing** — Window registry (`windowRegistry`). `safeSend` broadcasts to all windows; session-specific events route to the owning window.
+- [x] **Reattach to main window** — `reattach-session` IPC handler moves session back to main window and focuses it.
 
 ### Cross-Window Communication
-- [ ] **Peers across windows** — Already works for free — peers broker is HTTP on :7899, each PTY registers regardless of which window owns it. Messages delivered via IPC to the correct window.
-- [ ] **Broadcast command** — "Send to all" input field that injects text into every active PTY across all windows. Useful for `/compact`, status checks, coordinated multi-agent tasks.
-- [ ] **Command targeting** — Send a command to a subset of sessions by tag, agent type, or project. E.g. "all Claude sessions in switchboard-fork".
+- [x] **Peers across windows** — Works for free — peers broker is HTTP on :7899.
+- [x] **Broadcast command** — `broadcast-input` (all sessions) + `broadcast-input-targeted` (filter by agent type / project).
+- [x] **Command targeting** — `broadcast-input-targeted` filters by agentFilter + projectFilter.
 
 ### Window Features
-- [ ] **Focus mode** — Detached windows are distraction-free: terminal only, no sidebar, compact header. Optional always-on-top pin.
-- [ ] **Window arrangement** — Keyboard shortcuts to tile/cascade all windows. Ctrl+Shift+1/2/3 to focus specific windows.
+- [x] **Focus mode** — Detached windows are terminal-only, no sidebar. `toggle-window-pin` handler for always-on-top.
+- [x] **Window arrangement** — `Ctrl+Shift+1/2/3` focus windows by creation order; `Ctrl+Shift+0` cascades all windows.
 - [ ] **Window state persistence** — Remember which sessions were detached and window positions. Restore on app restart.
 - [ ] **Cross-window sparklines** — Activity events broadcast to all windows so sparkline badges stay current everywhere.
+
+## Phase 5b: Multi-Agent Session History (NEW)
+
+Per-agent sidebar views, time filters, sorting, pinned enrichment, card color coding.
+
+### F1: Per-Agent Sidebar Views
+- [x] **F1.1: Enrich `get-agent-sessions` IPC** — Return `sessionId`, `startTime`, `endTime`, `messageCount`, `turnCount`, `size`, `projectPath`, `summary`, `status` (running/completed/failed)
+- [x] **F1.2: Non-Claude session card rendering** — Reuse existing card template for Codex, Qwen, Gemini, etc.
+- [x] **F1.3: Agent selector wiring** — Each agent button loads its sessions into sidebar
+- [x] **F1.4: Project/folder label on cards** — Show which project each session belongs to
+
+### F2: Time Range Filters
+- [x] **F2.1: Filter bar HTML** — `[3d] [7d] [1m] [3m] [All] [▢]` below agent selectors
+- [x] **F2.2: Client-side date filtering** — Filter sessions array by selected range
+- [x] **F2.3: Custom number input** — Slide-out or modal for arbitrary day count
+- [x] **F2.4: localStorage persistence** — Remember last-used filter
+
+### F3: Sort Options
+- [x] **F3.1: Sort selector** — Dropdown or toggle button near filter bar
+- [x] **F3.2: Sort functions** — byDate, bySize, byMsgCount, byProject, byGitStatus
+- [x] **F3.3: Sort state persistence** — localStorage
+
+### F4: Enriched Pinned View
+- [x] **F4.1: Full metadata on pinned cards** — Same enriched data as per-agent cards
+- [x] **F4.2: Pinned respects filters** — Time range + sort apply to pinned view too
+
+### F5: Card Color Coding
+- [x] **F5.1: Git status discovery** — `getProjectGitStatus(projectPath)` in main.js
+- [x] **F5.2: Git status cache** — Per-project, 60s TTL, invalidate on file change
+- [x] **F5.3: Git status in session data** — Include in backend response
+- [x] **F5.4: Activity color CSS** — Recent=green glow, 1hr=yellow, older=grey
+- [x] **F5.5: Git status color CSS** — Ahead=blue, current=green, behind=orange, untracked=grey
+- [x] **F5.6: Apply colors to card borders** — Dynamic class based on activity + git status
+
+---
 
 ## Phase 6: Module Decomposition
 
