@@ -32,80 +32,101 @@ const GIT_CACHE_TTL = 60_000; // 60 seconds
 // Agent history scan cache — avoids full filesystem walks on every IPC call
 const agentScanCache = new Map(); // agentId -> { sessions, timestamp }
 const AGENT_SCAN_CACHE_TTL = 30_000; // 30 seconds
+const AGENT_SCAN_CACHE_MAX = 50; // cap total entries (B2)
 
+const { spawn } = require('child_process');
+
+// Async git status — replaces the old spawnSync version (B1)
 function getProjectGitStatus(projectPath) {
   const unknown = { status: 'unknown', branch: null, ahead: 0, behind: 0, dirty: false };
-  if (!projectPath) return unknown;
-  try {
-    const gitDir = path.join(projectPath, '.git');
-    if (!fs.existsSync(gitDir)) return unknown;
+  if (!projectPath) return Promise.resolve(unknown);
 
-    const { spawnSync } = require('child_process');
+  return new Promise((resolve) => {
+    try {
+      const gitDir = path.join(projectPath, '.git');
+      if (!fs.existsSync(gitDir)) return resolve(unknown);
 
-    // Single call: get branch info + dirty status in one shot
-    const result = spawnSync('git', ['status', '--branch', '--porcelain'], {
-      cwd: projectPath,
-      timeout: 10_000,
-      encoding: 'utf8',
-    });
-    if (result.error) return unknown; // git not installed or other error
+      const child = spawn('git', ['status', '--branch', '--porcelain'], {
+        cwd: projectPath,
+        timeout: 10_000,
+        env: cleanPtyEnv,
+      });
 
-    const output = result.stdout;
-    if (!output || !output.trim()) return unknown;
+      let stdout = '';
+      let stderr = '';
 
-    const lines = output.trim().split('\n');
-    const branchLine = lines[0];
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
 
-    // Parse branch line: ## branchName...upstreamName [ahead N, behind M]
-    // or just:           ## branchName  (no upstream configured)
-    const branchMatch = branchLine.match(/^##\s+(\S+)/);
-    if (!branchMatch) return unknown;
+      child.on('error', () => resolve(unknown));
 
-    const branchInfo = branchMatch[1];
-    const aheadBehindMatch = branchInfo.match(/^(.+?)\.\.\.(.+?)\s+\[ahead\s+(\d+),\s*behind\s+(\d+)\]/);
+      child.on('close', (code) => {
+        if (code !== 0 || (!stdout.trim() && stderr)) return resolve(unknown);
+        resolve(parseGitStatusOutput(stdout.trim()));
+      });
 
-    let branch, ahead, behind, status;
-
-    if (aheadBehindMatch) {
-      // Has upstream info
-      branch = aheadBehindMatch[1];
-      ahead = parseInt(aheadBehindMatch[3], 10) || 0;
-      behind = parseInt(aheadBehindMatch[4], 10) || 0;
-    } else {
-      // No upstream — just branch name
-      branch = branchInfo.split('...')[0];
-      ahead = 0;
-      behind = 0;
+      // Safety timeout — resolve unknown if child hasn't exited
+      setTimeout(() => {
+        if (!child.killed) {
+          child.kill('SIGTERM');
+          resolve(unknown);
+        }
+      }, 11_000);
+    } catch {
+      resolve(unknown);
     }
-
-    // Determine status
-    if (ahead > 0 && behind === 0) {
-      status = 'ahead';
-    } else if (behind > 0 && ahead === 0) {
-      status = 'behind';
-    } else if (ahead > 0 && behind > 0) {
-      status = 'diverged';
-    } else {
-      status = 'current';
-    }
-
-    // Check for dirty files (any lines after the branch line)
-    const dirty = lines.length > 1;
-
-    return { status, branch, ahead, behind, dirty };
-  } catch {
-    return { status: 'unknown', branch: null, ahead: 0, behind: 0, dirty: false };
-  }
+  });
 }
 
-function getCachedGitStatus(projectPath, forceRefresh = false) {
+// Pure function to parse the output of `git status --branch --porcelain`
+function parseGitStatusOutput(output) {
+  const unknown = { status: 'unknown', branch: null, ahead: 0, behind: 0, dirty: false };
+  if (!output) return unknown;
+
+  const lines = output.split('\n');
+  const branchLine = lines[0];
+
+  const branchMatch = branchLine.match(/^##\s+(\S+)/);
+  if (!branchMatch) return unknown;
+
+  const branchInfo = branchMatch[1];
+  const aheadBehindMatch = branchInfo.match(/^(.+?)\.\.\.(.+?)\s+\[ahead\s+(\d+),\s*behind\s+(\d+)\]/);
+
+  let branch, ahead, behind, status;
+
+  if (aheadBehindMatch) {
+    branch = aheadBehindMatch[1];
+    ahead = parseInt(aheadBehindMatch[3], 10) || 0;
+    behind = parseInt(aheadBehindMatch[4], 10) || 0;
+  } else {
+    branch = branchInfo.split('...')[0];
+    ahead = 0;
+    behind = 0;
+  }
+
+  if (ahead > 0 && behind === 0) {
+    status = 'ahead';
+  } else if (behind > 0 && ahead === 0) {
+    status = 'behind';
+  } else if (ahead > 0 && behind > 0) {
+    status = 'diverged';
+  } else {
+    status = 'current';
+  }
+
+  const dirty = lines.length > 1;
+
+  return { status, branch, ahead, behind, dirty };
+}
+
+async function getCachedGitStatus(projectPath, forceRefresh = false) {
   if (!forceRefresh) {
     const cached = gitStatusCache.get(projectPath);
     if (cached && (Date.now() - cached.timestamp) < GIT_CACHE_TTL) {
       return cached.data;
     }
   }
-  const data = getProjectGitStatus(projectPath);
+  const data = await getProjectGitStatus(projectPath);
   gitStatusCache.set(projectPath, { data, timestamp: Date.now() });
   return data;
 }
@@ -114,15 +135,28 @@ function clearGitCache() {
   gitStatusCache.clear();
 }
 
-// Evict stale git cache entries every 5 minutes
+// Evict stale git cache entries every 2 minutes, cap at 200 entries (B3)
+const GIT_CACHE_MAX_ENTRIES = 200;
 const gitCacheEvictTimer = setInterval(() => {
   const now = Date.now();
-  for (const [key, val] of gitStatusCache) {
-    if (now - val.timestamp > GIT_CACHE_TTL * 5) {
+
+  // Cap total entries — evict oldest when over limit
+  if (gitStatusCache.size > GIT_CACHE_MAX_ENTRIES) {
+    const entries = Array.from(gitStatusCache.entries());
+    entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+    const toDelete = entries.slice(0, entries.length - GIT_CACHE_MAX_ENTRIES);
+    for (const [key] of toDelete) {
       gitStatusCache.delete(key);
     }
   }
-}, 5 * 60 * 1000);
+
+  // Evict stale entries (older than 2x TTL)
+  for (const [key, val] of gitStatusCache) {
+    if (now - val.timestamp > GIT_CACHE_TTL * 2) {
+      gitStatusCache.delete(key);
+    }
+  }
+}, 2 * 60 * 1000);
 
 // Force-refresh the agent scan cache for a given agent (or all agents)
 function clearAgentScanCache(agentId) {
@@ -1251,7 +1285,7 @@ function extractSessionSummary(filePath, agentId) {
 // --- IPC: get-agent-sessions ---
 // Returns sessions for non-Claude agents using AGENT_HISTORY discovery.
 // Groups them by project (derived from file paths or cwd inside session data).
-ipcMain.handle('get-agent-sessions', (_event, agentId) => {
+ipcMain.handle('get-agent-sessions', async (_event, agentId) => {
   try {
     const history = AGENT_HISTORY[agentId];
     if (!history) return [];
@@ -1363,14 +1397,9 @@ ipcMain.handle('get-agent-sessions', (_event, agentId) => {
       const timeSinceModified = now - mtime.getTime();
       const status = timeSinceModified < 2 * 60 * 1000 ? 'running' : 'completed';
 
-      // Enrich with git status (F5)
+      // Git status will be resolved in batch after the loop (B1: async)
       let gitStatus = 'unknown';
       let gitBranch = null;
-      if (projectPath) {
-        const gitData = getCachedGitStatus(projectPath);
-        gitStatus = gitData.status;
-        gitBranch = gitData.branch;
-      }
 
       folderMap.get(projectPath).sessions.push({
         sessionId: raw.id,
@@ -1407,6 +1436,40 @@ ipcMain.handle('get-agent-sessions', (_event, agentId) => {
       return new Date(bDate) - new Date(aDate);
     });
 
+    // Batch-resolve all git statuses in parallel (B1: async, no main-thread blocking)
+    const gitPromises = new Map(); // projectPath -> promise
+    for (const proj of projects) {
+      for (const session of proj.sessions) {
+        if (session.projectPath && !gitPromises.has(session.projectPath)) {
+          gitPromises.set(session.projectPath, getCachedGitStatus(session.projectPath));
+        }
+      }
+    }
+    const gitResults = await Promise.all(
+      Array.from(gitPromises.entries()).map(async ([projPath, promise]) => {
+        const data = await promise;
+        return { projPath, data };
+      })
+    );
+    // Apply results to sessions
+    const gitResultMap = new Map(gitResults.map(r => [r.projPath, r.data]));
+    for (const proj of projects) {
+      for (const session of proj.sessions) {
+        if (session.projectPath && gitResultMap.has(session.projectPath)) {
+          const gd = gitResultMap.get(session.projectPath);
+          session.gitStatus = gd.status;
+          session.gitBranch = gd.branch;
+        }
+      }
+    }
+
+    // Evict oldest entry if over cap before adding new one (B2)
+    if (agentScanCache.size >= AGENT_SCAN_CACHE_MAX) {
+      const oldest = Array.from(agentScanCache.entries()).reduce((a, b) =>
+        a[1].timestamp < b[1].timestamp ? a : b
+      );
+      agentScanCache.delete(oldest[0]);
+    }
     // Cache the result before returning
     agentScanCache.set(agentId, { sessions: projects, timestamp: Date.now() });
 

@@ -5385,3 +5385,26 @@ body { display: flex; flex-direction: column; }
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* F9: Focus-visible outlines for keyboard navigation */
+*:focus-visible {
+  outline: 2px solid #8088ff;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+button:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 2px solid #8088ff;
+  outline-offset: 2px;
+}
+
+/* Suppress focus ring for mouse users — only show for keyboard nav */
+button:focus:not(:focus-visible),
+[role="button"]:focus:not(:focus-visible) {
+  outline: none;
+}
