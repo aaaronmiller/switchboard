@@ -25,7 +25,7 @@ jobs:
           # module rebuild only runs between arch switches for the first target
           # type — the second target type reuses whatever was last compiled,
           # which can be the wrong arch. See #18.
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             platform: linux
             arch: x64
           - os: ubuntu-24.04-arm
@@ -39,7 +39,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - uses: actions/setup-python@v5

@@ -15,9 +15,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             platform: linux
-          - os: macos-latest
+          - os: macos-14
             platform: mac
           - os: windows-latest
             platform: win

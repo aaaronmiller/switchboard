@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   check-upstream:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       new_release: ${{ steps.check.outputs.new_release }}
       tag: ${{ steps.check.outputs.tag }}
@@ -37,7 +37,7 @@ jobs:
   sync-and-build:
     needs: check-upstream
     if: needs.check-upstream.outputs.new_release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout fork
@@ -56,7 +56,6 @@ jobs:
           git remote add upstream https://github.com/doctly/switchboard.git
           git fetch upstream main
 
-<<<<<<< Updated upstream
       - name: Merge upstream into main
         id: merge
         run: |
@@ -64,30 +63,6 @@ jobs:
 
           # Try clean merge first (without auto-committing)
           git merge --no-commit --no-ff upstream/main || true
-=======
-      - name: Configure git for CI
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Merge upstream changes
-        run: |
-          if git merge --no-ff upstream/main -m "Merge upstream changes"; then
-            echo "Merge succeeded"
-          else
-            # Check if there are actual conflict markers
-            if grep -rq '<<<<<<<' -- . ':!node_modules' 2>/dev/null; then
-              echo "CONFLICT_DETECTED=true" >> $GITHUB_ENV
-              git merge --abort
-              echo "::error::Merge conflict with upstream — manual resolution required"
-              exit 1
-            else
-              # Merge failed for other reasons
-              echo "::error::Merge failed unexpectedly"
-              exit 1
-            fi
-          fi
->>>>>>> Stashed changes
 
           # Always restore fork's own workflow files — never let upstream overwrite them
           git checkout HEAD -- .github/workflows/ 2>/dev/null || true
