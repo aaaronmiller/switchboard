@@ -111,6 +111,14 @@ function applyBrightness() {
 
 applyBrightness();
 
+// --- Color customization sliders (restore from localStorage) ---
+(function initColorSliders() {
+  const hue = parseInt(localStorage.getItem('cardBorderHue') || '0', 10);
+  const brightness = parseInt(localStorage.getItem('cardTextBrightness') || '100', 10);
+  document.documentElement.style.setProperty('--card-border-hue', String(hue));
+  document.documentElement.style.setProperty('--card-text-brightness', String(brightness / 100));
+})();
+
 let currentPlanContent = '';
 let currentPlanFilePath = '';
 let currentPlanFilename = '';
@@ -1087,16 +1095,28 @@ function sortSessions(sessions, mode) {
 function updateTimeFilterButtons() {
   const bar = document.getElementById('time-filter-bar');
   if (!bar) return;
-  const standardDays = [3, 7, 30, 90, 0];
+
+  // Check days-based buttons
   bar.querySelectorAll('.time-filter-btn[data-days]').forEach(btn => {
     const d = parseInt(btn.dataset.days, 10);
     btn.classList.toggle('active', d === activeTimeFilter);
   });
+
+  // Check hours-based buttons (25h etc)
+  bar.querySelectorAll('.time-filter-btn[data-hours]').forEach(btn => {
+    const h = parseInt(btn.dataset.hours, 10);
+    const daysValue = h / 24;
+    btn.classList.toggle('active', Math.abs(activeTimeFilter - daysValue) < 0.01);
+  });
+
   const customBtn = document.getElementById('custom-days-btn');
   if (customBtn) {
-    const isCustom = !standardDays.includes(activeTimeFilter);
-    customBtn.classList.toggle('active', isCustom);
-    customBtn.textContent = isCustom ? '\u2713' : '\u25A2';
+    const standardDays = [3, 7, 14, 30, 60, 90, 180, 0];
+    const standardHours = [25];
+    const isPreset = standardDays.includes(activeTimeFilter) ||
+                     standardHours.some(h => Math.abs(activeTimeFilter - h / 24) < 0.01);
+    customBtn.classList.toggle('active', !isPreset);
+    customBtn.textContent = isPreset ? '\u25A2' : '\u2713';
   }
 }
 
@@ -1105,6 +1125,7 @@ function updateTimeFilterButtons() {
   const bar = document.getElementById('time-filter-bar');
   if (!bar) return;
 
+  // Days-based buttons
   bar.querySelectorAll('.time-filter-btn[data-days]').forEach(btn => {
     btn.addEventListener('click', () => {
       const days = parseInt(btn.dataset.days, 10);
@@ -1116,6 +1137,24 @@ function updateTimeFilterButtons() {
       if (customInput) customInput.style.display = 'none';
       // Clear today toggle when time filter is active
       if (days !== 0 && showTodayOnly) {
+        showTodayOnly = false;
+        todayToggle.classList.remove('active');
+      }
+      refreshSidebar({ resort: true });
+    });
+  });
+
+  // Hours-based buttons (e.g. 25h)
+  bar.querySelectorAll('.time-filter-btn[data-hours]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const hours = parseInt(btn.dataset.hours, 10);
+      const daysValue = hours / 24;
+      activeTimeFilter = daysValue;
+      localStorage.setItem('activeTimeFilter', String(daysValue));
+      updateTimeFilterButtons();
+      const customInput = document.getElementById('custom-days-input');
+      if (customInput) customInput.style.display = 'none';
+      if (showTodayOnly) {
         showTodayOnly = false;
         todayToggle.classList.remove('active');
       }
@@ -2221,6 +2260,14 @@ function buildSessionItem(session) {
   const summaryEl = document.createElement('div');
   summaryEl.className = 'session-summary';
   summaryEl.textContent = displayName;
+
+  // F5.6: LIVE badge for recently active sessions (<5 min)
+  if (activityClass === 'activity-recent') {
+    const liveBadge = document.createElement('span');
+    liveBadge.className = 'session-live-badge';
+    liveBadge.textContent = 'LIVE';
+    summaryEl.appendChild(liveBadge);
+  }
 
   const idEl = document.createElement('div');
   idEl.className = 'session-id';
@@ -5087,7 +5134,7 @@ async function showNewSessionDialog(project) {
       selectedMode = mode === 'null' ? null : mode;
     }
     modeGrid.innerHTML = renderModeGrid();
-  }
+  });
 
   function renderPromptField() {
     return `<div class="settings-field" id="nsd-prompt-wrap">
@@ -5813,18 +5860,6 @@ async function showResumeSessionDialog(session) {
     });
   }
 
-  // Remove project button
-  const removeBtn = settingsViewerBody.querySelector('#sv-remove-btn');
-  if (removeBtn) {
-    removeBtn.addEventListener('click', async () => {
-      if (!confirm(`Remove project "${shortName}" from Switchboard?\n\nThis hides the project from the sidebar. Your session files are not deleted.`)) return;
-      await window.api.removeProject(projectPath);
-      settingsViewer.style.display = 'none';
-      placeholder.style.display = 'flex';
-      loadProjects();
-    });
-  }
-
   // Cancel button
   const cancelBtn = settingsViewerBody.querySelector('#sv-cancel-btn');
   if (cancelBtn) cancelBtn.addEventListener('click', () => { closeSettingsViewer(); });
@@ -6029,6 +6064,73 @@ function showAddProjectDialog() {
 
   collapseBtn.addEventListener('click', () => sidebar.classList.add('collapsed'));
   expandBtn.addEventListener('click', () => sidebar.classList.remove('collapsed'));
+
+  // Right-click context menu on sidebar expand button
+  const ctxMenu = document.getElementById('agent-context-menu');
+  expandBtn.addEventListener('contextmenu', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Detect agents if not already cached
+    let agents = installedAgents;
+    if (!agents || Object.keys(agents).length === 0) {
+      try { agents = await window.api.detectAgents(); } catch { agents = {}; }
+    }
+
+    const installedEntries = Object.entries(agents).filter(([, a]) => a.installed);
+    if (installedEntries.length === 0) return;
+
+    // Build menu items
+    ctxMenu.innerHTML = '';
+    for (const [id, agent] of installedEntries) {
+      const item = document.createElement('button');
+      item.className = 'agent-context-menu-item';
+      const dotColor = agent.color || '#888';
+      const isActive = id === activeAgent;
+      item.innerHTML = `
+        <span class="ctx-dot" style="background:${dotColor}"></span>
+        <span>${agent.name}</span>
+        ${isActive ? '<span class="ctx-checkmark">\u2713</span>' : ''}
+      `;
+      item.addEventListener('click', () => {
+        if (id === activeAgent) return;
+        activeAgent = id;
+        localStorage.setItem('activeAgent', id);
+        // Update agent-selector buttons
+        const selContainer = document.getElementById('agent-selector');
+        if (selContainer) {
+          selContainer.querySelectorAll('.agent-selector-btn').forEach(b =>
+            b.classList.toggle('active', b.dataset.agent === id)
+          );
+        }
+        // Clear meta-view state
+        showStarredOnly = false; showRunningOnly = false;
+        if (starToggle) starToggle.classList.remove('active');
+        if (runningToggle) runningToggle.classList.remove('active');
+        loadProjectsForAgent();
+        ctxMenu.style.display = 'none';
+      });
+      ctxMenu.appendChild(item);
+    }
+
+    // Position menu below the button
+    const rect = expandBtn.getBoundingClientRect();
+    ctxMenu.style.top = (rect.bottom + 4) + 'px';
+    ctxMenu.style.left = rect.left + 'px';
+    ctxMenu.style.display = 'block';
+  });
+
+  // Close context menu on click outside or Escape
+  document.addEventListener('mousedown', (e) => {
+    if (ctxMenu.style.display === 'block' && !ctxMenu.contains(e.target)) {
+      ctxMenu.style.display = 'none';
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && ctxMenu.style.display === 'block') {
+      ctxMenu.style.display = 'none';
+    }
+  });
 }
 
 // --- Sidebar resize ---

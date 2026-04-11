@@ -20,12 +20,16 @@
         <button id="global-settings-btn" title="Global settings" aria-label="Global settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button>
         <button id="sidebar-collapse-btn" title="Hide sidebar"><svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 24 24" height="20" width="20" xmlns="http://www.w3.org/2000/svg"><path d="M18 3a3 3 0 0 1 2.995 2.824l.005 .176v12a3 3 0 0 1 -2.824 2.995l-.176 .005h-12a3 3 0 0 1 -2.995 -2.824l-.005 -.176v-12a3 3 0 0 1 2.824 -2.995l.176 -.005h12zm0 2h-9v14h9a1 1 0 0 0 .993 -.883l.007 -.117v-12a1 1 0 0 0 -.883 -.993l-.117 -.007zm-2.293 4.293a1 1 0 0 1 .083 1.32l-.083 .094l-1.292 1.293l1.292 1.293a1 1 0 0 1 .083 1.32l-.083 .094a1 1 0 0 1 -1.32 .083l-.094 -.083l-2 -2a1 1 0 0 1 -.083 -1.32l.083 -.094l2 -2a1 1 0 0 1 1.414 0z"></path></svg></button>
       </div>
-      <div id="agent-selector" style="display:none;"></div>
+      <div id="agent-selector" style="display:flex; flex-wrap:wrap; gap:4px; padding:8px 12px;"></div>
       <div id="time-filter-bar" class="time-filter-bar">
+        <button data-hours="25" class="time-filter-btn">25h</button>
         <button data-days="3" class="time-filter-btn">3d</button>
-        <button data-days="7" class="time-filter-btn active">7d</button>
+        <button data-days="7" class="time-filter-btn">7d</button>
+        <button data-days="14" class="time-filter-btn">2w</button>
         <button data-days="30" class="time-filter-btn">1m</button>
+        <button data-days="60" class="time-filter-btn">2m</button>
         <button data-days="90" class="time-filter-btn">3m</button>
+        <button data-days="180" class="time-filter-btn">6m</button>
         <button data-days="0" class="time-filter-btn">All</button>
         <button class="time-filter-btn" id="custom-days-btn" title="Custom days">&#x25A2;</button>
       </div>
@@ -69,6 +73,8 @@
     <div id="memory-content" style="display:none;"></div>
   </div>
   <div id="sidebar-resize-handle"></div>
+  <!-- Right-click context menu for sidebar expand button -->
+  <div id="agent-context-menu" class="agent-context-menu" style="display:none;"></div>
   <div id="main">
     <div id="placeholder">
       <p>Select a session from the sidebar to begin.</p>

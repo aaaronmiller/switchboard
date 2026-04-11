@@ -34,6 +34,10 @@
       ? projectPath.split('/').filter(Boolean).slice(-2).join('/')
       : 'Global';
 
+    // Color customization values (from localStorage, UI-only prefs)
+    const cardBorderHue = parseInt(localStorage.getItem('cardBorderHue') || '0', 10);
+    const cardTextBrightness = parseInt(localStorage.getItem('cardTextBrightness') || '100', 10);
+
     settingsViewerTitle.textContent = (isProject ? 'Project Settings — ' : 'Global Settings — ') + shortName;
 
     // Show settings viewer, hide others
@@ -248,6 +252,22 @@
         </div>
       </div>` : ''}
 
+      ${!isProject ? `<div class="settings-section">
+        <div class="settings-section-title">Appearance</div>
+
+        <div class="color-slider-field">
+          <label for="sv-card-border-hue">Card Border Hue</label>
+          <input type="range" id="sv-card-border-hue" min="0" max="360" value="${escapeHtml(String(cardBorderHue))}">
+          <span class="color-slider-value" id="sv-card-border-hue-val">${cardBorderHue}&deg;</span>
+        </div>
+
+        <div class="color-slider-field">
+          <label for="sv-card-text-brightness">Card Text Brightness</label>
+          <input type="range" id="sv-card-text-brightness" min="30" max="150" value="${escapeHtml(String(cardTextBrightness))}">
+          <span class="color-slider-value" id="sv-card-text-brightness-val">${cardTextBrightness}%</span>
+        </div>
+      </div>` : ''}
+
       <div class="settings-btn-row">
         <button class="settings-cancel-btn" id="sv-cancel-btn">Cancel</button>
         <button class="settings-save-btn" id="sv-save-btn">Save Settings</button>
@@ -347,6 +367,33 @@
     settingsViewerBody.querySelector('#sv-cancel-btn').addEventListener('click', () => {
       closeSettingsViewer();
     });
+
+    // Color customization sliders (UI-only, stored in localStorage)
+    const hueSlider = settingsViewerBody.querySelector('#sv-card-border-hue');
+    const hueVal = settingsViewerBody.querySelector('#sv-card-border-hue-val');
+    const brightnessSlider = settingsViewerBody.querySelector('#sv-card-text-brightness');
+    const brightnessVal = settingsViewerBody.querySelector('#sv-card-text-brightness-val');
+
+    function applyColorSliders() {
+      const hue = parseInt(hueSlider?.value || '0', 10);
+      const brightness = parseInt(brightnessSlider?.value || '100', 10);
+      if (hueVal) hueVal.textContent = hue + '\u00b0';
+      if (brightnessVal) brightnessVal.textContent = brightness + '%';
+      document.documentElement.style.setProperty('--card-border-hue', String(hue));
+      document.documentElement.style.setProperty('--card-text-brightness', String(brightness / 100));
+      localStorage.setItem('cardBorderHue', String(hue));
+      localStorage.setItem('cardTextBrightness', String(brightness));
+    }
+
+    if (hueSlider) {
+      hueSlider.addEventListener('input', applyColorSliders);
+    }
+    if (brightnessSlider) {
+      brightnessSlider.addEventListener('input', applyColorSliders);
+    }
+
+    // Apply on open (in case values changed since last save)
+    applyColorSliders();
 
     // Check for updates button + current version + inline status
     const checkUpdatesBtn = settingsViewerBody.querySelector('#sv-check-updates-btn');
