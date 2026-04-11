@@ -69,7 +69,7 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "doctly",
+      "owner": "aaaronmiller",
       "repo": "switchboard"
     },
     "mac": {
