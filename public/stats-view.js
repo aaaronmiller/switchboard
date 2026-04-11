@@ -1,7 +1,6 @@
 // --- Stats view ---
 // Depends on globals: escapeHtml (utils.js), statsViewerBody (app.js)
 
-let cachedUsage = null;
 
 async function loadStats() {
   statsViewerBody.innerHTML = '';

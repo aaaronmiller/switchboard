@@ -4,10 +4,6 @@
 // statsViewer, settingsViewer, jsonlViewer (app.js)
 // Depends on: formatDate (utils.js)
 
-let cachedMemoryData = { global: { files: [] }, projects: [] };
-let currentMemoryFilePath = null;
-let currentMemoryContent = "";
-const memoryCollapsedState = new Map();
 
 // --- Plans ---
 async function loadPlans() {
