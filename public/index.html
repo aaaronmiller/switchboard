@@ -159,7 +159,14 @@
           </div>
           <div id="cv-header-actions">
             <button id="cv-save-template-btn" title="Save as Template">Save Template</button>
-            <button id="cv-export-md-btn" title="Export as Markdown">Export MD</button>
+            <div class="cv-export-dropdown" id="cv-export-dropdown">
+              <button id="cv-export-btn" title="Export conversation" aria-label="Export conversation">Export ▾</button>
+              <div id="cv-export-menu" class="cv-export-menu" style="display:none">
+                <button data-format="markdown" aria-label="Export as Markdown">📄 Markdown</button>
+                <button data-format="jsonl" aria-label="Export as JSONL">📋 JSONL</button>
+                <button data-format="json" aria-label="Export as JSON">📦 JSON</button>
+              </div>
+            </div>
             <button id="cv-copy-btn" title="Copy to clipboard">Copy</button>
             <button id="cv-resume-btn" title="Resume this session">Resume</button>
           </div>

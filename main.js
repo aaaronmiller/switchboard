@@ -2045,6 +2045,11 @@ ipcMain.handle('get-setting', (_event, key) => {
 });
 
 ipcMain.handle('set-setting', (_event, key, value) => {
+  const err = validateSetting(key, value);
+  if (err) {
+    log.warn(`[settings] blocked set-setting("${key}"): ${err}`);
+    return { ok: false, error: err };
+  }
   setSetting(key, value);
   return { ok: true };
 });
@@ -2053,6 +2058,38 @@ ipcMain.handle('delete-setting', (_event, key) => {
   deleteSetting(key);
   return { ok: true };
 });
+
+// Settings schema — defines allowed keys and expected types (injection guard)
+const SETTING_SCHEMA = {
+  // Boolean settings
+  dangerouslySkipPermissions: 'boolean',
+  worktree: 'boolean',
+  chrome: 'boolean',
+  mcpEmulation: 'boolean',
+  // String settings
+  permissionMode: 'string|null',
+  worktreeName: 'string',
+  sparsePaths: 'string',
+  preLaunchCmd: 'string',
+  addDirs: 'string',
+  terminalTheme: 'string',
+  shellProfile: 'string',
+  cliAgent: 'string',
+  // Number settings
+  visibleSessionCount: 'number',
+  sidebarWidth: 'number',
+  // Object settings (free-form but must be object)
+  envOverrides: 'object',
+  pricingOverrides: 'object',
+  defaultTemplate: 'string|null',
+  conversationViewMode: 'string',
+  showTokenCounts: 'boolean',
+  showCostEstimates: 'boolean',
+  loopNotifications: 'boolean',
+  commandPaletteEnabled: 'boolean',
+  // Global session options (stored as object)
+  global: 'object',
+};
 
 const SETTING_DEFAULTS = {
   permissionMode: null,
@@ -2070,17 +2107,52 @@ const SETTING_DEFAULTS = {
   cliAgent: 'claude',
 };
 
+/** Validate a setting key+value against the schema. Returns error string or null. */
+function validateSetting(key, value) {
+  if (typeof key !== 'string' || key.length === 0) return 'key must be a non-empty string';
+  if (key.length > 100) return 'key too long (max 100 chars)';
+  if (key.includes('\0') || key.includes("'") || key.includes('"')) return 'key contains invalid characters';
+
+  const expectedType = SETTING_SCHEMA[key];
+  if (expectedType === undefined) return `unknown setting key: "${key}"`;
+
+  if (expectedType === 'string|null') {
+    if (value !== null && typeof value !== 'string') return `"${key}" must be string or null`;
+    if (typeof value === 'string' && value.length > 10000) return `"${key}" value too long (max 10000 chars)`;
+  } else if (expectedType === 'string') {
+    if (typeof value !== 'string') return `"${key}" must be a string`;
+    if (value.length > 10000) return `"${key}" value too long (max 10000 chars)`;
+  } else if (expectedType === 'number') {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return `"${key}" must be a finite number`;
+  } else if (expectedType === 'boolean') {
+    if (typeof value !== 'boolean') return `"${key}" must be a boolean`;
+  } else if (expectedType === 'object') {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return `"${key}" must be an object`;
+    // Guard against huge objects
+    const jsonSize = JSON.stringify(value).length;
+    if (jsonSize > 100000) return `"${key}" object too large (max 100KB JSON)`;
+  }
+
+  return null;
+}
+
 // --- CLI Agent Definitions ---
 const CLI_AGENTS = {
-  claude:   { name: 'Claude Code',  cmd: 'claude',   color: '#d97757', sessionFlag: '--session-id', resumeFlag: '--resume', forkFlag: '--fork-session', supportsPermissions: true,  supportsMcp: true  },
-  codex:    { name: 'Codex',        cmd: 'codex',    color: '#4ade80', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
-  qwen:     { name: 'Qwen Code',    cmd: 'qwen',     color: '#60a5fa', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
-  gemini:   { name: 'Gemini CLI',   cmd: 'gemini',   color: '#22d3ee', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
-  kimi:     { name: 'Kimi Code',    cmd: 'kimi',     color: '#fb923c', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
-  aider:    { name: 'Aider',        cmd: 'aider',    color: '#a78bfa', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
-  opencode: { name: 'OpenCode',     cmd: 'opencode', color: '#f472b6', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
-  hermes:   { name: 'Hermes Agent', cmd: 'hermes',   color: '#fbbf24', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
-  letta:    { name: 'Letta Code',   cmd: 'letta',    color: '#34d399', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  claude:    { name: 'Claude Code',   cmd: 'claude',    color: '#d97757', sessionFlag: '--session-id', resumeFlag: '--resume', forkFlag: '--fork-session', supportsPermissions: true,  supportsMcp: true  },
+  codex:     { name: 'Codex',         cmd: 'codex',     color: '#4ade80', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  qwen:      { name: 'Qwen Code',     cmd: 'qwen',      color: '#60a5fa', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  gemini:    { name: 'Gemini CLI',    cmd: 'gemini',    color: '#22d3ee', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  kimi:      { name: 'Kimi Code',     cmd: 'kimi',      color: '#fb923c', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  aider:     { name: 'Aider',         cmd: 'aider',     color: '#a78bfa', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  opencode:  { name: 'OpenCode',      cmd: 'opencode',  color: '#f472b6', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  hermes:    { name: 'Hermes Agent',  cmd: 'hermes',    color: '#fbbf24', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  letta:     { name: 'Letta Code',    cmd: 'letta',     color: '#34d399', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  // New agents
+  amp:       { name: 'Amp',           cmd: 'amp',       color: '#e879f9', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  goose:     { name: 'Goose',         cmd: 'goose',     color: '#fb7185', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: true  },
+  continue:  { name: 'Continue',      cmd: 'continue',  color: '#06b6d4', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  cursor:    { name: 'Cursor CLI',    cmd: 'cursor',    color: '#8b5cf6', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  cline:     { name: 'Cline',         cmd: 'cline',     color: '#f97316', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
 };
 
 // Session history discovery per agent
@@ -2465,6 +2537,206 @@ const AGENT_HISTORY = {
             if (obj.role === 'user') userMsgs++;
             else if (obj.role === 'assistant') assistantMsgs++;
             else if (obj.role === 'tool') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+
+  // Amp (Sourcegraph): ~/.amp/sessions/*.jsonl
+  amp: {
+    historyDir: () => path.join(os.homedir(), '.amp'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.amp', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'amp',
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user' || obj.type === 'human') userMsgs++;
+            else if (obj.role === 'assistant' || obj.type === 'ai') assistantMsgs++;
+            if (obj.type === 'tool_use' || obj.type === 'tool') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+
+  // Goose (Block): ~/.goose/sessions/*.jsonl
+  goose: {
+    historyDir: () => path.join(os.homedir(), '.goose'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.goose', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'goose',
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user') userMsgs++;
+            else if (obj.role === 'assistant') assistantMsgs++;
+            if (obj.tools || obj.tool_calls) toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+
+  // Continue: ~/.continue/sessions/*.jsonl
+  continue: {
+    historyDir: () => path.join(os.homedir(), '.continue'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.continue', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'continue',
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user' || obj.role === 'human') userMsgs++;
+            else if (obj.role === 'assistant' || obj.role === 'ai') assistantMsgs++;
+            if (obj.tools || obj.tool_calls) toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+
+  // Cursor CLI: ~/.cursor/cli-sessions/*.jsonl
+  cursor: {
+    historyDir: () => path.join(os.homedir(), '.cursor'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.cursor', 'cli-sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'cursor',
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user') userMsgs++;
+            else if (obj.role === 'assistant') assistantMsgs++;
+            if (obj.type === 'tool_use') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+
+  // Cline: ~/.cline/history/*.jsonl
+  cline: {
+    historyDir: () => path.join(os.homedir(), '.cline'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.cline', 'history');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'cline',
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user' || obj.author === 'user') userMsgs++;
+            else if (obj.role === 'assistant' || obj.author === 'assistant') assistantMsgs++;
+            if (obj.tool_calls || obj.tools) toolUses++;
           } catch {}
         }
         return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
@@ -3542,6 +3814,12 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
           cliCmd += ' --worktree';
           if (sessionOptions.worktreeName) {
             cliCmd += ` "${sessionOptions.worktreeName}"`;
+          }
+          if (sessionOptions.sparsePaths) {
+            const paths = sessionOptions.sparsePaths.split(',').map(d => d.trim()).filter(Boolean);
+            for (const p of paths) {
+              cliCmd += ` --sparse-path "${p}"`;
+            }
           }
         }
         if (sessionOptions.chrome) {

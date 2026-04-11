@@ -5502,6 +5502,34 @@ body { display: flex; flex-direction: column; }
 }
 
 /* Remote peer machine badge in peers popover */
+.peeuler-add-btn.add-peer:hover { border-color: rgba(96,165,250,0.3); color: #60a5fa; background: rgba(96,165,250,0.05); }
+.scheduler-add-btn.add-launch:hover { border-color: rgba(244,114,182,0.3); color: #f472b6; background: rgba(244,114,182,0.05); }
+
+/* LAN Peers settings */
+.settings-lan-machines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.lan-machine-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  background: rgba(96,165,250,0.12);
+  border: 1px solid rgba(96,165,250,0.25);
+  color: #60a5fa;
+  font-size: 11px;
+  font-family: monospace;
+}
+.lan-machine-ip {
+  color: rgba(96,165,250,0.6);
+  font-size: 10px;
+}
+
+/* Remote peer machine badge in peers popover */
 .peers-remote-badge {
   display: inline-block;
   margin-left: 5px;
@@ -5557,3 +5585,37 @@ button:focus:not(:focus-visible),
 [role="button"]:focus:not(:focus-visible) {
   outline: none;
 }
+
+/* Export dropdown in conversation viewer header */
+.cv-export-dropdown {
+  position: relative;
+  display: inline-block;
+}
+.cv-export-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background: #1a1a2e;
+  border: 1px solid #333;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  min-width: 140px;
+}
+.cv-export-menu button {
+  background: none;
+  border: none;
+  color: #ccc;
+  padding: 8px 12px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+}
+.cv-export-menu button:hover {
+  background: rgba(255,255,255,0.08);
+  color: #fff;
+}
+

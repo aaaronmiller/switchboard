@@ -61,6 +61,7 @@
       "main.js",
       "preload.js",
       "db.js",
+      "tokens.js",
       "lan-peers.js",
       "claude-auth.js",
       "mcp-bridge.js",

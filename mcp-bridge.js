@@ -45,6 +45,54 @@ function rpcError(id, code, message) {
   return JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
+/**
+ * Validate a file path against workspace folders (SSRF guard).
+ * Returns null if allowed, or an error string if blocked.
+ */
+function validateWorkspacePath(filePath, workspaceFolders) {
+  if (!filePath) return 'filePath is required';
+  
+  const resolved = path.resolve(filePath);
+  
+  // If no workspace folders configured, allow everything (backward compat)
+  if (!workspaceFolders || workspaceFolders.length === 0) return null;
+  
+  // Resolve symlinks to prevent bypass via symlink
+  let realPath;
+  try {
+    realPath = fs.realpathSync(resolved);
+  } catch {
+    // File doesn't exist yet (new file) — check parent dir
+    const parentDir = path.dirname(resolved);
+    try {
+      realPath = fs.realpathSync(parentDir);
+    } catch {
+      // Parent doesn't exist either — allow (will fail on read anyway)
+      return null;
+    }
+  }
+  
+  // Check against workspace folders (both resolved and real path)
+  for (const folder of workspaceFolders) {
+    const resolvedFolder = path.resolve(folder);
+    let realFolder;
+    try {
+      realFolder = fs.realpathSync(resolvedFolder);
+    } catch {
+      realFolder = resolvedFolder;
+    }
+    
+    if (
+      resolved.startsWith(resolvedFolder + path.sep) || resolved === resolvedFolder ||
+      realPath.startsWith(realFolder + path.sep) || realPath === realFolder
+    ) {
+      return null; // Allowed
+    }
+  }
+  
+  return `Path "${resolved}" is outside workspace folders`;
+}
+
 // ── MCP Tool Schemas ─────────────────────────────────────────────────
 
 const MCP_TOOLS = [
@@ -181,6 +229,13 @@ async function handleToolCall(entry, rpcId, params, log) {
 async function handleOpenDiff(entry, rpcId, args, log) {
   const { old_file_path, new_file_contents, tab_name } = args;
 
+  // SSRF guard: validate old_file_path against workspace folders
+  const pathErr = validateWorkspacePath(old_file_path, entry.workspaceFolders);
+  if (pathErr) {
+    log.warn(`[mcp] session=${entry.sessionId} blocked openDiff: ${pathErr}`);
+    return sendError(entry, rpcId, -32602, pathErr);
+  }
+
   // Read the current file from disk
   let oldContent = '';
   try {
@@ -233,6 +288,13 @@ async function handleOpenDiff(entry, rpcId, args, log) {
 
 async function handleOpenFile(entry, rpcId, args, log) {
   const { filePath, preview, startText, endText } = args;
+
+  // SSRF guard: validate against workspace folders
+  const pathErr = validateWorkspacePath(filePath, entry.workspaceFolders);
+  if (pathErr) {
+    log.warn(`[mcp] session=${entry.sessionId} blocked openFile: ${pathErr}`);
+    return sendError(entry, rpcId, -32602, pathErr);
+  }
 
   let content = '';
   try {
@@ -342,6 +404,7 @@ async function startMcpServer(sessionId, workspaceFolders, mainWindow, log) {
     authToken,
     lockFilePath,
     mainWindow,
+    workspaceFolders: workspaceFolders || [], // SSRF guard: used for path validation
     ws: null,
     pendingDiffs: new Map(),
   };

@@ -3060,17 +3060,56 @@ function conversationToMarkdown(messages, sessionName) {
 }
 
 // Wire up export/copy/resume buttons
-cvExportMdBtn.addEventListener('click', async () => {
+const cvExportBtn = document.getElementById('cv-export-btn');
+const cvExportMenu = document.getElementById('cv-export-menu');
+const cvExportDropdown = document.getElementById('cv-export-dropdown');
+
+// Toggle export menu
+cvExportBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  cvExportMenu.style.display = cvExportMenu.style.display === 'none' ? 'flex' : 'none';
+});
+
+// Export format handlers
+cvExportMenu.querySelectorAll('button[data-format]').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const format = btn.dataset.format;
+    exportConversation(format);
+    cvExportMenu.style.display = 'none';
+  });
+});
+
+// Close export menu on outside click
+document.addEventListener('click', () => { cvExportMenu.style.display = 'none'; });
+
+function exportConversation(format) {
   if (!cvCurrentMessages.length) return;
-  const md = conversationToMarkdown(cvCurrentMessages, cvCurrentSession?.name || cvCurrentSession?.sessionId);
-  const blob = new Blob([md], { type: 'text/markdown' });
+  const sessionName = cvCurrentSession?.name || cvCurrentSession?.sessionId || 'conversation';
+
+  if (format === 'markdown') {
+    const md = conversationToMarkdown(cvCurrentMessages, sessionName);
+    downloadBlob(md, 'text/markdown', `${sessionName}.md`);
+  } else if (format === 'jsonl') {
+    // Raw JSONL export — one JSON object per line
+    const jsonl = cvCurrentMessages.map(m => JSON.stringify(m)).join('\n');
+    downloadBlob(jsonl, 'application/x-ndjson', `${sessionName}.jsonl`);
+  } else if (format === 'json') {
+    // JSON array of all messages
+    const json = JSON.stringify(cvCurrentMessages, null, 2);
+    downloadBlob(json, 'application/json', `${sessionName}.json`);
+  }
+}
+
+function downloadBlob(content, mimeType, filename) {
+  const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${cvCurrentSession?.sessionId || 'conversation'}.md`;
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
-});
+}
 
 cvCopyBtn.addEventListener('click', async () => {
   if (!cvCurrentMessages.length) return;
@@ -5077,7 +5116,11 @@ async function showNewSessionDialog(project) {
         <div class="settings-checkbox-row">
           <input type="checkbox" id="nsd-worktree" ${effective.worktree ? 'checked' : ''}>
           <label for="nsd-worktree">Worktree</label>
-          <input type="text" class="settings-input" id="nsd-worktree-name" placeholder="name (optional)" value="${escapeHtml(effective.worktreeName || '')}" style="width:160px;margin-left:8px;">
+          <input type="text" class="settings-input" id="nsd-worktree-name" placeholder="name (optional)" value="${escapeHtml(effective.worktreeName || '')}" style="width:120px;margin-left:8px;">
+        </div>
+        <div class="settings-checkbox-row" style="margin-top:8px">
+          <input type="text" class="settings-input" id="nsd-sparse-paths" placeholder="src/, docs/, tests/" value="${escapeHtml(effective.sparsePaths || '')}" style="width:280px">
+          <span style="font-size:12px;color:#888;margin-left:4px">Sparse paths (comma-separated)</span>
         </div>
       </div>
       <div class="settings-field">
@@ -5188,6 +5231,8 @@ async function showNewSessionDialog(project) {
     if (dialog.querySelector('#nsd-worktree').checked) {
       options.worktree = true;
       options.worktreeName = dialog.querySelector('#nsd-worktree-name').value.trim();
+      const sparsePaths = dialog.querySelector('#nsd-sparse-paths').value.trim();
+      if (sparsePaths) options.sparsePaths = sparsePaths;
     }
     if (dialog.querySelector('#nsd-chrome').checked) {
       options.chrome = true;
