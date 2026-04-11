@@ -1243,6 +1243,16 @@ terminalCompactBtn.addEventListener('click', () => {
   window.api.sendInput(activeSessionId, '/compact\r');
 });
 
+const terminalRestartBtn = document.getElementById('terminal-restart-btn');
+terminalRestartBtn.addEventListener('click', async () => {
+  if (!activeSessionId) return;
+  const session = sessionMap.get(activeSessionId);
+  if (!session) return;
+  // Stop current session, then reopen it
+  await window.api.stopSession(activeSessionId);
+  await openSession(session);
+});
+
 const terminalDetachBtn = document.getElementById('terminal-detach-btn');
 terminalDetachBtn.addEventListener('click', async () => {
   if (!activeSessionId) return;

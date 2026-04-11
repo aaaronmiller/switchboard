@@ -1453,13 +1453,6 @@ const SETTING_SCHEMA = {
   sidebarWidth: 'number',
   // Object settings (free-form but must be object)
   envOverrides: 'object',
-  pricingOverrides: 'object',
-  defaultTemplate: 'string|null',
-  conversationViewMode: 'string',
-  showTokenCounts: 'boolean',
-  showCostEstimates: 'boolean',
-  loopNotifications: 'boolean',
-  commandPaletteEnabled: 'boolean',
   // Global session options (stored as object)
   global: 'object',
 };
