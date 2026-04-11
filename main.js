@@ -330,6 +330,8 @@ function isWslShell(shellPath) {
 function shellArgs(shellPath, cmd, extraArgs) {
   const base = path.basename(shellPath).toLowerCase();
   const isBashLike = base.includes('bash') || base.includes('zsh') || base === 'sh';
+  const isFish = base === 'fish';
+  const isNushell = base === 'nu';
 
   // WSL: pass command via -- to the distribution shell
   // cwd is handled separately via --cd in the spawn call
@@ -340,10 +342,14 @@ function shellArgs(shellPath, cmd, extraArgs) {
 
   if (cmd) {
     if (isBashLike) return ['-l', '-i', '-c', cmd];
+    if (isFish) return ['-l', '-c', cmd];
+    if (isNushell) return ['-l', '-c', cmd];
     if (base.includes('powershell') || base.includes('pwsh')) return ['-NoLogo', '-Command', cmd];
     return ['/C', cmd];
   }
   if (isBashLike) return ['-l', '-i'];
+  if (isFish) return ['-l', '-i'];
+  if (isNushell) return ['-l', '-i'];
   if (base.includes('powershell') || base.includes('pwsh')) return ['-NoLogo', '-NoExit'];
   return [];
 }
@@ -377,12 +383,12 @@ if (app.isPackaged || process.env.FORCE_UPDATER) {
   });
 }
 const {
-  getAllMeta, toggleStar, setName, setArchived,
+  getMeta, getAllMeta, toggleStar, setName, setArchived,
   isCachePopulated, getAllCached, getCachedByFolder, getCachedFolder, getCachedSession, upsertCachedSessions,
   deleteCachedSession, deleteCachedFolder,
   setFolderMeta,
   upsertSearchEntries, updateSearchTitle, deleteSearchSession, deleteSearchFolder, deleteSearchType,
-  searchByType, isSearchIndexPopulated,
+  searchByType, isSearchIndexPopulated, searchFtsRecreated,
   getSetting, setSetting, deleteSetting,
   closeDb,
   // Peers broker
@@ -744,9 +750,10 @@ function refreshFolder(folder) {
     const s = readSessionFile(filePath, folder, projectPath);
     if (s) {
       sessionsToUpsert.push(s);
+      const name = s.customTitle || getMeta(s.sessionId)?.name || '';
       searchEntriesToUpsert.push({
         id: s.sessionId, type: 'session', folder: s.folder,
-        title: s.summary, body: s.textContent,
+        title: (name ? name + ' ' : '') + s.summary, body: s.textContent,
       });
       if (s.customTitle) namesToSet.push({ id: s.sessionId, name: s.customTitle });
     }
@@ -1043,11 +1050,15 @@ function populateCacheViaWorker() {
         for (const s of sessions) {
           if (s.customTitle) setName(s.sessionId, s.customTitle);
         }
-        upsertSearchEntries(sessions.map(s => ({
-          id: s.sessionId, type: 'session', folder: s.folder,
-          title: (s.customTitle ? s.customTitle + ' ' : '') + s.summary,
-          body: s.textContent,
-        })));
+        upsertSearchEntries(sessions.map(s => {
+          // customTitle comes from jsonl; fall back to session_meta.name (set via rename)
+          const name = s.customTitle || getMeta(s.sessionId)?.name || '';
+          return {
+            id: s.sessionId, type: 'session', folder: s.folder,
+            title: (name ? name + ' ' : '') + s.summary,
+            body: s.textContent,
+          };
+        }));
         // Persist token usage for sessions that have it
         const tokenEntries = sessions
           .filter(s => s.inputTokens > 0 || s.outputTokens > 0)
@@ -1211,6 +1222,51 @@ ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
   } catch (err) {
     return { ok: false, error: err.message };
   }
+});
+
+ipcMain.handle('save-file-for-panel', async (_event, filePath, content) => {
+  try {
+    const resolved = path.resolve(filePath);
+    if (!fs.existsSync(resolved)) return { ok: false, error: 'File does not exist' };
+    fs.writeFileSync(resolved, content, 'utf8');
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// ── File Watching (for viewer panels) ────────────────────────────────
+const fileWatchers = new Map(); // filePath → FSWatcher
+
+ipcMain.handle('watch-file', (_event, filePath) => {
+  const resolved = path.resolve(filePath);
+  if (fileWatchers.has(resolved)) return { ok: true };
+  try {
+    let debounce = null;
+    const watcher = fs.watch(resolved, (eventType) => {
+      if (eventType !== 'change') return;
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('file-changed', resolved);
+        }
+      }, 300);
+    });
+    fileWatchers.set(resolved, watcher);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('unwatch-file', (_event, filePath) => {
+  const resolved = path.resolve(filePath);
+  const watcher = fileWatchers.get(resolved);
+  if (watcher) {
+    watcher.close();
+    fileWatchers.delete(resolved);
+  }
+  return { ok: true };
 });
 
 ipcMain.handle('get-projects', (_event, showArchived) => {
@@ -1979,8 +2035,8 @@ ipcMain.handle('save-memory', (_event, filePath, content) => {
 });
 
 // --- IPC: search ---
-ipcMain.handle('search', (_event, type, query) => {
-  return searchByType(type, query, 50);
+ipcMain.handle('search', (_event, type, query, titleOnly) => {
+  return searchByType(type, query, 50, !!titleOnly);
 });
 
 // --- IPC: settings ---
@@ -4078,6 +4134,9 @@ app.whenReady().then(() => {
   createWindow();
   startProjectsWatcher();
   startPeersBroker();
+
+  // Re-index search if FTS table was recreated (e.g. tokenizer config change)
+  if (searchFtsRecreated) populateCacheViaWorker();
 
   // Check for updates after launch
   if (autoUpdater) {

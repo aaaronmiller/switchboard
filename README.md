@@ -104,6 +104,15 @@ Monitor all sessions in the background with status indicators.
 
 ---
 
+## Editor
+
+| Shortcut | Action |
+|----------|--------|
+| `Cmd+F` / `Ctrl+F` | Find in file (also works in terminal) |
+| `Cmd+G` / `Ctrl+G` | Go to line |
+
+## Download
+
 ## ![Download](build/section-download.png)
 
 | Platform | Download |

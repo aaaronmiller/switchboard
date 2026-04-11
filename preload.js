@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('api', {
   renameSession: (id, name) => ipcRenderer.invoke('rename-session', id, name),
   archiveSession: (id, archived) => ipcRenderer.invoke('archive-session', id, archived),
   openTerminal: (id, projectPath, isNew, sessionOptions) => ipcRenderer.invoke('open-terminal', id, projectPath, isNew, sessionOptions),
-  search: (type, query) => ipcRenderer.invoke('search', type, query),
+  search: (type, query, titleOnly) => ipcRenderer.invoke('search', type, query, titleOnly),
   readSessionJsonl: (sessionId) => ipcRenderer.invoke('read-session-jsonl', sessionId),
   readSessionConversation: (sessionId, filePath, agentId) => ipcRenderer.invoke('read-session-conversation', sessionId, filePath, agentId),
   getSessionTokens: (sessionId) => ipcRenderer.invoke('get-session-tokens', sessionId),
@@ -161,6 +161,12 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.send('mcp-diff-response', sessionId, diffId, action, editedContent);
   },
   readFileForPanel: (filePath) => ipcRenderer.invoke('read-file-for-panel', filePath),
+  saveFileForPanel: (filePath, content) => ipcRenderer.invoke('save-file-for-panel', filePath, content),
+  watchFile: (filePath) => ipcRenderer.invoke('watch-file', filePath),
+  unwatchFile: (filePath) => ipcRenderer.invoke('unwatch-file', filePath),
+  onFileChanged: (callback) => {
+    ipcRenderer.on('file-changed', (_event, filePath) => callback(filePath));
+  },
 
   // Peers broker
   peerList: (scope, cwd, gitRoot, excludeId) => ipcRenderer.invoke('peer-list', scope, cwd, gitRoot, excludeId),

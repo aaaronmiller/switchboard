@@ -25,18 +25,14 @@ const terminalHeaderId = document.getElementById('terminal-header-id');
 const terminalHeaderStatus = document.getElementById('terminal-header-status');
 const terminalHeaderShell = document.getElementById('terminal-header-shell');
 const terminalStopBtn = document.getElementById('terminal-stop-btn');
-const terminalRestartBtn = document.getElementById('terminal-restart-btn');
 const runningToggle = document.getElementById('running-toggle');
 const todayToggle = document.getElementById('today-toggle');
 const planViewer = document.getElementById('plan-viewer');
-const planViewerTitle = document.getElementById('plan-viewer-title');
-const planViewerFilepath = document.getElementById('plan-viewer-filepath');
-const planViewerEditorEl = document.getElementById('plan-viewer-editor');
-const planCopyPathBtn = document.getElementById('plan-copy-path-btn');
-const planCopyContentBtn = document.getElementById('plan-copy-content-btn');
-const planSaveBtn = document.getElementById('plan-save-btn');
-const planPreviewBtn = document.getElementById('plan-preview-btn');
-const planViewerPreviewEl = document.getElementById('plan-viewer-preview');
+const planPanel = new ViewerPanel(planViewer, {
+  copyPath: true, copyContent: true,
+  language: 'markdown', storageKey: 'planPreviewMode',
+  onSave: (filePath, content) => window.api.savePlan(filePath, content),
+});
 
 // --- Independent panel zoom ---
 let sidebarZoom = parseFloat(localStorage.getItem('sidebarZoom') || '1');
@@ -118,8 +114,6 @@ applyBrightness();
 let currentPlanContent = '';
 let currentPlanFilePath = '';
 let currentPlanFilename = '';
-let planEditorView = null;
-let planPreviewMode = localStorage.getItem('planPreviewMode') === 'true';
 const loadingStatus = document.getElementById('loading-status');
 const sessionFilters = document.getElementById('session-filters');
 const searchBar = document.getElementById('search-bar');
@@ -128,18 +122,13 @@ const memoryContent = document.getElementById('memory-content');
 const statsViewer = document.getElementById('stats-viewer');
 const statsViewerBody = document.getElementById('stats-viewer-body');
 const memoryViewer = document.getElementById('memory-viewer');
-const memoryViewerTitle = document.getElementById('memory-viewer-title');
-const memoryViewerFilename = document.getElementById('memory-viewer-filename');
-const memoryViewerEditorEl = document.getElementById('memory-viewer-editor');
-const memoryCopyPathBtn = document.getElementById('memory-copy-path-btn');
-const memoryCopyContentBtn = document.getElementById('memory-copy-content-btn');
-const memorySaveBtn = document.getElementById('memory-save-btn');
-const memoryPreviewBtn = document.getElementById('memory-preview-btn');
-const memoryViewerPreviewEl = document.getElementById('memory-viewer-preview');
+const memoryPanel = new ViewerPanel(memoryViewer, {
+  copyPath: true, copyContent: true,
+  language: 'markdown', storageKey: 'memoryPreviewMode',
+  onSave: (filePath, content) => window.api.saveMemory(filePath, content),
+});
 const terminalArea = document.getElementById('terminal-area');
 const settingsViewer = document.getElementById('settings-viewer');
-const settingsViewerTitle = document.getElementById('settings-viewer-title');
-const settingsViewerBody = document.getElementById('settings-viewer-body');
 const globalSettingsBtn = document.getElementById('global-settings-btn');
 const addProjectBtn = document.getElementById('add-project-btn');
 const resortBtn = document.getElementById('resort-btn');
@@ -153,6 +142,7 @@ let gridViewActive = localStorage.getItem('gridViewActive') === '1';
 
 // Map<sessionId, { terminal, element, fitAddon, session, closed }>
 const openSessions = new Map();
+window._openSessions = openSessions;
 let activeSessionId = sessionStorage.getItem('activeSessionId') || null;
 function setActiveSession(id) {
   activeSessionId = id;
@@ -195,7 +185,20 @@ let cachedPlans = [];
 let visibleSessionCount = 10;
 let sessionMaxAgeDays = 3;
 const pendingSessions = new Map(); // sessionId → { session, projectPath, folder }
+
+// Bridge functions for settings-panel.js
+window._setVisibleSessionCount = (v) => { visibleSessionCount = v; };
+window._setSessionMaxAge = (v) => { sessionMaxAgeDays = v; };
+window._applyTerminalTheme = (themeName) => {
+  currentThemeName = themeName;
+  TERMINAL_THEME = getTerminalTheme();
+  for (const [, entry] of openSessions) {
+    entry.terminal.options.theme = TERMINAL_THEME;
+    entry.element.style.backgroundColor = TERMINAL_THEME.background;
+  }
+};
 let searchMatchIds = null; // null = no search active; Set<string> = matched session IDs
+let searchMatchProjectPaths = null; // Set<string> of project paths matched by name
 
 // --- Activity tracking ---
 //
@@ -341,8 +344,26 @@ let TERMINAL_THEME = getTerminalTheme();
 //   1. attachCustomKeyEventHandler returning false — blocks xterm's key pipeline (onKey/onData)
 //   2. preventDefault on capture-phase keydown — prevents browser inserting \n into textarea
 const isMac = window.api.platform === 'darwin';
-function setupTerminalKeyBindings(terminal, container, getSessionId) {
+function setupTerminalKeyBindings(terminal, container, getSessionId, { onFind } = {}) {
   terminal.attachCustomKeyEventHandler((e) => {
+    // Cmd/Ctrl+F → open terminal search bar
+    if (e.key === 'f' && (isMac ? e.metaKey : e.ctrlKey) && !e.shiftKey && !e.altKey) {
+      if (e.type === 'keydown' && onFind) onFind();
+      return false;
+    }
+
+    // Cmd/Ctrl+Shift+G → toggle grid view
+    if (e.key === 'g' && (isMac ? e.metaKey : e.ctrlKey) && e.shiftKey && !e.altKey) {
+      if (e.type === 'keydown') { e._handled = true; toggleGridView(); }
+      return false;
+    }
+
+    // Session navigation: Cmd+Shift+[/], Cmd+Arrow
+    if (isSessionNavKey(e)) {
+      if (e.type === 'keydown') { e._handled = true; handleSessionNavKey(e); }
+      return false;
+    }
+
     // Shift+Enter → newline (kitty protocol CSI 13;2u) so Claude Code treats it as newline, not submit.
     if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       if (e.type === 'keydown') {
@@ -376,6 +397,21 @@ function setupTerminalKeyBindings(terminal, container, getSessionId) {
         }
         return false;
       }
+    }
+
+    // Space → send directly on keydown (including key-repeat) to ensure reliable
+    // delivery to the PTY. xterm.js's evaluateKeyboardEvent does not handle plain
+    // Space in keydown (keyCode 32 < 48 threshold) and instead relies on the
+    // deprecated 'keypress' event, which Electron/Chromium may not fire reliably
+    // for key-repeat events. This fixes Claude Code's "Hold Space to record"
+    // push-to-talk voice feature, which depends on rapid key-repeat characters
+    // arriving at stdin to detect a held key.
+    if (e.key === ' ' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+      if (e.type === 'keydown') {
+        e.preventDefault();
+        window.api.sendInput(getSessionId(), ' ');
+      }
+      return false;
     }
 
     return true;
@@ -639,8 +675,6 @@ window.api.onTerminalNotification((sessionId, message) => {
   } else if (/waiting for your input/i.test(message)) {
     // "Claude is waiting for your input" — delayed idle notification, mark response-ready
     setActivity(sessionId, false);
-  } else {
-    console.log(`[notification] session=${sessionId} (no attention match) message="${message}"`);
   }
 
   // Show in header if active
@@ -1152,10 +1186,16 @@ function refreshSidebar({ resort = false } = {}) {
     : (showArchived ? cachedAllProjects : cachedProjects);
 
   if (searchMatchIds !== null) {
-    projects = projects.map(p => ({
-      ...p,
-      sessions: p.sessions.filter(s => searchMatchIds.has(s.sessionId)),
-    })).filter(p => p.sessions.length > 0);
+    projects = projects.map(p => {
+      const hasMatchingSessions = p.sessions.some(s => searchMatchIds.has(s.sessionId));
+      const projectMatched = searchMatchProjectPaths && searchMatchProjectPaths.has(p.projectPath);
+      if (!hasMatchingSessions && !projectMatched) return null;
+      return {
+        ...p,
+        sessions: hasMatchingSessions ? p.sessions.filter(s => searchMatchIds.has(s.sessionId)) : [],
+        _projectMatchedOnly: projectMatched && !hasMatchingSessions,
+      };
+    }).filter(Boolean);
   }
 
   renderProjects(projects, resort);
@@ -1240,6 +1280,28 @@ resortBtn.addEventListener('click', () => {
 // --- Search (debounced, per-tab FTS) ---
 let searchDebounceTimer = null;
 const searchClear = document.getElementById('search-clear');
+const searchTitlesToggle = document.getElementById('search-titles-toggle');
+let searchTitlesOnly = false;
+
+// Load persisted preference
+(async () => {
+  const saved = await window.api.getSetting('searchTitlesOnly');
+  if (saved) {
+    searchTitlesOnly = true;
+    searchTitlesToggle.classList.add('active');
+  }
+})();
+
+searchTitlesToggle.addEventListener('click', async () => {
+  searchTitlesOnly = !searchTitlesOnly;
+  searchTitlesToggle.classList.toggle('active', searchTitlesOnly);
+  await window.api.setSetting('searchTitlesOnly', searchTitlesOnly);
+  // Re-run current search if there's a query
+  const query = searchInput.value.trim();
+  if (query) {
+    searchInput.dispatchEvent(new Event('input'));
+  }
+});
 
 function clearSearch() {
   searchInput.value = '';
@@ -1247,6 +1309,7 @@ function clearSearch() {
   if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null; }
   if (activeTab === 'sessions') {
     searchMatchIds = null;
+    searchMatchProjectPaths = null;
     refreshSidebar({ resort: true });
   } else if (activeTab === 'plans') {
     renderPlans(cachedPlans);
@@ -1276,21 +1339,34 @@ searchInput.addEventListener('input', () => {
 
     try {
       if (activeTab === 'sessions') {
-        const results = await window.api.search('session', query);
+        const results = await window.api.search('session', query, searchTitlesOnly);
         searchMatchIds = new Set(results.map(r => r.id));
+        // When title-only, also match project names
+        searchMatchProjectPaths = null;
+        if (searchTitlesOnly) {
+          const lowerQ = query.toLowerCase();
+          for (const p of cachedAllProjects) {
+            const shortName = p.projectPath.split('/').filter(Boolean).slice(-2).join('/');
+            if (shortName.toLowerCase().includes(lowerQ)) {
+              if (!searchMatchProjectPaths) searchMatchProjectPaths = new Set();
+              searchMatchProjectPaths.add(p.projectPath);
+            }
+          }
+        }
         refreshSidebar({ resort: true });
       } else if (activeTab === 'plans') {
-        const results = await window.api.search('plan', query);
+        const results = await window.api.search('plan', query, searchTitlesOnly);
         const matchIds = new Set(results.map(r => r.id));
         renderPlans(cachedPlans.filter(p => matchIds.has(p.filename)));
       } else if (activeTab === 'memory') {
-        const results = await window.api.search('memory', query);
+        const results = await window.api.search('memory', query, searchTitlesOnly);
         const matchIds = new Set(results.map(r => r.id));
         renderMemories(matchIds);
       }
     } catch {
       if (activeTab === 'sessions') {
         searchMatchIds = null;
+        searchMatchProjectPaths = null;
         refreshSidebar({ resort: true });
       }
     }
@@ -1315,16 +1391,6 @@ terminalStopBtn.addEventListener('click', () => {
   if (activeSessionId) confirmAndStopSession(activeSessionId);
 });
 
-terminalRestartBtn.addEventListener('click', () => {
-  if (!activeSessionId) return;
-  const entry = openSessions.get(activeSessionId);
-  if (!entry) return;
-  window.api.closeTerminal(activeSessionId);
-  entry.terminal.dispose();
-  entry.element.remove();
-  openSessions.delete(activeSessionId);
-  openSession(entry.session);
-});
 
 const terminalCompactBtn = document.getElementById('terminal-compact-btn');
 terminalCompactBtn.addEventListener('click', () => {
@@ -1659,7 +1725,7 @@ function renderProjects(projects, resort) {
     filtered = sortSessions(filtered, activeSortMode);
 
     const anyFilterActive = showStarredOnly || showRunningOnly || showTodayOnly || activeTimeFilter > 0 || searchMatchIds !== null;
-    if (filtered.length === 0 && (project.sessions.length > 0 || anyFilterActive)) continue;
+    if (filtered.length === 0 && !project._projectMatchedOnly && (project.sessions.length > 0 || anyFilterActive)) continue;
     const fId = folderId(project.projectPath);
 
     // === STEP 2: Priority sort ===
@@ -1829,8 +1895,10 @@ function renderProjects(projects, resort) {
       sessionsList.appendChild(olderList);
     }
 
-    // Auto-collapse if most recent session is older than 5 days
-    if (searchMatchIds === null && !showStarredOnly && !showRunningOnly) {
+    // Auto-collapse if most recent session is older than 5 days, or project matched with no sessions
+    if (project._projectMatchedOnly) {
+      header.classList.add('collapsed');
+    } else if (searchMatchIds === null && !showStarredOnly && !showRunningOnly) {
       const mostRecent = filtered[0]?.modified;
       if (mostRecent && (Date.now() - new Date(mostRecent)) > sessionMaxAgeDays * 86400000) {
         header.classList.add('collapsed');
@@ -2016,6 +2084,14 @@ function rebindSidebarEvents(projects) {
       stopBtn.onclick = (e) => {
         e.stopPropagation();
         confirmAndStopSession(session.sessionId);
+      };
+    }
+
+    const launchConfigBtn = item.querySelector('.session-launch-config-btn');
+    if (launchConfigBtn) {
+      launchConfigBtn.onclick = (e) => {
+        e.stopPropagation();
+        showResumeSessionDialog(session);
       };
     }
 
@@ -2249,11 +2325,17 @@ function buildSessionItem(session) {
   jsonlBtn.title = 'View messages';
   jsonlBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>';
 
+  const launchConfigBtn = document.createElement('button');
+  launchConfigBtn.className = 'session-launch-config-btn';
+  launchConfigBtn.title = 'Resume with config';
+  launchConfigBtn.innerHTML = ICONS.launchConfig(14);
+
   actions.appendChild(stopBtn);
   if (session.type !== 'terminal') {
     actions.appendChild(forkBtn);
     actions.appendChild(jsonlBtn);
     actions.appendChild(archiveBtn);
+    actions.appendChild(launchConfigBtn);
   }
 
   row.appendChild(pin);
@@ -2453,6 +2535,7 @@ function createTerminalEntry(session) {
     cursorBlink: true,
     scrollback: 10000,
     convertEol: true,
+    allowProposedApi: true,
     linkHandler: {
       activate: (_event, uri) => {
         if (uri.startsWith('file://') && typeof openFileInPanel === 'function') {
@@ -2474,10 +2557,54 @@ function createTerminalEntry(session) {
       window.api.openExternal(url);
     }
   }));
+  const searchAddon = new SearchAddon.SearchAddon();
+  terminal.loadAddon(searchAddon);
   terminal.open(container);
   container.style.backgroundColor = TERMINAL_THEME.background;
 
-  const entry = { terminal, element: container, fitAddon, session, closed: false };
+  // --- Terminal search bar (Cmd/Ctrl+F) ---
+  const searchBar = document.createElement('div');
+  searchBar.className = 'terminal-search-bar';
+  searchBar.style.display = 'none';
+  searchBar.innerHTML = `
+    <input type="text" class="terminal-search-input" placeholder="Find..." />
+    <span class="terminal-search-count"></span>
+    <button class="terminal-search-prev" title="Previous (Shift+Enter)">&#x25B2;</button>
+    <button class="terminal-search-next" title="Next (Enter)">&#x25BC;</button>
+    <button class="terminal-search-close" title="Close (Escape)">&times;</button>
+  `;
+  container.appendChild(searchBar);
+  const searchInput = searchBar.querySelector('.terminal-search-input');
+  const searchCount = searchBar.querySelector('.terminal-search-count');
+  const searchOpts = { decorations: { matchBackground: '#515C6A', activeMatchBackground: '#EAA549', matchOverviewRuler: '#515C6A', activeMatchColorOverviewRuler: '#EAA549' } };
+
+  function openSearchBar() {
+    searchBar.style.display = 'flex';
+    searchInput.focus();
+    const sel = terminal.getSelection();
+    if (sel) { searchInput.value = sel; searchAddon.findNext(sel, searchOpts); }
+  }
+  function closeSearchBar() {
+    searchBar.style.display = 'none';
+    searchAddon.clearDecorations();
+    searchInput.value = '';
+    searchCount.textContent = '';
+    terminal.focus();
+  }
+  searchInput.addEventListener('input', () => {
+    const q = searchInput.value;
+    if (q) { searchAddon.findNext(q, searchOpts); } else { searchAddon.clearDecorations(); searchCount.textContent = ''; }
+  });
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeSearchBar(); e.preventDefault(); }
+    else if (e.key === 'Enter' && e.shiftKey) { searchAddon.findPrevious(searchInput.value, searchOpts); e.preventDefault(); }
+    else if (e.key === 'Enter') { searchAddon.findNext(searchInput.value, searchOpts); e.preventDefault(); }
+  });
+  searchBar.querySelector('.terminal-search-next').addEventListener('click', () => searchAddon.findNext(searchInput.value, searchOpts));
+  searchBar.querySelector('.terminal-search-prev').addEventListener('click', () => searchAddon.findPrevious(searchInput.value, searchOpts));
+  searchBar.querySelector('.terminal-search-close').addEventListener('click', closeSearchBar);
+
+  const entry = { terminal, element: container, fitAddon, searchAddon, openSearchBar, closeSearchBar, session, closed: false };
   openSessions.set(sessionId, entry);
 
   // Wire up IPC (use entry.session.sessionId so fork re-keying works)
@@ -2492,7 +2619,7 @@ function createTerminalEntry(session) {
     // Scheduler: macro recording — capture keystrokes
     if (typeof recordMacroInput === 'function') recordMacroInput(data);
   });
-  setupTerminalKeyBindings(terminal, container, () => entry.session.sessionId);
+  setupTerminalKeyBindings(terminal, container, () => entry.session.sessionId, { onFind: openSearchBar });
   setupDragAndDrop(container, () => entry.session.sessionId);
   terminal.onResize(({ cols, rows }) => {
     window.api.resizeTerminal(entry.session.sessionId, cols, rows);
@@ -2598,7 +2725,7 @@ function showSession(sessionId) {
 
 // --- End shared terminal lifecycle helpers ---
 
-async function openSession(session) {
+async function openSession(session, customOptions) {
   const { sessionId, projectPath } = session;
 
   // Headless sessions don't need a terminal — just show the log panel
@@ -2980,14 +3107,14 @@ cvSaveTemplateBtn.addEventListener('click', async () => {
 });
 
 // Open session directly as terminal (bypass conversation viewer)
-async function openSessionForced(session) {
+async function openSessionForced(session, customOptions) {
   const { sessionId, projectPath } = session;
   if (openSessions.has(sessionId)) {
     showSession(sessionId);
     return;
   }
   const entry = createTerminalEntry(session);
-  const resumeOptions = await resolveDefaultSessionOptions({ projectPath });
+  const resumeOptions = customOptions || await resolveDefaultSessionOptions({ projectPath });
   const result = await window.api.openTerminal(sessionId, projectPath, false, resumeOptions);
   if (!result.ok) {
     entry.terminal.write(`\r\nError: ${result.error}\r\n`);
@@ -3016,7 +3143,11 @@ window.addEventListener('resize', () => {
 function cleanDisplayName(name) {
   if (!name) return name;
   const prefix = 'Implement the following plan:';
-  if (name.startsWith(prefix)) return name.slice(prefix.length).trim();
+  if (name.startsWith(prefix)) name = name.slice(prefix.length).trim();
+  // Strip XML/HTML-like tags (e.g. <command>, </message>, <system-reminder>)
+  name = name.replace(/<\/?[a-zA-Z][a-zA-Z0-9_-]*(?:\s[^>]*)?\/?>/g, ' ');
+  // Collapse multiple spaces and trim
+  name = name.replace(/\s+/g, ' ').trim();
   return name;
 }
 
@@ -3079,6 +3210,7 @@ document.querySelectorAll('.sidebar-tab').forEach(tab => {
     searchInput.value = '';
     searchBar.classList.remove('has-query');
     searchMatchIds = null;
+    searchMatchProjectPaths = null;
 
     // Hide all sidebar content areas
     sidebarContent.style.display = 'none';
@@ -3216,90 +3348,8 @@ async function openPlan(plan) {
   settingsViewer.style.display = 'none';
   planViewer.style.display = 'flex';
 
-  planViewerTitle.textContent = plan.title;
-  planViewerFilepath.textContent = currentPlanFilePath;
-
-  // Reset to edit mode first so the editor can be updated
-  if (planPreviewMode) {
-    toggleMarkdownPreview({
-      editorEl: planViewerEditorEl, previewEl: planViewerPreviewEl,
-      toggleBtn: planPreviewBtn, editorView: planEditorView, isPreview: true,
-    });
-  }
-
-  // Create or update CodeMirror editor
-  if (!planEditorView) {
-    planEditorView = window.createPlanEditor(planViewerEditorEl);
-  }
-  planEditorView.dispatch({
-    changes: { from: 0, to: planEditorView.state.doc.length, insert: currentPlanContent },
-  });
-
-  // Apply saved preview preference
-  if (planPreviewMode) {
-    toggleMarkdownPreview({
-      editorEl: planViewerEditorEl, previewEl: planViewerPreviewEl,
-      toggleBtn: planPreviewBtn, editorView: planEditorView, isPreview: false,
-    });
-  }
+  planPanel.open(plan.title, currentPlanFilePath, currentPlanContent);
 }
-
-// Plan toolbar button handlers
-function flashButtonText(btn, text, duration = 1200) {
-  const original = btn.textContent;
-  btn.textContent = text;
-  setTimeout(() => { btn.textContent = original; }, duration);
-}
-
-planCopyPathBtn.addEventListener('click', () => {
-  navigator.clipboard.writeText(currentPlanFilePath);
-  flashButtonText(planCopyPathBtn, 'Copied!');
-});
-
-planCopyContentBtn.addEventListener('click', () => {
-  const content = planEditorView ? planEditorView.state.doc.toString() : currentPlanContent;
-  navigator.clipboard.writeText(content);
-  flashButtonText(planCopyContentBtn, 'Copied!');
-});
-
-planSaveBtn.addEventListener('click', async () => {
-  if (planEditorView) {
-    currentPlanContent = planEditorView.state.doc.toString();
-  }
-  await window.api.savePlan(currentPlanFilePath, currentPlanContent);
-  flashButtonText(planSaveBtn, 'Saved!');
-});
-
-function toggleMarkdownPreview({ editorEl, previewEl, toggleBtn, editorView, isPreview, storageKey }) {
-  if (!isPreview) {
-    const content = editorView ? editorView.state.doc.toString() : '';
-    previewEl.innerHTML = window.marked.parse(content);
-    editorEl.style.display = 'none';
-    previewEl.style.display = 'block';
-    toggleBtn.textContent = 'Edit';
-    toggleBtn.classList.add('active');
-    if (storageKey) localStorage.setItem(storageKey, 'true');
-    return true;
-  } else {
-    previewEl.style.display = 'none';
-    editorEl.style.display = '';
-    toggleBtn.textContent = 'Preview';
-    toggleBtn.classList.remove('active');
-    if (storageKey) localStorage.setItem(storageKey, 'false');
-    return false;
-  }
-}
-
-planPreviewBtn.addEventListener('click', () => {
-  planPreviewMode = toggleMarkdownPreview({
-    editorEl: planViewerEditorEl,
-    previewEl: planViewerPreviewEl,
-    toggleBtn: planPreviewBtn,
-    editorView: planEditorView,
-    isPreview: planPreviewMode,
-    storageKey: 'planPreviewMode',
-  });
-});
 
 function hideAllViewers() {
   planViewer.style.display = 'none';
@@ -3490,7 +3540,10 @@ function focusGridCard(sessionId) {
   // Update visual focus
   document.querySelectorAll('.grid-card').forEach(c => c.classList.remove('focused'));
   const card = gridCards.get(sessionId);
-  if (card) card.classList.add('focused');
+  if (card) {
+    card.classList.add('focused');
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
   const entry = openSessions.get(sessionId);
   if (entry) entry.terminal.focus();
 }
@@ -3532,32 +3585,29 @@ function showGridView() {
     });
   }
 
-  // Hide all terminals first, then wrap each group with a heading + cards
+  // Hide all terminals first, then wrap cards in sidebar order (grouped by project)
   document.querySelectorAll('.terminal-container').forEach(el => el.classList.remove('visible'));
   const sessionIds = [];
-  for (const project of projects) {
-    const openInProject = project.sessions
-      .filter(s => openSet.has(s.sessionId))
-      .sort((a, b) => {
-        const aRun = activePtyIds.has(a.sessionId) ? 1 : 0;
-        const bRun = activePtyIds.has(b.sessionId) ? 1 : 0;
-        if (aRun !== bRun) return bRun - aRun;
-        const aTime = (lastActivityTime.get(a.sessionId) || new Date(0)).getTime();
-        const bTime = (lastActivityTime.get(b.sessionId) || new Date(0)).getTime();
-        return bTime - aTime;
-      });
-    if (openInProject.length === 0) continue;
-    // Add project heading
-    const heading = document.createElement('div');
-    heading.className = 'grid-project-heading';
-    heading.dataset.projectPath = project.projectPath;
-    heading.textContent = project.projectPath.split('/').filter(Boolean).slice(-2).join('/');
-    terminalsEl.appendChild(heading);
-    // Add cards for this project
-    for (const s of openInProject) {
-      wrapInGridCard(s.sessionId);
-      sessionIds.push(s.sessionId);
+  // Walk sidebar items to get sessions in display order, grouped by project
+  const sidebarItems = sidebarContent.querySelectorAll('.session-item[data-session-id]');
+  let currentProjectPath = null;
+  for (const item of sidebarItems) {
+    const sid = item.dataset.sessionId;
+    if (!openSet.has(sid)) continue;
+    // Determine project path for this session
+    const session = sessionMap.get(sid);
+    const projectPath = session ? session.projectPath : null;
+    // Add project heading when project changes
+    if (projectPath && projectPath !== currentProjectPath) {
+      currentProjectPath = projectPath;
+      const heading = document.createElement('div');
+      heading.className = 'grid-project-heading';
+      heading.dataset.projectPath = projectPath;
+      heading.textContent = projectPath.split('/').filter(Boolean).slice(-2).join('/');
+      terminalsEl.appendChild(heading);
     }
+    wrapInGridCard(sid);
+    sessionIds.push(sid);
   }
 
   // Show grid header bar with session count
@@ -3579,11 +3629,25 @@ function showGridView() {
   });
 }
 
+function updateGridColumns() {
+  if (!gridViewActive) return;
+  const width = terminalsEl.clientWidth;
+  const minCardWidth = 560;
+  const gap = 14;
+  const fitCols = Math.max(1, Math.floor((width + gap) / (minCardWidth + gap)));
+  const cardCount = terminalsEl.querySelectorAll('.grid-card').length;
+  const cols = Math.max(1, Math.min(fitCols, cardCount || 1));
+  terminalsEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+}
+new ResizeObserver(updateGridColumns).observe(terminalsEl);
+new MutationObserver(updateGridColumns).observe(terminalsEl, { childList: true });
+
 function hideGridView() {
   gridViewActive = false;
   localStorage.setItem('gridViewActive', '0');
   unwrapGridCards();
   terminalsEl.classList.remove('grid-layout');
+  terminalsEl.style.gridTemplateColumns = '';
   gridViewer.style.display = 'none';
   const btn = document.getElementById('grid-toggle-btn');
   if (btn) btn.classList.remove('active');
@@ -3603,6 +3667,129 @@ function toggleGridView() {
     terminalHeader.style.display = 'none';
     showGridView();
   }
+}
+
+// --- Session navigation (Cmd+Shift+[/], Cmd+Arrow) ---
+
+// Returns ordered list of open (non-closed) session IDs matching sidebar order.
+function getOrderedOpenSessionIds() {
+  const items = sidebarContent.querySelectorAll('.session-item[data-session-id]');
+  const ids = [];
+  for (const item of items) {
+    const sid = item.dataset.sessionId;
+    const entry = openSessions.get(sid);
+    if (entry && !entry.closed) ids.push(sid);
+  }
+  return ids;
+}
+
+function navigateSession(direction) {
+  const ids = getOrderedOpenSessionIds();
+  const current = gridViewActive ? gridFocusedSessionId : activeSessionId;
+  const idx = ids.indexOf(current);
+  let next;
+  if (idx === -1) {
+    next = ids[0];
+  } else {
+    next = ids[(idx + direction + ids.length) % ids.length];
+  }
+  if (ids.length === 0 || !next) return;
+  if (gridViewActive) {
+    focusGridCard(next);
+  } else {
+    showSession(next);
+  }
+}
+
+// Navigate the grid in 2D by visual position using bounding rects.
+// Project headings break the simple index math, so we use actual screen positions.
+function navigateGrid(direction) {
+  if (!gridViewActive) return;
+  const cards = [...terminalsEl.querySelectorAll('.grid-card')];
+  if (cards.length === 0) return;
+  const currentCard = gridCards.get(gridFocusedSessionId || activeSessionId);
+  if (!currentCard || !cards.includes(currentCard)) {
+    for (const [sid, card] of gridCards) {
+      if (card === cards[0]) { focusGridCard(sid); return; }
+    }
+    return;
+  }
+  const cur = currentCard.getBoundingClientRect();
+  const curCx = cur.left + cur.width / 2;
+  const curCy = cur.top + cur.height / 2;
+  let best = null;
+  let bestDist = Infinity;
+  for (const card of cards) {
+    if (card === currentCard) continue;
+    const r = card.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    // Filter by direction
+    const dx = cx - curCx;
+    const dy = cy - curCy;
+    let valid = false;
+    switch (direction) {
+      case 'left':  valid = dx < -10; break;
+      case 'right': valid = dx > 10; break;
+      case 'up':    valid = dy < -10; break;
+      case 'down':  valid = dy > 10; break;
+    }
+    if (!valid) continue;
+    // For left/right prefer same row (small dy), for up/down prefer same column (small dx)
+    let dist;
+    if (direction === 'left' || direction === 'right') {
+      dist = Math.abs(dy) * 3 + Math.abs(dx);
+    } else {
+      dist = Math.abs(dx) * 3 + Math.abs(dy);
+    }
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = card;
+    }
+  }
+  if (!best) return;
+  for (const [sid, card] of gridCards) {
+    if (card === best) { focusGridCard(sid); return; }
+  }
+}
+
+// Returns true if the key combo is a session nav shortcut (used by xterm to block without acting)
+function isSessionNavKey(e) {
+  const mod = isMac ? e.metaKey : e.ctrlKey;
+  if (!mod || e.altKey) return false;
+  if (e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) return true;
+  if (!e.shiftKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return true;
+  return false;
+}
+
+function handleSessionNavKey(e) {
+  const mod = isMac ? e.metaKey : e.ctrlKey;
+  if (!mod || e.altKey) return false;
+
+  // Cmd+Shift+[ or Cmd+Shift+] — prev/next session
+  // On macOS, Shift changes e.key to { / }, so check code for reliable matching
+  if (e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
+    e.preventDefault();
+    if (e.type === 'keydown') navigateSession(e.code === 'BracketLeft' ? -1 : 1);
+    return true;
+  }
+
+  // Cmd+Arrow — in grid view: 2D grid navigation; in single view: left/right cycle sessions
+  if (!e.shiftKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+    e.preventDefault();
+    if (e.type === 'keydown') {
+      if (gridViewActive) {
+        const dirMap = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' };
+        navigateGrid(dirMap[e.key]);
+      } else {
+        const dir = (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ? -1 : 1;
+        navigateSession(dir);
+      }
+    }
+    return true;
+  }
+
+  return false;
 }
 
 // --- JSONL Message History Viewer ---
@@ -4321,10 +4508,8 @@ function buildAgentStatsSection(agentStats) {
 
 // --- Memory ---
 let cachedMemoryData = { global: { files: [] }, projects: [] };
-let memoryEditorView = null;
 let currentMemoryFilePath = null;
 let currentMemoryContent = '';
-let memoryPreviewMode = localStorage.getItem('memoryPreviewMode') === 'true';
 const memoryCollapsedState = new Map(); // key → boolean (true = collapsed)
 
 async function loadMemories() {
@@ -4461,64 +4646,8 @@ async function openMemory(file) {
   settingsViewer.style.display = 'none';
   memoryViewer.style.display = 'flex';
 
-  memoryViewerTitle.textContent = file.filename;
-  memoryViewerFilename.textContent = file.filePath;
-
-  // Reset to edit mode first so the editor can be updated
-  if (memoryPreviewMode) {
-    toggleMarkdownPreview({
-      editorEl: memoryViewerEditorEl, previewEl: memoryViewerPreviewEl,
-      toggleBtn: memoryPreviewBtn, editorView: memoryEditorView, isPreview: true,
-    });
-  }
-
-  // Create or update CodeMirror editor
-  if (!memoryEditorView) {
-    memoryEditorView = window.createPlanEditor(memoryViewerEditorEl);
-  }
-  memoryEditorView.dispatch({
-    changes: { from: 0, to: memoryEditorView.state.doc.length, insert: content },
-  });
-
-  // Apply saved preview preference
-  if (memoryPreviewMode) {
-    toggleMarkdownPreview({
-      editorEl: memoryViewerEditorEl, previewEl: memoryViewerPreviewEl,
-      toggleBtn: memoryPreviewBtn, editorView: memoryEditorView, isPreview: false,
-    });
-  }
+  memoryPanel.open(file.filename, file.filePath, content);
 }
-
-// Memory toolbar handlers
-memoryCopyPathBtn.addEventListener('click', () => {
-  navigator.clipboard.writeText(currentMemoryFilePath);
-  flashButtonText(memoryCopyPathBtn, 'Copied!');
-});
-
-memoryCopyContentBtn.addEventListener('click', () => {
-  const content = memoryEditorView ? memoryEditorView.state.doc.toString() : currentMemoryContent;
-  navigator.clipboard.writeText(content);
-  flashButtonText(memoryCopyContentBtn, 'Copied!');
-});
-
-memorySaveBtn.addEventListener('click', async () => {
-  if (memoryEditorView && currentMemoryFilePath) {
-    currentMemoryContent = memoryEditorView.state.doc.toString();
-    await window.api.saveMemory(currentMemoryFilePath, currentMemoryContent);
-    flashButtonText(memorySaveBtn, 'Saved!');
-  }
-});
-
-memoryPreviewBtn.addEventListener('click', () => {
-  memoryPreviewMode = toggleMarkdownPreview({
-    editorEl: memoryViewerEditorEl,
-    previewEl: memoryViewerPreviewEl,
-    toggleBtn: memoryPreviewBtn,
-    editorView: memoryEditorView,
-    isPreview: memoryPreviewMode,
-    storageKey: 'memoryPreviewMode',
-  });
-});
 
 // --- New session dialog ---
 async function resolveDefaultSessionOptions(project) {
@@ -4853,6 +4982,74 @@ async function showNewSessionDialog(project) {
     return html;
   }
 
+  dialog.innerHTML = `
+    <h3>New Session — ${escapeHtml(project.projectPath.split('/').filter(Boolean).slice(-2).join('/'))}</h3>
+    <div class="settings-field">
+      <div class="settings-label">Permission Mode</div>
+      <div class="permission-grid" id="nsd-mode-grid">${renderModeGrid()}</div>
+    </div>
+    <div class="settings-field">
+      <div class="settings-field-info">
+        <span class="settings-label">Worktree</span>
+        <div class="settings-description">Run session in an isolated git worktree</div>
+      </div>
+      <div class="settings-field-control">
+        <input type="text" class="settings-input" id="nsd-worktree-name" placeholder="name (optional)" value="${escapeHtml(effective.worktreeName || '')}" style="width:140px">
+        <label class="settings-toggle"><input type="checkbox" id="nsd-worktree" ${effective.worktree ? 'checked' : ''}><span class="settings-toggle-slider"></span></label>
+      </div>
+    </div>
+    <div class="settings-field">
+      <div class="settings-field-info">
+        <span class="settings-label">Chrome</span>
+        <div class="settings-description">Enable Chrome browser automation</div>
+      </div>
+      <div class="settings-field-control">
+        <label class="settings-toggle"><input type="checkbox" id="nsd-chrome" ${effective.chrome ? 'checked' : ''}><span class="settings-toggle-slider"></span></label>
+      </div>
+    </div>
+    <div class="settings-field settings-field-wide">
+      <div class="settings-field-info">
+        <span class="settings-label">Pre-launch Command</span>
+        <div class="settings-description">Prepended to the claude command</div>
+      </div>
+      <div class="settings-field-control">
+        <input type="text" class="settings-input" id="nsd-pre-launch" placeholder="e.g. aws-vault exec profile --" value="${escapeHtml(effective.preLaunchCmd || '')}">
+      </div>
+    </div>
+    <div class="settings-field settings-field-wide">
+      <div class="settings-field-info">
+        <span class="settings-label">Additional Directories</span>
+        <div class="settings-description">Extra directories to include (comma-separated)</div>
+      </div>
+      <div class="settings-field-control">
+        <input type="text" class="settings-input" id="nsd-add-dirs" placeholder="/path/to/dir1, /path/to/dir2" value="${escapeHtml(effective.addDirs || '')}">
+      </div>
+    </div>
+    <div class="new-session-actions">
+      <button class="new-session-cancel-btn">Cancel</button>
+      <button class="new-session-start-btn">Start</button>
+    </div>
+  `;
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  // Bind mode grid clicks
+  const modeGrid = dialog.querySelector('#nsd-mode-grid');
+  modeGrid.addEventListener('click', (e) => {
+    const btn = e.target.closest('.permission-option');
+    if (!btn) return;
+    const mode = btn.dataset.mode;
+    if (mode === 'dangerous-skip') {
+      dangerousSkip = !dangerousSkip;
+      if (dangerousSkip) selectedMode = null;
+    } else {
+      dangerousSkip = false;
+      selectedMode = mode === 'null' ? null : mode;
+    }
+    modeGrid.innerHTML = renderModeGrid();
+  }
+
   function renderPromptField() {
     return `<div class="settings-field" id="nsd-prompt-wrap">
       <div class="settings-label">Initial Prompt</div>
@@ -5066,51 +5263,35 @@ async function showSaveTemplateDialog(project, sessionOptions, currentPrompt) {
   dialog.querySelector('#tpl-name').focus();
 }
 
-// --- Settings viewer ---
-function closeSettingsViewer() {
-  settingsViewer.style.display = 'none';
-  if (activeSessionId && openSessions.has(activeSessionId)) {
-    terminalArea.style.display = '';
-    terminalHeader.style.display = '';
-  } else if (gridViewActive) {
-    terminalArea.style.display = '';
-  } else {
-    placeholder.style.display = '';
-  }
-}
+async function showResumeSessionDialog(session) {
+  const effective = await window.api.getEffectiveSettings(session.projectPath);
 
-async function openSettingsViewer(scope, projectPath) {
-  const isProject = scope === 'project';
-  const settingsKey = isProject ? 'project:' + projectPath : 'global';
-  const current = (await window.api.getSetting(settingsKey)) || {};
-  const globalSettings = isProject ? ((await window.api.getSetting('global')) || {}) : {};
+  const overlay = document.createElement('div');
+  overlay.className = 'new-session-overlay';
 
-  const shortName = isProject
-    ? projectPath.split('/').filter(Boolean).slice(-2).join('/')
-    : 'Global';
+  const dialog = document.createElement('div');
+  dialog.className = 'new-session-dialog';
 
-  settingsViewerTitle.textContent = (isProject ? 'Project Settings — ' : 'Global Settings — ') + shortName;
+  let selectedMode = effective.permissionMode || null;
+  let dangerousSkip = effective.dangerouslySkipPermissions || false;
 
-  // Show settings viewer
-  placeholder.style.display = 'none';
-  terminalArea.style.display = 'none';
-  planViewer.style.display = 'none';
-  statsViewer.style.display = 'none';
-  memoryViewer.style.display = 'none';
-  settingsViewer.style.display = 'flex';
+  const modes = [
+    { value: null, label: 'Default', desc: 'Prompt for all actions' },
+    { value: 'acceptEdits', label: 'Accept Edits', desc: 'Auto-accept file edits, prompt for others' },
+    { value: 'plan', label: 'Plan Mode', desc: 'Read-only exploration, no writes' },
+    { value: 'dontAsk', label: "Don't Ask", desc: 'Auto-deny tools not explicitly allowed' },
+    { value: 'bypassPermissions', label: 'Bypass', desc: 'Auto-accept all tool calls' },
+  ];
 
-  function useGlobalCheckbox(fieldName, label) {
-    if (!isProject) return '';
-    const useGlobal = current[fieldName] === undefined || current[fieldName] === null;
-    return `<label class="settings-use-global"><input type="checkbox" data-field="${fieldName}" class="use-global-cb" ${useGlobal ? 'checked' : ''}> Use global default</label>`;
+  function renderModeGrid() {
+    return modes.map(m => {
+      const isSelected = !dangerousSkip && selectedMode === m.value;
+      return `<button class="permission-option${isSelected ? ' selected' : ''}" data-mode="${m.value}"><span class="perm-name">${m.label}</span><span class="perm-desc">${m.desc}</span></button>`;
+    }).join('') +
+    `<button class="permission-option dangerous${dangerousSkip ? ' selected' : ''}" data-mode="dangerous-skip"><span class="perm-name">Dangerous Skip</span><span class="perm-desc">Skip all safety prompts (use with caution)</span></button>`;
   }
 
-  function fieldValue(fieldName, fallback) {
-    if (isProject && (current[fieldName] === undefined || current[fieldName] === null)) {
-      return globalSettings[fieldName] !== undefined ? globalSettings[fieldName] : fallback;
-    }
-    return current[fieldName] !== undefined ? current[fieldName] : fallback;
-  }
+  const sessionName = session.name || session.summary || session.sessionId.slice(0, 8);
 
   function fieldDisabled(fieldName) {
     if (!isProject) return '';
@@ -5379,7 +5560,6 @@ async function openSettingsViewer(scope, projectPath) {
         <button class="settings-cancel-btn" id="sv-cancel-btn">Cancel</button>
         <button class="settings-save-btn" id="sv-save-btn">Save Settings</button>
       </div>
-      ${isProject ? '<button class="settings-remove-btn" id="sv-remove-btn">Remove Project</button>' : ''}
     </div>
   `;
 
@@ -5545,36 +5725,6 @@ async function openSettingsViewer(scope, projectPath) {
     closeSettingsViewer();
   });
 
-  // Cancel button
-  settingsViewerBody.querySelector('#sv-cancel-btn').addEventListener('click', () => {
-    closeSettingsViewer();
-  });
-
-  // Check for updates button + current version + inline status
-  const checkUpdatesBtn = settingsViewerBody.querySelector('#sv-check-updates-btn');
-  if (checkUpdatesBtn) {
-    const updateStatusEl = settingsViewerBody.querySelector('#sv-update-status');
-    window.api.getAppVersion().then(v => {
-      const el = settingsViewerBody.querySelector('#sv-current-version');
-      if (el) el.textContent = `v${v}`;
-    });
-    const settingsUpdaterHandler = (type, data) => {
-      if (!updateStatusEl) return;
-      switch (type) {
-        case 'checking': updateStatusEl.textContent = '— checking…'; break;
-        case 'update-available': updateStatusEl.textContent = `— v${data.version} available`; break;
-        case 'update-not-available': updateStatusEl.textContent = '— up to date'; break;
-        case 'download-progress': updateStatusEl.textContent = `— downloading ${Math.round(data.percent)}%`; break;
-        case 'update-downloaded': updateStatusEl.textContent = `— v${data.version} ready, restart to update`; break;
-        case 'error': updateStatusEl.textContent = '— check failed'; break;
-      }
-    };
-    window.api.onUpdaterEvent(settingsUpdaterHandler);
-    checkUpdatesBtn.addEventListener('click', () => {
-      window.api.updaterCheck();
-    });
-  }
-
   // Activity monitoring hook status
   const hookStatusEl = settingsViewerBody.querySelector('#sv-hook-status');
   const hookInstallBtn = settingsViewerBody.querySelector('#sv-install-hook-btn');
@@ -5617,7 +5767,25 @@ async function openSettingsViewer(scope, projectPath) {
       loadProjects();
     });
   }
+
+  // Remove project button
+  const removeBtn = settingsViewerBody.querySelector('#sv-remove-btn');
+  if (removeBtn) {
+    removeBtn.addEventListener('click', async () => {
+      if (!confirm(`Remove project "${shortName}" from Switchboard?\n\nThis hides the project from the sidebar. Your session files are not deleted.`)) return;
+      await window.api.removeProject(projectPath);
+      settingsViewer.style.display = 'none';
+      placeholder.style.display = 'flex';
+      loadProjects();
+    });
+  }
+
+  // Cancel button
+  const cancelBtn = settingsViewerBody.querySelector('#sv-cancel-btn');
+  if (cancelBtn) cancelBtn.addEventListener('click', () => { closeSettingsViewer(); });
 }
+
+// Settings viewer is in settings-panel.js (openSettingsViewer / closeSettingsViewer)
 
 // Global settings gear button
 globalSettingsBtn.innerHTML = ICONS.gear(18);
@@ -5808,6 +5976,16 @@ function showAddProjectDialog() {
   document.addEventListener('keydown', onKey);
 }
 
+// --- Sidebar toggle ---
+{
+  const sidebar = document.getElementById('sidebar');
+  const collapseBtn = document.getElementById('sidebar-collapse-btn');
+  const expandBtn = document.getElementById('sidebar-expand-btn');
+
+  collapseBtn.addEventListener('click', () => sidebar.classList.add('collapsed'));
+  expandBtn.addEventListener('click', () => sidebar.classList.remove('collapsed'));
+}
+
 // --- Sidebar resize ---
 {
   const sidebar = document.getElementById('sidebar');
@@ -5860,6 +6038,22 @@ function showAddProjectDialog() {
   gridToggleBtn.addEventListener('click', toggleGridView);
   // Insert next to the resort button
   resortBtn.parentElement.insertBefore(gridToggleBtn, resortBtn);
+
+  // Global keyboard shortcuts (covers non-terminal focus)
+  // When a terminal is focused, xterm's customKeyEventHandler fires first and sets
+  // e._handled to prevent the document listener from double-firing the same action.
+  document.addEventListener('keydown', (e) => {
+    if (e._handled) return;
+    // Cmd/Ctrl+Shift+G → toggle grid view
+    const mod = isMac ? e.metaKey : e.ctrlKey;
+    if (e.key === 'g' && mod && e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      toggleGridView();
+      return;
+    }
+    // Session navigation: Cmd+Shift+[/], Cmd+Arrow
+    handleSessionNavKey(e);
+  });
 }
 
 // Warm up xterm.js renderer so first terminal open is fast
