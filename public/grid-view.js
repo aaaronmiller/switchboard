@@ -8,7 +8,6 @@
 // jsonlViewer, terminalArea, cachedProjects, isMac
 // Depends on: cleanDisplayName, formatDate (utils.js), fitAndScroll, showSession (terminal-manager.js)
 
-let gridCards = new Map(); // sessionId → card wrapper element
 let gridFocusedSessionId = null;
 
 function wrapInGridCard(sessionId) {

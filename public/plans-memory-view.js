@@ -4,9 +4,6 @@
 // statsViewer, settingsViewer, jsonlViewer (app.js)
 // Depends on: formatDate (utils.js)
 
-let currentPlanContent = "";
-let currentPlanFilePath = "";
-let currentPlanFilename = "";
 let cachedMemoryData = { global: { files: [] }, projects: [] };
 let currentMemoryFilePath = null;
 let currentMemoryContent = "";
