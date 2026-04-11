@@ -30,7 +30,7 @@ const todayToggle = document.getElementById('today-toggle');
 const planViewer = document.getElementById('plan-viewer');
 const planPanel = new ViewerPanel(planViewer, {
   copyPath: true, copyContent: true,
-  language: 'markdown', storageKey: 'planPreviewMode',
+  language: 'markdown', storageKey: 'markdownPreviewMode',
   onSave: (filePath, content) => window.api.savePlan(filePath, content),
 });
 
@@ -122,6 +122,7 @@ applyBrightness();
 let currentPlanContent = '';
 let currentPlanFilePath = '';
 let currentPlanFilename = '';
+// currentPlanContent, currentPlanFilePath, currentPlanFilename → plans-memory-view.js
 const loadingStatus = document.getElementById('loading-status');
 const sessionFilters = document.getElementById('session-filters');
 const searchBar = document.getElementById('search-bar');
@@ -132,7 +133,7 @@ const statsViewerBody = document.getElementById('stats-viewer-body');
 const memoryViewer = document.getElementById('memory-viewer');
 const memoryPanel = new ViewerPanel(memoryViewer, {
   copyPath: true, copyContent: true,
-  language: 'markdown', storageKey: 'memoryPreviewMode',
+  language: 'markdown', storageKey: 'markdownPreviewMode',
   onSave: (filePath, content) => window.api.saveMemory(filePath, content),
 });
 const terminalArea = document.getElementById('terminal-area');
@@ -293,218 +294,12 @@ function clearNotifications(sessionId) {
   const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
   if (item) item.classList.remove('needs-attention');
 }
+// Terminal themes, utils (cleanDisplayName, formatDate, escapeHtml, shellEscape)
+// are defined in terminal-themes.js and utils.js (loaded before app.js).
 
-// --- Terminal themes ---
-const TERMINAL_THEMES = {
-  switchboard: {
-    label: 'Switchboard',
-    background: '#1a1a2e', foreground: '#e0e0e0', cursor: '#e94560', selectionBackground: '#3a3a5e',
-    black: '#1a1a2e', red: '#e94560', green: '#0dff00', yellow: '#f5a623', blue: '#7b68ee', magenta: '#c678dd', cyan: '#56b6c2', white: '#c5c8c6',
-    brightBlack: '#555568', brightRed: '#ff6b81', brightGreen: '#69ff69', brightYellow: '#ffd93d', brightBlue: '#8fa8ff', brightMagenta: '#d19afc', brightCyan: '#7ee8e8', brightWhite: '#eaeaea',
-  },
-  ghostty: {
-    label: 'Ghostty',
-    background: '#292c33', foreground: '#ffffff', cursor: '#ffffff', cursorAccent: '#363a43', selectionBackground: '#ffffff', selectionForeground: '#292c33',
-    black: '#1d1f21', red: '#bf6b69', green: '#b7bd73', yellow: '#e9c880', blue: '#88a1bb', magenta: '#ad95b8', cyan: '#95bdb7', white: '#c5c8c6',
-    brightBlack: '#666666', brightRed: '#c55757', brightGreen: '#bcc95f', brightYellow: '#e1c65e', brightBlue: '#83a5d6', brightMagenta: '#bc99d4', brightCyan: '#83beb1', brightWhite: '#eaeaea',
-  },
-  tokyoNight: {
-    label: 'Tokyo Night',
-    background: '#1a1b26', foreground: '#c0caf5', cursor: '#c0caf5', selectionBackground: '#33467c',
-    black: '#15161e', red: '#f7768e', green: '#9ece6a', yellow: '#e0af68', blue: '#7aa2f7', magenta: '#bb9af7', cyan: '#7dcfff', white: '#a9b1d6',
-    brightBlack: '#414868', brightRed: '#f7768e', brightGreen: '#9ece6a', brightYellow: '#e0af68', brightBlue: '#7aa2f7', brightMagenta: '#bb9af7', brightCyan: '#7dcfff', brightWhite: '#c0caf5',
-  },
-  catppuccinMocha: {
-    label: 'Catppuccin Mocha',
-    background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5e0dc', selectionBackground: '#45475a',
-    black: '#45475a', red: '#f38ba8', green: '#a6e3a1', yellow: '#f9e2af', blue: '#89b4fa', magenta: '#f5c2e7', cyan: '#94e2d5', white: '#bac2de',
-    brightBlack: '#585b70', brightRed: '#f38ba8', brightGreen: '#a6e3a1', brightYellow: '#f9e2af', brightBlue: '#89b4fa', brightMagenta: '#f5c2e7', brightCyan: '#94e2d5', brightWhite: '#a6adc8',
-  },
-  dracula: {
-    label: 'Dracula',
-    background: '#282a36', foreground: '#f8f8f2', cursor: '#f8f8f2', selectionBackground: '#44475a',
-    black: '#21222c', red: '#ff5555', green: '#50fa7b', yellow: '#f1fa8c', blue: '#bd93f9', magenta: '#ff79c6', cyan: '#8be9fd', white: '#f8f8f2',
-    brightBlack: '#6272a4', brightRed: '#ff6e6e', brightGreen: '#69ff94', brightYellow: '#ffffa5', brightBlue: '#d6acff', brightMagenta: '#ff92df', brightCyan: '#a4ffff', brightWhite: '#ffffff',
-  },
-  nord: {
-    label: 'Nord',
-    background: '#2e3440', foreground: '#d8dee9', cursor: '#d8dee9', selectionBackground: '#434c5e',
-    black: '#3b4252', red: '#bf616a', green: '#a3be8c', yellow: '#ebcb8b', blue: '#81a1c1', magenta: '#b48ead', cyan: '#88c0d0', white: '#e5e9f0',
-    brightBlack: '#4c566a', brightRed: '#bf616a', brightGreen: '#a3be8c', brightYellow: '#ebcb8b', brightBlue: '#81a1c1', brightMagenta: '#b48ead', brightCyan: '#8fbcbb', brightWhite: '#eceff4',
-  },
-  solarizedDark: {
-    label: 'Solarized Dark',
-    background: '#002b36', foreground: '#839496', cursor: '#839496', selectionBackground: '#073642',
-    black: '#073642', red: '#dc322f', green: '#859900', yellow: '#b58900', blue: '#268bd2', magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5',
-    brightBlack: '#002b36', brightRed: '#cb4b16', brightGreen: '#586e75', brightYellow: '#657b83', brightBlue: '#839496', brightMagenta: '#6c71c4', brightCyan: '#93a1a1', brightWhite: '#fdf6e3',
-  },
-};
-
-let currentThemeName = 'switchboard';
-function getTerminalTheme() {
-  return TERMINAL_THEMES[currentThemeName] || TERMINAL_THEMES.switchboard;
-}
-let TERMINAL_THEME = getTerminalTheme();
-
-// --- Terminal key bindings ---
-// Shift+Enter → kitty protocol (CSI 13;2u) so Claude Code treats it as newline, not submit.
-// Two layers needed:
-//   1. attachCustomKeyEventHandler returning false — blocks xterm's key pipeline (onKey/onData)
-//   2. preventDefault on capture-phase keydown — prevents browser inserting \n into textarea
-const isMac = window.api.platform === 'darwin';
-function setupTerminalKeyBindings(terminal, container, getSessionId, { onFind } = {}) {
-  terminal.attachCustomKeyEventHandler((e) => {
-    // Cmd/Ctrl+F → open terminal search bar
-    if (e.key === 'f' && (isMac ? e.metaKey : e.ctrlKey) && !e.shiftKey && !e.altKey) {
-      if (e.type === 'keydown' && onFind) onFind();
-      return false;
-    }
-
-    // Cmd/Ctrl+Shift+G → toggle grid view
-    if (e.key === 'g' && (isMac ? e.metaKey : e.ctrlKey) && e.shiftKey && !e.altKey) {
-      if (e.type === 'keydown') { e._handled = true; toggleGridView(); }
-      return false;
-    }
-
-    // Session navigation: Cmd+Shift+[/], Cmd+Arrow
-    if (isSessionNavKey(e)) {
-      if (e.type === 'keydown') { e._handled = true; handleSessionNavKey(e); }
-      return false;
-    }
-
-    // Shift+Enter → newline (kitty protocol CSI 13;2u) so Claude Code treats it as newline, not submit.
-    if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
-      if (e.type === 'keydown') {
-        window.api.sendInput(getSessionId(), '\x1b[13;2u');
-      }
-      return false;
-    }
-
-    // Ctrl+Enter → newline on Windows/Linux (matches PowerShell convention).
-    // Send the same Shift+Enter kitty sequence that Claude Code recognizes as newline.
-    if (!isMac && e.key === 'Enter' && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
-      if (e.type === 'keydown') {
-        window.api.sendInput(getSessionId(), '\x1b[13;2u');
-      }
-      return false;
-    }
-
-    // On Windows/Linux, Ctrl+V is captured by xterm as a control character (0x16)
-    // instead of triggering a paste. Return false to block xterm's key pipeline and
-    // let Electron's Edit menu { role: 'paste' } handle the actual clipboard paste.
-    if (!isMac && e.key === 'v' && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
-      return false;
-    }
-
-    // On Windows/Linux, Ctrl+C with a selection should copy instead of sending SIGINT.
-    // When nothing is selected, Ctrl+C falls through to xterm (sends SIGINT as normal).
-    if (!isMac && e.key === 'c' && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
-      if (terminal.hasSelection()) {
-        if (e.type === 'keydown') {
-          navigator.clipboard.writeText(terminal.getSelection()).catch(() => {});
-        }
-        return false;
-      }
-    }
-
-    // Space → send directly on keydown (including key-repeat) to ensure reliable
-    // delivery to the PTY. xterm.js's evaluateKeyboardEvent does not handle plain
-    // Space in keydown (keyCode 32 < 48 threshold) and instead relies on the
-    // deprecated 'keypress' event, which Electron/Chromium may not fire reliably
-    // for key-repeat events. This fixes Claude Code's "Hold Space to record"
-    // push-to-talk voice feature, which depends on rapid key-repeat characters
-    // arriving at stdin to detect a held key.
-    if (e.key === ' ' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
-      if (e.type === 'keydown') {
-        e.preventDefault();
-        window.api.sendInput(getSessionId(), ' ');
-      }
-      return false;
-    }
-
-    return true;
-  });
-
-  const textarea = container.querySelector('.xterm-helper-textarea');
-  if (textarea) {
-    textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.shiftKey || (!isMac && e.ctrlKey)) && !e.altKey && !e.metaKey) {
-        e.preventDefault();
-      }
-    }, { capture: true });
-  }
-}
-
-// Check whether a terminal is scrolled to the bottom using xterm's buffer API.
-// This avoids race conditions with DOM scroll events that fire when content
-// is added (changing scrollHeight) before the write callback runs.
-function isAtBottom(terminal) {
-  const buf = terminal.buffer.active;
-  return buf.viewportY >= buf.baseY;
-}
-
-// Fit terminal to container, subtracting 1 row to avoid partial-row clipping.
-function safeFit(entry) {
-  const dims = entry.fitAddon.proposeDimensions();
-  if (dims && dims.rows > 1) {
-    entry.terminal.resize(dims.cols, dims.rows);
-  } else {
-    entry.fitAddon.fit();
-  }
-}
-
-// Fit a terminal that just became visible (from display:none or reparent).
-// Defers to requestAnimationFrame so the container has dimensions.
-function fitAndScroll(entry) {
-  const wasAtBottom = isAtBottom(entry.terminal);
-  requestAnimationFrame(() => {
-    safeFit(entry);
-    if (wasAtBottom) {
-      entry.terminal.scrollToBottom();
-    }
-  });
-}
+// Terminal key bindings, write buffering, isAtBottom, safeFit, fitAndScroll → terminal-manager.js
 
 // --- IPC listeners from main process ---
-
-// Batch incoming terminal data to coalesce IPC chunks into fewer write() calls.
-// PTY output arrives in ~1KB IPC chunks which can split synchronized update
-// markers (ESC[?2026h / ESC[?2026l) across calls. We hold data until the sync
-// end marker arrives so xterm can process the complete update atomically.
-// A safety timeout ensures we never hold data indefinitely.
-const ESC_SYNC_START = '\x1b[?2026h';
-const ESC_SYNC_END = '\x1b[?2026l';
-const SYNC_BUFFER_TIMEOUT = 500; // max ms to hold data waiting for sync end
-const terminalWriteBuffers = new Map(); // sessionId → { chunks, syncDepth, rafId, timerId }
-
-function flushTerminalBuffer(sessionId) {
-  const buf = terminalWriteBuffers.get(sessionId);
-  if (!buf) return;
-  clearTimeout(buf.timerId);
-  cancelAnimationFrame(buf.rafId);
-  terminalWriteBuffers.delete(sessionId);
-
-  const entry = openSessions.get(sessionId);
-  if (!entry) return;
-
-  const data = buf.chunks.join('');
-  const wasAtBottom = isAtBottom(entry.terminal);
-  const savedViewportY = entry.terminal.buffer.active.viewportY;
-  entry.terminal.write(data, () => {
-    if (sessionId !== activeSessionId) return;
-    if (wasAtBottom) {
-      entry.terminal.scrollToBottom();
-    } else {
-      // Restore scroll position so redraws don't yank the user away
-      entry.terminal.scrollLines(savedViewportY - entry.terminal.buffer.active.viewportY);
-    }
-  });
-}
-
-function scheduleFlush(sessionId, buf) {
-  cancelAnimationFrame(buf.rafId);
-  buf.rafId = requestAnimationFrame(() => flushTerminalBuffer(sessionId));
-}
 
 window.api.onTerminalData((sessionId, data) => {
   // Detect live loop events from terminal output (Claude echoes /loop when it detects one)
@@ -1316,6 +1111,17 @@ resortBtn.addEventListener('click', () => {
   loadProjects({ resort: true });
 });
 
+// --- Global settings gear button ---
+globalSettingsBtn.innerHTML = ICONS.gear(18);
+globalSettingsBtn.addEventListener('click', () => {
+  openSettingsViewer('global');
+});
+
+// --- Add project button ---
+addProjectBtn.addEventListener('click', () => {
+  showAddProjectDialog();
+});
+
 // --- Search (debounced, per-tab FTS) ---
 let searchDebounceTimer = null;
 const searchClear = document.getElementById('search-clear');
@@ -1614,9 +1420,8 @@ async function loadProjects({ resort = false } = {}) {
   renderDefaultStatus();
 }
 
-function slugId(slug) {
-  return 'slug-' + slug.replace(/[^a-zA-Z0-9_-]/g, '_');
-}
+// Sidebar rendering (slugId, folderId, buildSlugGroup, renderProjects,
+// rebindSidebarEvents, buildSessionItem, startRename) → sidebar.js
 
 function folderId(projectPath) {
   return 'project-' + projectPath.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -2771,6 +2576,7 @@ function showSession(sessionId) {
 }
 
 // --- End shared terminal lifecycle helpers ---
+// Terminal lifecycle (createTerminalEntry, destroySession, showSession, setupDragAndDrop) → terminal-manager.js
 
 async function openSession(session, customOptions) {
   const { sessionId, projectPath } = session;
@@ -3358,59 +3164,24 @@ document.querySelectorAll('.sidebar-tab').forEach(tab => {
   });
 });
 
-// --- Plans ---
-async function loadPlans() {
-  cachedPlans = await window.api.getPlans();
-  renderPlans();
-}
+// Plans & viewer helpers → plans-memory-view.js
 
-function renderPlans(plans) {
-  plans = plans || cachedPlans;
-  plansContent.innerHTML = '';
-  if (plans.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'plans-empty';
-    empty.textContent = 'No plans found in ~/.claude/plans/';
-    plansContent.appendChild(empty);
-    return;
-  }
-  for (const plan of plans) {
-    plansContent.appendChild(buildPlanItem(plan));
-  }
-}
 
-function buildPlanItem(plan) {
-  const item = document.createElement('div');
-  item.className = 'session-item plan-item';
+// Grid view → grid-view.js
+// Initialize grid observers now that DOM refs are ready
+initGridObservers();
 
-  const row = document.createElement('div');
-  row.className = 'session-row';
+// JSONL viewer (renderJsonlText, formatDuration, makeCollapsible, renderJsonlEntry, showJsonlViewer) → jsonl-viewer.js
 
-  const info = document.createElement('div');
-  info.className = 'session-info';
+// Stats view (loadStats, buildUsageSection, buildDailyBarChart, buildHeatmap, calculateStreak, buildStatsSummary) → stats-view.js
 
-  const titleEl = document.createElement('div');
-  titleEl.className = 'session-summary';
-  titleEl.textContent = plan.title;
+// Memory viewer → plans-memory-view.js
 
-  const filenameEl = document.createElement('div');
-  filenameEl.className = 'session-id';
-  filenameEl.textContent = plan.filename;
 
-  const metaEl = document.createElement('div');
-  metaEl.className = 'session-meta';
-  metaEl.textContent = formatDate(new Date(plan.modified));
+// Dialogs (resolveDefaultSessionOptions, forkSession, showNewSessionPopover,
+// showNewSessionDialog, showResumeSessionDialog, showAddProjectDialog, launchTerminalSession) → dialogs.js
 
   info.appendChild(titleEl);
-  info.appendChild(filenameEl);
-  info.appendChild(metaEl);
-  row.appendChild(info);
-  item.appendChild(row);
-
-  item.addEventListener('click', () => openPlan(plan));
-  return item;
-}
-
 async function openPlan(plan) {
   // Mark active in sidebar
   plansContent.querySelectorAll('.plan-item.active').forEach(el => el.classList.remove('active'));

@@ -2,10 +2,10 @@ const { parentPort, workerData } = require('worker_threads');
 const fs = require('fs');
 const path = require('path');
 const { getFolderIndexMtimeMs } = require('../folder-index-state');
+const { deriveProjectPath } = require('../derive-project-path');
+const { readSessionFile } = require('../read-session-file');
 
 const PROJECTS_DIR = workerData.projectsDir;
-
-const { deriveProjectPath } = require('../derive-project-path');
 
 function readFolderFromFilesystem(folder) {
   const folderPath = path.join(PROJECTS_DIR, folder);
@@ -97,6 +97,8 @@ function readFolderFromFilesystem(folder) {
         inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, model: lastModel,
         loopCount, lastLoopAt, lastLoopTool, lastLoopReason,
       });
+      const s = readSessionFile(path.join(folderPath, file), folder, projectPath);
+>>>>>>> upstream/main
     }
   } catch {}
 
