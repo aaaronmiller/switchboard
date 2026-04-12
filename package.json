@@ -59,8 +59,11 @@
     "productName": "Switchboard",
     "files": [
       "*.js",
+      "*.py",
+      "switchboard-tui",
       "workers/**/*",
       "public/**/*",
+      "scripts/**/*",
       "node_modules/**/*"
     ],
     "asarUnpack": [

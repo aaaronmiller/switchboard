@@ -9,3 +9,4 @@ public/codemirror-bundle.js
 .env
 .cache/
 dev-app-update.yml
+__pycache__/
