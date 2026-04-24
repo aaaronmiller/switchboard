@@ -2,7 +2,7 @@
 
 All notable changes to Switchboard are documented in this file.
 
-## [Unreleased]
+## [0.0.29] - 2026-04-24
 
 ### Added
 - **Card color coding (F5)** — Session cards in the sidebar now show color-coded left borders based on activity recency (green = <5 min with pulse animation, yellow = <1 hour, grey = stale) and git status (blue ↑ = ahead, green = current, orange ↓ = behind/diverged, purple = dirty, grey = unknown). Git status takes visual priority over activity coloring.
@@ -55,6 +55,8 @@ All notable changes to Switchboard are documented in this file.
 ### Changed
 - **Upstream merge** — Integrated 8 upstream commits: Electron 33→41, xterm.js 6.0, better-sqlite3 12, UI contrast improvements, grid stop button, scroll position fix, Linux multi-arch build fixes
 - **Code cleanup** — Removed dead functions (`readFolderFromFilesystem`, `populateCacheFromFilesystem`, `safeSendToWindow`) and unused variables (`hasToolResults`, `useWslProfile`, `changed`, `sessionId`) from `main.js`
+
+## [Unreleased]
 
 ## [0.0.17] - 2026-03-25
 
