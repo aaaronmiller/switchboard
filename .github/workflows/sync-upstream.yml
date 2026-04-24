@@ -123,10 +123,9 @@ jobs:
         if: steps.merge.outputs.mode == 'direct'
         run: python3 -m pip install setuptools
 
-      - name: Install rpm-build (for RPM target)
+      - name: Install rpm-build (optional)
         if: steps.merge.outputs.mode == 'direct'
-        run: sudo apt-get install -y rpm
-
+        run: sudo apt-get install -y rpm 2>/dev/null || echo "rpm-build not available, skipping RPM"
       - name: Install dependencies
         if: steps.merge.outputs.mode == 'direct'
         run: npm ci
@@ -137,13 +136,13 @@ jobs:
 
       - name: Build Linux packages
         if: steps.merge.outputs.mode == 'direct'
-        run: npx electron-builder --linux
+        run: npx electron-builder --linux AppImage deb
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: List build artifacts
         if: steps.merge.outputs.mode == 'direct'
-        run: ls -lh dist/*.AppImage dist/*.deb dist/*.rpm 2>/dev/null || ls -lh dist/
+        run: ls -lh dist/*.AppImage dist/*.deb 2>/dev/null || ls -lh dist/
 
       - name: Create GitHub Release with Linux artifacts
         if: steps.merge.outputs.mode == 'direct'
@@ -153,7 +152,7 @@ jobs:
           TAG="${{ needs.check-upstream.outputs.tag }}"
 
           ARTIFACTS=""
-          for f in dist/*.AppImage dist/*.deb dist/*.rpm; do
+          for f in dist/*.AppImage dist/*.deb; do
             [ -f "$f" ] && ARTIFACTS="$ARTIFACTS $f"
           done
 

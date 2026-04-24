@@ -235,6 +235,44 @@ const windowRegistry = new Map();
 // sessionId → windowId (reverse lookup for routing)
 const sessionWindowMap = new Map();
 
+// --- Safe IPC send helpers ---
+// Send to all registered windows, ignoring disposed frames
+function safeSend(channel, ...args) {
+  for (const [, entry] of windowRegistry) {
+    try {
+      const w = entry.window;
+      if (w && !w.isDestroyed() && w.webContents && !w.webContents.isDestroyed()) {
+        w.webContents.send(channel, ...args);
+      }
+    } catch {
+      // Render frame disposed mid-send — safe to ignore
+    }
+  }
+}
+
+// Send to a specific session's window
+function safeSendToSession(sessionId, channel, ...args) {
+  const windowId = sessionWindowMap.get(sessionId);
+  const entry = windowId != null ? windowRegistry.get(windowId) : null;
+  if (entry) {
+    try {
+      const w = entry.window;
+      if (w && !w.isDestroyed() && w.webContents && !w.webContents.isDestroyed()) {
+        w.webContents.send(channel, ...args);
+        return;
+      }
+    } catch {
+      // Render frame disposed — safe to ignore
+    }
+  }
+  // Fallback: try main window if specific session window not found/destroyed
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+    try {
+      mainWindow.webContents.send(channel, ...args);
+    } catch {}
+  }
+}
+
 // --- Session activity monitoring (hook-based + file-watcher) ---
 // Tracks tool events for ANY session (PTY or headless) to power sidebar sparklines.
 // Events arrive via: (1) HTTP POST /session-event from Claude Code hooks,
