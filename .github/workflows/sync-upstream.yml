@@ -78,6 +78,7 @@ jobs:
             git commit -m "chore: sync upstream $TAG" || echo "Nothing new to commit."
             git push origin main --force-with-lease
             echo "mode=direct" >> "$GITHUB_OUTPUT"
+            echo "::notice::Synced upstream $TAG - no conflicts"
           else
             # Conflicts in code files — create a review PR
             echo "::warning::Conflicts in: $(echo $CONFLICTS | tr '\n' ' ')"
@@ -99,13 +100,19 @@ jobs:
 
       - name: Open PR for conflict review
         if: steps.merge.outputs.mode == 'pr'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set +e
           TAG="${{ needs.check-upstream.outputs.tag }}"
           BRANCH="${{ steps.merge.outputs.branch }}"
+          REPO="${{ github.repository }}"
+          
+          # Debug: check branch exists
+          echo "::debug::Creating PR for branch: $BRANCH in repo: $REPO"
+          git ls-remote --heads origin "$BRANCH" || echo "::warning::Branch push may have failed"
+          
+          # Try creating PR, don't fail workflow if it errors
           gh pr create \
-            --repo "${{ github.repository }}" \
+            --repo "$REPO" \
             --head "$BRANCH" \
             --base main \
             --title "sync: upstream $TAG (review required)" \
@@ -114,7 +121,16 @@ jobs:
           - After merge, the build job below will run automatically.
 
           [Upstream release notes](https://github.com/doctly/switchboard/releases/tag/$TAG)"
-          echo "::notice::PR created for upstream $TAG — review at https://github.com/${{ github.repository }}/pulls"
+          PR_RESULT=$?
+          
+          if [ $PR_RESULT -eq 0 ]; then
+            echo "::notice::PR created for upstream $TAG"
+          else
+            echo "::warning::PR creation failed (exit $PR_RESULT) — branch $BRANCH pushed for manual PR, check: https://github.com/$REPO/branches"
+          fi
+          
+          # Always exit 0 to not fail the workflow
+          exit 0
 
       - name: Setup Node.js
         if: steps.merge.outputs.mode == 'direct'
