@@ -13,6 +13,55 @@ log.transports.console.level = app.isPackaged ? 'info' : 'debug';
 
 try { require('electron-reloader')(module, { watchRenderer: true }); } catch {};
 
+// Guard against "Render frame was disposed" crashes during reload/navigation
+function safeSend(channel, ...args) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+      mainWindow.webContents.send(channel, ...args);
+    }
+  } catch (err) {
+    if (err.message?.includes('disposed')) return; // Suppress render frame disposed errors
+    log.warn('[safeSend] error:', err.message);
+  }
+}
+
+function safeSendToSession(sessionId, channel, ...args) {
+  try {
+    const session = sessionMap.get(sessionId);
+    if (!session?.window || session.window.isDestroyed()) return;
+    session.window.webContents.send(channel, ...args);
+  } catch (err) {
+    if (err.message?.includes('disposed')) return;
+    log.warn('[safeSendToSession] error:', err.message);
+  }
+}
+
+// --- Fork feature: extract session summary from any agent format ---
+function extractSessionSummary(sessionPath) {
+  try {
+    if (!fs.existsSync(sessionPath)) return null;
+    const fd = fs.openSync(sessionPath, 'r');
+    const buffer = Buffer.alloc(8192);
+    const bytesRead = fs.readSync(fd, buffer, 0, 8192, 0);
+    fs.closeSync(fd);
+    if (bytesRead === 0) return null;
+    const content = buffer.toString('utf8', 0, bytesRead);
+    
+    // Claude JSONL format: look for first user message
+    const claudeMatch = content.match(/"role"\s*:\s*"user"[^}]*"content"\s*:\s*"([^"]{1,200})"/);
+    if (claudeMatch) return claudeMatch[1].replace(/\\n/g, ' ').substring(0, 120);
+    
+    // Generic/Codex format: look for human: or user: prefix
+    const genericMatch = content.match(/(?:human|user)[\s:]+([^\n]{1,120})/i);
+    if (genericMatch) return genericMatch[1].trim().substring(0, 120);
+    
+    return 'Untitled session';
+  } catch (err) {
+    log.warn('[extractSessionSummary] error:', err.message);
+    return null;
+  }
+}
+
 // Clean env for child processes — strip Electron internals that cause nested
 // Electron apps (or node-pty inside them) to malfunction.
 const cleanPtyEnv = Object.fromEntries(
@@ -42,9 +91,7 @@ if (app.isPackaged || process.env.FORCE_UPDATER) {
 
   function sendUpdaterEvent(type, data) {
     log.info(`[updater] ${type}`, data || '');
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('updater-event', type, data);
-    }
+    safeSend('updater-event', type, data);
   }
   autoUpdater.on('checking-for-update', () => sendUpdaterEvent('checking'));
   autoUpdater.on('update-available', (info) => sendUpdaterEvent('update-available', info));
