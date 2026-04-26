@@ -100,9 +100,7 @@ if (app.isPackaged || process.env.FORCE_UPDATER) {
   autoUpdater.on('update-downloaded', (info) => sendUpdaterEvent('update-downloaded', info));
   autoUpdater.on('error', (err) => {
     log.error('[updater] Error:', err?.message || String(err));
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('updater-event', 'error', { message: err?.message || String(err) });
-    }
+    safeSend('updater-event', 'error', { message: err?.message || String(err) });
   });
 }
 const {
@@ -431,9 +429,7 @@ ipcMain.handle('watch-file', (_event, filePath) => {
       if (eventType !== 'change') return;
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('file-changed', resolved);
-        }
+        safeSend('file-changed', resolved);
       }, 300);
     });
     fileWatchers.set(resolved, watcher);
@@ -971,18 +967,9 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
 
     // If TUI is in alternate screen mode, send escape to switch into it
     if (session.altScreen && !session.isPlainTerminal) {
-      mainWindow.webContents.send('terminal-data', sessionId, '\x1b[?1049h');
-    }
-
-    // Send buffered output for reattach
-    for (const chunk of session.outputBuffer) {
-      mainWindow.webContents.send('terminal-data', sessionId, chunk);
-    }
-
-    if (!session.isPlainTerminal) {
-      // Hide cursor after buffer replay — the live PTY stream or resize nudge
-      // will re-show it at the correct position, avoiding a stale cursor artifact
-      mainWindow.webContents.send('terminal-data', sessionId, '\x1b[?25l');
+safeSendToSession(sessionId, 'terminal-data', '\x1b[?1049h');
+      safeSendToSession(sessionId, 'terminal-data', chunk);
+      safeSendToSession(sessionId, 'terminal-data', '\x1b[?25l');
     }
 
     return { ok: true, reattached: true, mcpActive: !!session.mcpServer };
@@ -1191,16 +1178,12 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
             session._cliBusy = true;
             session._oscIdle = false;
             log.debug(`[OSC 0] session=${currentId} → BUSY`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('cli-busy-state', currentId, true);
-            }
+            safeSend('cli-busy-state', currentId, true);
           } else if (isIdle && session._cliBusy) {
             session._cliBusy = false;
             session._oscIdle = true;
             log.debug(`[OSC 0] session=${currentId} → IDLE`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('cli-busy-state', currentId, false);
-            }
+            safeSend('cli-busy-state', currentId, false);
           }
         }
       }
@@ -1217,16 +1200,12 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
             session._cliBusy = true;
             session._oscIdle = false;
             log.debug(`[OSC 9;4] session=${currentId} → BUSY`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('cli-busy-state', currentId, true);
-            }
+            safeSend('cli-busy-state', currentId, true);
           }
         } else {
           // Regular notification (attention, permission, etc.)
           log.info(`[OSC 9] session=${currentId} message="${payload}"`);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('terminal-notification', currentId, payload);
-          }
+          safeSend('terminal-notification', currentId, payload);
         }
       }
     }
@@ -1258,7 +1237,7 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
     }
 
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('terminal-data', currentId, data);
+      safeSendToSession(currentId, 'terminal-data', data);
     }
   });
 
@@ -1270,14 +1249,9 @@ ipcMain.handle('open-terminal', async (_event, sessionId, projectPath, isNew, se
     session.mcpServer = null;
 
     const realId = session.realSessionId || sessionId;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('process-exited', realId, exitCode);
-      // If a fork/plan-accept transition re-keyed this session under realId
-      // but the PTY exited before transition detection ran, also notify the
-      // renderer for the original sessionId so it doesn't stay stuck as "Running".
-      if (realId !== sessionId && activeSessions.has(sessionId)) {
-        mainWindow.webContents.send('process-exited', sessionId, exitCode);
-      }
+    safeSend('process-exited', realId, exitCode);
+    if (realId !== sessionId && activeSessions.has(sessionId)) {
+      safeSend('process-exited', sessionId, exitCode);
     }
     activeSessions.delete(realId);
     // Clean up the original key too in case transition detection hasn't run yet
