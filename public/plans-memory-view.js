@@ -184,11 +184,14 @@ function buildMemoryItem(file) {
   const row = document.createElement('div');
   row.className = 'session-row';
 
-  // Brain icon (same position as session pin)
-  const brain = document.createElement('span');
-  brain.className = 'memory-brain-icon';
-  brain.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/></svg>';
-  row.appendChild(brain);
+  // Icon: schedule clock for schedule-*.md files, brain for everything else
+  const isSchedule = file.filename.startsWith('schedule-');
+  const icon = document.createElement('span');
+  icon.className = isSchedule ? 'memory-schedule-icon' : 'memory-brain-icon';
+  icon.innerHTML = isSchedule
+    ? ICONS.schedule(15)
+    : '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/></svg>';
+  row.appendChild(icon);
 
   const info = document.createElement('div');
   info.className = 'session-info';
@@ -209,6 +212,38 @@ function buildMemoryItem(file) {
   info.appendChild(pathEl);
   info.appendChild(metaEl);
   row.appendChild(info);
+
+  // Play button for schedule files
+  if (isSchedule) {
+    const playBtn = document.createElement('button');
+    playBtn.className = 'schedule-play-btn';
+    playBtn.title = 'Run now';
+    playBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 384 512" fill="currentColor" stroke="currentColor" stroke-width="0"><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80L0 432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"></path></svg>';
+    const playIcon = '<svg width="12" height="12" viewBox="0 0 384 512" fill="currentColor" stroke="currentColor" stroke-width="0"><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80L0 432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"></path></svg>';
+    const spinnerIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>';
+    const checkIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    playBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      playBtn.classList.add('running');
+      playBtn.innerHTML = spinnerIcon;
+      playBtn.title = 'Running...';
+      const result = await window.api.runScheduleNow(file.filePath);
+      playBtn.classList.remove('running');
+      playBtn.classList.add('done');
+      playBtn.innerHTML = checkIcon;
+      playBtn.title = 'Launched!';
+      setTimeout(() => {
+        playBtn.classList.remove('done');
+        playBtn.innerHTML = playIcon;
+        playBtn.title = 'Run now';
+      }, 2000);
+      if (result && !result.ok) {
+        console.error('Schedule run failed:', result.error);
+      }
+    });
+    row.appendChild(playBtn);
+  }
+
   item.appendChild(row);
 
   item.addEventListener('click', () => openMemory(file));

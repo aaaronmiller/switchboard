@@ -740,6 +740,93 @@ body { display: flex; flex-direction: column; }
   display: none;
 }
 
+/* Worktree nested groups */
+.worktree-group {
+  margin-left: 12px;
+  border-left: 1px solid rgba(128, 136, 255, 0.15);
+  margin-top: 2px;
+  margin-bottom: 2px;
+}
+
+.worktree-header {
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #9898b0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+  transition: all 0.15s;
+}
+
+.worktree-header:hover {
+  color: #c0c0d8;
+}
+
+.worktree-branch-icon {
+  color: #5ec46a;
+  display: flex;
+  align-items: center;
+  opacity: 0.7;
+}
+
+.worktree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-new-btn,
+.worktree-hide-btn {
+  width: 16px;
+  height: 16px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  background: transparent;
+  border: none;
+  color: #808098;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 4px;
+}
+
+.worktree-new-btn {
+  border: 1px solid #555570;
+}
+
+.worktree-header:hover .worktree-new-btn,
+.worktree-header:hover .worktree-hide-btn {
+  opacity: 0.7;
+}
+
+.worktree-new-btn:hover {
+  opacity: 1 !important;
+  background: rgba(100,220,120,0.1);
+  color: #5ec46a;
+}
+
+.worktree-hide-btn:hover {
+  opacity: 1 !important;
+  background: rgba(255,100,100,0.1);
+  color: #e06060;
+}
+
+.worktree-sessions {
+  padding: 0 0 2px;
+}
+
+.worktree-header.collapsed + .worktree-sessions,
+.worktree-header.collapsed + .project-sessions {
+  display: none;
+}
+
 .sessions-more-toggle {
   padding: 4px 10px;
   margin: 4px 12px 10px 40px;
@@ -2545,6 +2632,8 @@ body { display: flex; flex-direction: column; }
 .jsonl-text pre { background: rgba(0,0,0,0.3); border-radius: 4px; padding: 8px 10px; overflow-x: auto; font-size: 12px; line-height: 1.4; }
 .jsonl-text code { font-family: 'SF Mono', 'Fira Code', Menlo, monospace; font-size: 12px; }
 .jsonl-text :not(pre) > code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; color: #c8b0e0; }
+.jsonl-text a { color: #6cb6ff; }
+.jsonl-text a:hover { color: #8ccbff; }
 
 .jsonl-code-block {
   background: rgba(0,0,0,0.3);
@@ -2602,22 +2691,25 @@ body { display: flex; flex-direction: column; }
 
 .jsonl-tool-name {
   font-weight: 600;
-  font-size: 12px;
+  font-size: 11px;
   flex-shrink: 0;
   color: #80c0e0;
 }
 
 .jsonl-tool-summary {
   color: #909098;
-  font-size: 12px;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .jsonl-tool-summary code {
   font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
-  font-size: 12px;
+  font-size: 11px;
   color: #909098;
+  background: rgba(255,255,255,0.04);
+  padding: 1px 5px;
+  border-radius: 3px;
 }
 
 .jsonl-tool-detail {
@@ -2626,9 +2718,9 @@ body { display: flex; flex-direction: column; }
 }
 
 .jsonl-tool-content {
-  margin-left: 20px;
-  border-left: 1px solid rgba(255,255,255,0.06);
-  padding-left: 10px;
+  margin-left: 6px;
+  border-left: 1.5px solid rgba(255,255,255,0.15);
+  padding-left: 14px;
   margin-top: 1px;
   margin-bottom: 2px;
 }
@@ -2886,6 +2978,66 @@ body { display: flex; flex-direction: column; }
   color: #8888a8;
 }
 
+.memory-schedule-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  margin-top: 5px;
+  color: #e0a030;
+}
+
+.schedule-play-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid rgba(100,220,120,0.3);
+  color: #5ec46a;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 0;
+  opacity: 0;
+  transition: all 0.15s;
+  margin-left: auto;
+  align-self: center;
+}
+
+.memory-item:hover .schedule-play-btn {
+  opacity: 0.7;
+}
+
+.schedule-play-btn:hover {
+  opacity: 1 !important;
+  background: rgba(100,220,120,0.1);
+  color: #5ec46a;
+}
+
+.schedule-play-btn.running {
+  opacity: 1 !important;
+  color: #e0a030;
+  border-color: rgba(224,160,48,0.3);
+}
+
+.schedule-play-btn.running svg {
+  animation: spin-schedule 1s linear infinite;
+}
+
+.schedule-play-btn.done {
+  opacity: 1 !important;
+  color: #5ec46a;
+  border-color: rgba(100,220,120,0.4);
+  background: rgba(100,220,120,0.1);
+}
+
+@keyframes spin-schedule {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .memory-file-count {
   font-size: 10px;
   color: #7a7a90;
@@ -3116,6 +3268,38 @@ body { display: flex; flex-direction: column; }
   background: rgba(120,130,255,0.1);
   border-color: rgba(120,130,255,0.25);
   color: #8088ff;
+}
+
+/* Project header schedule button */
+.project-schedule-btn {
+  background: transparent;
+  border: none;
+  color: #7a7a90;
+  font-size: 16px;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 0;
+  transition: all 0.15s;
+  opacity: 0.7;
+}
+
+.project-schedule-btn svg {
+  display: block;
+}
+
+.project-header:hover .project-schedule-btn {
+  opacity: 1;
+}
+
+.project-schedule-btn:hover {
+  background: rgba(255,180,50,0.1);
+  color: #e0a030;
 }
 
 /* Project header gear button */

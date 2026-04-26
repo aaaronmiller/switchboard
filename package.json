@@ -1,6 +1,6 @@
 {
   "name": "switchboard",
-  "version": "0.0.29",
+  "version": "0.0.25",
   "private": true,
   "description": "A desktop app for browsing, searching, and managing CLI coding sessions",
   "author": "Doctly <support@doctly.ai>",
@@ -16,9 +16,6 @@
     "build:mac:arm64": "electron-builder --mac --arm64 2>/dev/null; true",
     "build:win": "npm run bundle:codemirror && electron-builder --win",
     "build:linux": "npm run bundle:codemirror && electron-builder --linux",
-    "install:linux": "bash scripts/install-linux.sh",
-    "install:linux:binary": "bash scripts/install-linux.sh --binary dist/linux-unpacked/switchboard",
-    "uninstall:linux": "bash scripts/install-linux.sh --uninstall",
     "release": "npm run bundle:codemirror && electron-builder --publish always",
     "postinstall": "node scripts/postinstall.js"
   },
@@ -26,6 +23,7 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "better-sqlite3": "^12.0.0",
     "electron-log": "^5.3.0",
@@ -44,14 +42,12 @@
     "@codemirror/state": "^6.5.4",
     "@codemirror/view": "^6.39.16",
     "@ddietr/codemirror-themes": "^1.5.2",
-    "@eslint/js": "^10.0.1",
     "@napi-rs/canvas": "^0.1.62",
     "codemirror": "^6.0.2",
     "electron": "^41.0.0",
     "electron-builder": "^26.0.0",
     "electron-reloader": "^1.2.3",
     "esbuild": "^0.27.3",
-    "eslint": "^10.1.0",
     "png2icons": "^2.0.1"
   },
   "build": {
@@ -59,11 +55,8 @@
     "productName": "Switchboard",
     "files": [
       "*.js",
-      "*.py",
-      "switchboard-tui",
       "workers/**/*",
       "public/**/*",
-      "scripts/**/*",
       "node_modules/**/*"
     ],
     "asarUnpack": [
@@ -72,7 +65,7 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "aaaronmiller",
+      "owner": "doctly",
       "repo": "switchboard"
     },
     "mac": {
@@ -111,36 +104,10 @@
     },
     "linux": {
       "target": [
-        {
-          "target": "AppImage",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "deb",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "rpm",
-          "arch": [
-            "x64"
-          ]
-        }
+        "AppImage",
+        "deb"
       ],
-      "category": "Development",
-      "icon": "build/icon.png",
-      "desktop": {
-        "entry": {
-          "Comment": "Browse, search, and manage CLI coding sessions",
-          "Keywords": "claude;ai;terminal;sessions;coding;",
-          "StartupWMClass": "Switchboard"
-        }
-      }
+      "category": "Development"
     },
     "dmg": {
       "background": "build/dmg-background.png",
