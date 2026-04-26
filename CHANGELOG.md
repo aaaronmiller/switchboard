@@ -56,6 +56,9 @@ All notable changes to Switchboard are documented in this file.
 - **Upstream merge** — Integrated 8 upstream commits: Electron 33→41, xterm.js 6.0, better-sqlite3 12, UI contrast improvements, grid stop button, scroll position fix, Linux multi-arch build fixes
 - **Code cleanup** — Removed dead functions (`readFolderFromFilesystem`, `populateCacheFromFilesystem`, `safeSendToWindow`) and unused variables (`hasToolResults`, `useWslProfile`, `changed`, `sessionId`) from `main.js`
 
+### Changed
+- **CI workflow fixes** — build.yml arch support (linux x64/arm64), rpm install, CSC env guards; sync-upstream.yml restored with robust error handling and PR creation
+
 ## [Unreleased]
 
 ## [0.0.17] - 2026-03-25
