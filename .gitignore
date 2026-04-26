@@ -18,3 +18,4 @@ squashfs-root/
 # Local agent/tooling state
 .remember/
 .claude/
+# trigger
