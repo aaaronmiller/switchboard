@@ -62,7 +62,7 @@ jobs:
         run: |
           PLATFORM="${{ matrix.platform }}"
           [ -n "${{ matrix.arch }}" ] && PLATFORM="$PLATFORM --${{ matrix.arch }}"
-          npx electron-builder $PLATFORM --publish always || true
+          npx electron-builder $PLATFORM --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
