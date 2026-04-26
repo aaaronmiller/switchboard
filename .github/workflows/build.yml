@@ -59,14 +59,20 @@ jobs:
       - name: Bundle CodeMirror
         run: npm run bundle:codemirror
 
-      - name: Build (release)
+- name: Build (release)
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          ARCH_FLAG=""
-          if [ "${{ matrix.platform }}" != "mac" ] && [ -n "${{ matrix.arch }}" ]; then
-            ARCH_FLAG="--${{ matrix.arch }}"
-          fi
-          npx electron-builder --${{ matrix.platform }}$ARCH_FLAG --publish always
+          npx electron-builder --${{ matrix.platform }}${{ matrix.arch && format(' --{0}', matrix.arch) || '' }} --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.CSC_LINK != '' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.CSC_KEY_PASSWORD != '' && secrets.CSC_KEY_PASSWORD || '' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'mac' && secrets.CSC_LINK != '' }}
+
+      - name: Build (artifacts only)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        run: |
+          npx electron-builder --${{ matrix.platform }}${{ matrix.arch && format(' --{0}', matrix.arch) || '' }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ matrix.platform == 'mac' && secrets.CSC_LINK != '' && secrets.CSC_LINK || '' }}
