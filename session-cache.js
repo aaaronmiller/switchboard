@@ -19,6 +19,19 @@ function init(ctx) {
   activeSessions = ctx.activeSessions;
   getMainWindow = ctx.getMainWindow;
   log = ctx.log;
+  
+  // Safe send wrapper to prevent white screen crashes
+  function safeSend(channel, ...args) {
+    try {
+      const mw = getMainWindow();
+      if (mw && !mw.isDestroyed() && mw.webContents) {
+        mw.webContents.send(channel, ...args);
+      }
+    } catch (err) {
+      if (err.message?.includes('disposed')) return;
+      log?.warn('[safeSend] error:', err.message);
+    }
+  }
   // DB functions
   deleteCachedFolder = ctx.db.deleteCachedFolder;
   getCachedByFolder = ctx.db.getCachedByFolder;
@@ -251,7 +264,7 @@ function buildProjectsFromCache(showArchived) {
 function notifyRendererProjectsChanged() {
   const mainWindow = getMainWindow();
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('projects-changed');
+    safeSend('projects-changed');
   }
 }
 
@@ -259,7 +272,7 @@ function sendStatus(text, type) {
   if (text) log.info(`[status] (${type || 'info'}) ${text}`);
   const mw = getMainWindow();
   if (mw && !mw.isDestroyed()) {
-    mw.webContents.send('status-update', text, type || 'info');
+    safeSend('status-update', text, type || 'info');
   }
 }
 
