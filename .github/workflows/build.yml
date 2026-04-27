@@ -18,14 +18,18 @@ jobs:
         include:
           - os: macos-14
             platform: mac
+            ext: dmg
           - os: windows-latest
             platform: win
+            ext: exe
           - os: ubuntu-24.04
             platform: linux
             arch: x64
+            ext: AppImage
           - os: ubuntu-24.04-arm
             platform: linux
             arch: arm64
+            ext: AppImage
 
     runs-on: ${{ matrix.os }}
 
@@ -54,29 +58,37 @@ jobs:
       - name: Bundle CodeMirror
         run: npm run bundle:codemirror
 
-      - name: Build
-        run: |
-          if [[ "${{ matrix.platform }}" == "mac" ]]; then
-            npx electron-builder --mac --publish always
-          elif [[ "${{ matrix.platform }}" == "win" ]]; then
-            npx electron-builder --win --publish always
-          elif [[ "${{ matrix.arch }}" == "x64" ]]; then
-            npx electron-builder --linux --x64 --publish always
-          else
-            npx electron-builder --linux --arm64 --publish always
-          fi
+      - name: Build macOS
+        if: matrix.platform == 'mac'
+        run: npx electron-builder --mac --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
+      - name: Build Windows
+        if: matrix.platform == 'win'
+        run: npx electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Linux x64
+        if: matrix.arch == 'x64'
+        run: npx electron-builder --linux --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Linux ARM64
+        if: matrix.arch == 'arm64'
+        run: npx electron-builder --linux --arm64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.platform }}-${{ matrix.arch }}
+          name: dist-${{ matrix.platform }}-${{ matrix.arch || 'default' }}
           path: |
-            dist/*.dmg
+            dist/*.${{ matrix.ext }}
             dist/*.zip
-            dist/*.exe
-            dist/*.AppImage
             dist/*.deb
           if-no-files-found: ignore
