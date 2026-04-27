@@ -20,8 +20,6 @@ jobs:
             platform: mac
           - os: windows-latest
             platform: win
-          # Linux is split per-arch to avoid electron-builder bundling native
-          # modules from the wrong architecture
           - os: ubuntu-24.04
             platform: linux
             arch: x64
@@ -58,21 +56,21 @@ jobs:
 
       - name: Build (release)
         if: startsWith(github.ref, 'refs/tags/v')
-        run: npx electron-builder --${{ matrix.platform }}${{ matrix.arch && format(' --{0}', matrix.arch) || '' }} --publish always
+        run: npx electron-builder --${{ matrix.platform }} ${{ matrix.arch != '' && format('--{0}', matrix.arch) || '' }} --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Build (artifacts only)
         if: "!startsWith(github.ref, 'refs/tags/v')"
-        run: npx electron-builder --${{ matrix.platform }}${{ matrix.arch && format(' --{0}', matrix.arch) || '' }} --publish never
+        run: npx electron-builder --${{ matrix.platform }} ${{ matrix.arch != '' && format('--{0}', matrix.arch) || '' }} --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.platform }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
+          name: dist-${{ matrix.platform }}-${{ matrix.arch || 'default' }}
           path: |
             dist/*.dmg
             dist/*.zip
