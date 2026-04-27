@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: write
-  releases: write
 
 jobs:
   build:
@@ -20,6 +19,8 @@ jobs:
             platform: mac
           - os: windows-latest
             platform: win
+          # Linux is split per-arch to avoid electron-builder bundling native
+          # modules from the wrong architecture
           - os: ubuntu-24.04
             platform: linux
             arch: x64
@@ -41,10 +42,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install setuptools
+      - name: Install setuptools (node-gyp distutils fix)
         run: python -m pip install setuptools
 
-      - name: Install rpm
+      - name: Install rpm (for RPM target on Linux x64)
         if: matrix.platform == 'linux' && matrix.arch == 'x64'
         run: sudo apt-get update && sudo apt-get install -y rpm
 
@@ -54,17 +55,27 @@ jobs:
       - name: Bundle CodeMirror
         run: npm run bundle:codemirror
 
-      - name: Build
-        run: |
-          if [ "${{ matrix.platform }}" = "mac" ]; then
-            npx electron-builder --mac --publish always
-          elif [ "${{ matrix.platform }}" = "win" ]; then
-            npx electron-builder --win --publish always
-          elif [ "${{ matrix.arch }}" = "x64" ]; then
-            npx electron-builder --linux --x64 --publish always
-          else
-            npx electron-builder --linux --arm64 --publish always
-          fi
+      - name: Build (release)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: npx electron-builder --${{ matrix.platform }}${{ matrix.arch && format(' --{0}', matrix.arch) || '' }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Build (artifacts only)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        run: npx electron-builder --${{ matrix.platform }}${{ matrix.arch && format(' --{0}', matrix.arch) || '' }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.exe
+            dist/*.AppImage
+            dist/*.deb
+          if-no-files-found: ignore
