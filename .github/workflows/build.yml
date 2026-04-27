@@ -50,7 +50,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${{ github.ref_name }}"
+          echo "Creating release for tag: $TAG"
           gh release create "$TAG" \
             --title "Switchboard $TAG" \
             --generate-notes \
