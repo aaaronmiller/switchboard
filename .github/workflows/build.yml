@@ -24,7 +24,7 @@ jobs:
 
       - name: Build
         run: |
-          npx electron-builder --win --mac --linux
+          npx electron-builder --linux
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
