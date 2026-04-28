@@ -252,8 +252,19 @@ async function handleOpenDiff(entry, rpcId, args, log) {
   });
 
   // Send to renderer
+  function safeSend(channel, ...args) {
+    try {
+      if (entry.mainWindow && !entry.mainWindow.isDestroyed() && entry.mainWindow.webContents) {
+        entry.mainWindow.webContents.send(channel, ...args);
+      }
+    } catch (err) {
+      if (err.message?.includes('disposed')) return;
+      log?.warn('[mcp safeSend] error:', err.message);
+    }
+  }
+  
   if (entry.mainWindow && !entry.mainWindow.isDestroyed()) {
-    entry.mainWindow.webContents.send('mcp-open-diff', entry.sessionId, diffId, {
+    safeSend('mcp-open-diff', entry.sessionId, diffId, {
       oldFilePath: old_file_path,
       oldContent,
       newContent: new_file_contents,
@@ -304,7 +315,7 @@ async function handleOpenFile(entry, rpcId, args, log) {
   }
 
   if (entry.mainWindow && !entry.mainWindow.isDestroyed()) {
-    entry.mainWindow.webContents.send('mcp-open-file', entry.sessionId, {
+    safeSend('mcp-open-file', entry.sessionId, {
       filePath,
       content,
       preview: preview ?? false,
@@ -329,9 +340,7 @@ async function handleCloseTab(entry, rpcId, args, log) {
       pending.resolve({ action: 'accept' });
 
       // Notify renderer to close the tab
-      if (entry.mainWindow && !entry.mainWindow.isDestroyed()) {
-        entry.mainWindow.webContents.send('mcp-close-tab', entry.sessionId, diffId);
-      }
+      safeSend('mcp-close-tab', entry.sessionId, diffId);
       break;
     }
   }
@@ -350,9 +359,7 @@ async function handleCloseAllDiffTabs(entry, rpcId, log) {
   }
   entry.pendingDiffs.clear();
 
-  if (entry.mainWindow && !entry.mainWindow.isDestroyed()) {
-    entry.mainWindow.webContents.send('mcp-close-all-diffs', entry.sessionId);
-  }
+  safeSend('mcp-close-all-diffs', entry.sessionId);
 
   sendResult(entry, rpcId, {
     content: [{ type: 'text', text: 'ok' }],

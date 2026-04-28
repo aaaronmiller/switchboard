@@ -2,12 +2,15 @@
 
 All notable changes to Switchboard are documented in this file.
 
-## [Unreleased]
+## [0.0.29] - 2026-04-24
 
 ### Added
 - **Card color coding (F5)** — Session cards in the sidebar now show color-coded left borders based on activity recency (green = <5 min with pulse animation, yellow = <1 hour, grey = stale) and git status (blue ↑ = ahead, green = current, orange ↓ = behind/diverged, purple = dirty, grey = unknown). Git status takes visual priority over activity coloring.
 - **Sort options for session sidebar** — Dropdown selector below the time filter bar with 7 sort modes: Newest first, Oldest first, Largest first, Smallest first, Most messages first, By project, By git status. Sort applies after time filtering but before priority grouping (pinned/running sessions still surface to top). Active sort mode persists in localStorage and applies to all views (per-agent, pinned, active).
 - **Time range filter bar** — Sidebar now has a filter bar below agent selectors with preset buttons: 3d, 7d, 1m, 3m, All, plus a custom days input (▢) for arbitrary ranges. Filter persists in localStorage and applies to all views (per-agent, pinned, active)
+
+### Fixed
+- **Critical white screen crash** — Added missing `safeSend` and `safeSendToSession` functions in main.js that were accidentally removed during module refactoring. These functions handle IPC communication safely by catching disposed render frame errors, preventing renderer crashes (Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>)
 - **Per-agent sidebar views (F1)** — Non-Claude agent sessions (Codex, Qwen, Gemini, Kimi, Hermes, etc.) now render in the sidebar with full metadata: accurate message/turn counts from parsed session files, start/end timestamps, file size, running/completed status, project path, and session summary
 - **Project path labels on session cards** — Each session card now shows a truncated project/folder path label below the summary in monospace muted text, making it easy to identify which project a session belongs to
 - **Agent badge wiring for non-Claude sessions** — Agent badges now use `session.agent` directly from IPC data (not just sessionAgentMap), ensuring non-Claude sessions loaded via `get-agent-sessions` display their colored agent badge correctly
@@ -52,6 +55,11 @@ All notable changes to Switchboard are documented in this file.
 ### Changed
 - **Upstream merge** — Integrated 8 upstream commits: Electron 33→41, xterm.js 6.0, better-sqlite3 12, UI contrast improvements, grid stop button, scroll position fix, Linux multi-arch build fixes
 - **Code cleanup** — Removed dead functions (`readFolderFromFilesystem`, `populateCacheFromFilesystem`, `safeSendToWindow`) and unused variables (`hasToolResults`, `useWslProfile`, `changed`, `sessionId`) from `main.js`
+
+### Changed
+- **CI workflow fixes** — build.yml arch support (linux x64/arm64), rpm install, CSC env guards; sync-upstream.yml restored with robust error handling and PR creation
+
+## [Unreleased]
 
 ## [0.0.17] - 2026-03-25
 

@@ -19,6 +19,19 @@ function init(ctx) {
   activeSessions = ctx.activeSessions;
   getMainWindow = ctx.getMainWindow;
   log = ctx.log;
+  
+  // Safe send wrapper to prevent white screen crashes
+  function safeSend(channel, ...args) {
+    try {
+      const mw = getMainWindow();
+      if (mw && !mw.isDestroyed() && mw.webContents) {
+        mw.webContents.send(channel, ...args);
+      }
+    } catch (err) {
+      if (err.message?.includes('disposed')) return;
+      log?.warn('[safeSend] error:', err.message);
+    }
+  }
   // DB functions
   deleteCachedFolder = ctx.db.deleteCachedFolder;
   getCachedByFolder = ctx.db.getCachedByFolder;
@@ -170,12 +183,12 @@ function buildProjectsFromCache(showArchived) {
   const global = getSetting('global') || {};
   const hiddenProjects = new Set(global.hiddenProjects || []);
 
-  // Group by resolved projectPath (merges worktree folders into parent project)
+  // Group by folder (worktree sessions appear as separate projects)
   const projectMap = new Map();
   for (const row of cachedRows) {
     if (hiddenProjects.has(row.projectPath)) continue;
-    if (!projectMap.has(row.projectPath)) {
-      projectMap.set(row.projectPath, { folder: row.folder, projectPath: row.projectPath, sessions: [] });
+    if (!projectMap.has(row.folder)) {
+      projectMap.set(row.folder, { folder: row.folder, projectPath: row.projectPath, sessions: [] });
     }
     const meta = metaMap.get(row.sessionId);
     const s = {
@@ -192,7 +205,7 @@ function buildProjectsFromCache(showArchived) {
       archived: meta?.archived || 0,
     };
     if (!showArchived && s.archived) continue;
-    projectMap.get(row.projectPath).sessions.push(s);
+    projectMap.get(row.folder).sessions.push(s);
   }
 
   // Include empty project directories (no sessions yet)
@@ -200,9 +213,11 @@ function buildProjectsFromCache(showArchived) {
     const dirs = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true })
       .filter(d => d.isDirectory() && d.name !== '.git');
     for (const d of dirs) {
-      const projectPath = deriveProjectPath(path.join(PROJECTS_DIR, d.name), d.name);
-      if (projectPath && !hiddenProjects.has(projectPath) && !projectMap.has(projectPath)) {
-        projectMap.set(projectPath, { folder: d.name, projectPath, sessions: [] });
+      if (!projectMap.has(d.name)) {
+        const projectPath = deriveProjectPath(path.join(PROJECTS_DIR, d.name), d.name);
+        if (projectPath && !hiddenProjects.has(projectPath)) {
+          projectMap.set(d.name, { folder: d.name, projectPath, sessions: [] });
+        }
       }
     }
   } catch {}
@@ -210,12 +225,12 @@ function buildProjectsFromCache(showArchived) {
   // Inject active plain terminal sessions so they participate in sorting
   for (const [sessionId, session] of activeSessions) {
     if (session.exited || !session.isPlainTerminal) continue;
+    const folder = session.projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
     if (hiddenProjects.has(session.projectPath)) continue;
-    if (!projectMap.has(session.projectPath)) {
-      const folder = session.projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
-      projectMap.set(session.projectPath, { folder, projectPath: session.projectPath, sessions: [] });
+    if (!projectMap.has(folder)) {
+      projectMap.set(folder, { folder, projectPath: session.projectPath, sessions: [] });
     }
-    const proj = projectMap.get(session.projectPath);
+    const proj = projectMap.get(folder);
     if (!proj.sessions.some(s => s.sessionId === sessionId)) {
       proj.sessions.push({
         sessionId, summary: 'Terminal', firstPrompt: '', projectPath: session.projectPath,
@@ -249,7 +264,7 @@ function buildProjectsFromCache(showArchived) {
 function notifyRendererProjectsChanged() {
   const mainWindow = getMainWindow();
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('projects-changed');
+    safeSend('projects-changed');
   }
 }
 
@@ -257,7 +272,7 @@ function sendStatus(text, type) {
   if (text) log.info(`[status] (${type || 'info'}) ${text}`);
   const mw = getMainWindow();
   if (mw && !mw.isDestroyed()) {
-    mw.webContents.send('status-update', text, type || 'info');
+    safeSend('status-update', text, type || 'info');
   }
 }
 

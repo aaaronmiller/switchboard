@@ -37,6 +37,10 @@ if $UNINSTALL; then
         rm -f "${HOME}/.local/share/icons/hicolor/${size}x${size}/apps/${APP_ID}.png"
     done
     rm -f "${HOME}/.local/share/icons/hicolor/scalable/apps/${APP_ID}.svg" 2>/dev/null || true
+    # Remove CLI TUI
+    rm -f "${HOME}/.local/share/switchboard/switchboard-tui.py" 2>/dev/null || true
+    rm -f "${HOME}/.local/bin/switchboard-tui" 2>/dev/null || true
+    rmdir "${HOME}/.local/share/switchboard" 2>/dev/null || true
     command -v update-desktop-database &>/dev/null && update-desktop-database "${HOME}/.local/share/applications" 2>/dev/null || true
     command -v gtk-update-icon-cache &>/dev/null && gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
     echo "Done. (Binary at ~/.local/bin/${APP_NAME} not removed — do that manually if needed.)"
@@ -114,6 +118,21 @@ for size in 16 24 32 48 64 96 128 256 512; do
     resize_cmd "$SOURCE_ICON" "$size" "${dir}/${APP_ID}.png"
 done
 echo "Icons installed to ~/.local/share/icons/hicolor/"
+
+# ── CLI TUI installation ──────────────────────────────────────────────────────
+TUI_DIR="${HOME}/.local/share/switchboard"
+TUI_BIN_DIR="${HOME}/.local/bin"
+mkdir -p "$TUI_DIR" "$TUI_BIN_DIR"
+
+if [[ -f "${PROJECT_ROOT}/switchboard-tui.py" ]]; then
+    cp "${PROJECT_ROOT}/switchboard-tui.py" "${TUI_DIR}/switchboard-tui.py"
+    cp "${PROJECT_ROOT}/switchboard-tui" "${TUI_BIN_DIR}/switchboard-tui"
+    chmod +x "${TUI_DIR}/switchboard-tui.py" "${TUI_BIN_DIR}/switchboard-tui"
+    echo "CLI TUI installed → ${TUI_BIN_DIR}/switchboard-tui"
+    echo "  Run 'switchboard-tui' to launch the AI CLI multiplexer"
+else
+    echo "Warning: switchboard-tui.py not found — skipping CLI TUI install"
+fi
 
 # ── .desktop file ─────────────────────────────────────────────────────────────
 DESKTOP_DIR="${HOME}/.local/share/applications"

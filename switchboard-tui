@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Switchboard TUI Launcher - Shell wrapper for the Python CLI multiplexer
+# Usage: switchboard-tui [options]
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_SCRIPT="$SCRIPT_DIR/switchboard-tui.py"
+
+# If not found locally, try the project directory
+if [[ ! -f "$PYTHON_SCRIPT" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../share/switchboard" 2>/dev/null && pwd)"
+    PYTHON_SCRIPT="$SCRIPT_DIR/switchboard-tui.py"
+fi
+
+if [[ ! -f "$PYTHON_SCRIPT" ]]; then
+    echo "❌ Error: switchboard-tui.py not found"
+    echo "   Install from: https://github.com/aaaronmiller/switchboard"
+    exit 1
+fi
+
+if ! command -v python3 &> /dev/null; then
+    echo "❌ Error: python3 is required"
+    exit 1
+fi
+
+exec python3 "$PYTHON_SCRIPT" "$@"

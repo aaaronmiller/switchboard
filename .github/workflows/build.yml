@@ -2,52 +2,27 @@ name: Build & Release
 
 on:
   push:
-    tags: ['v*']
-  pull_request:
-    branches: [main]
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            platform: mac
-          - os: windows-latest
-            platform: win
-          # Linux is split per-arch to avoid electron-builder bundling native
-          # modules from the wrong architecture. When multiple targets (AppImage
-          # + deb) are built for multiple arches in one invocation, the native
-          # module rebuild only runs between arch switches for the first target
-          # type — the second target type reuses whatever was last compiled,
-          # which can be the wrong arch. See #18.
-          - os: ubuntu-24.04
-            platform: linux
-            arch: x64
-          - os: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-
-    runs-on: ${{ matrix.os }}
-
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install setuptools (node-gyp distutils fix)
-        run: python -m pip install setuptools
 
       - name: Install dependencies
         run: npm ci
@@ -55,33 +30,19 @@ jobs:
       - name: Bundle CodeMirror
         run: npm run bundle:codemirror
 
-      - name: Build (release)
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: npx electron-builder --${{ matrix.platform }} --publish always
+      - name: Build
+        run: |
+          npx electron-builder --linux
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.CSC_KEY_PASSWORD || '' }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'mac' }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
-      - name: Build (artifacts only)
-        if: "!startsWith(github.ref, 'refs/tags/v')"
-        run: npx electron-builder --${{ matrix.platform }} --publish never
-        env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
+      - name: List build artifacts
+        run: ls -lh dist/
+
       - name: Upload artifacts
-        if: "!startsWith(github.ref, 'refs/tags/v')"
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.platform }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
-          path: |
-            dist/*.dmg
-            dist/*.zip
-            dist/*.exe
-            dist/*.AppImage
-            dist/*.deb
-          if-no-files-found: ignore
+          name: dist-linux
+          path: dist/*
+          retention-days: 7

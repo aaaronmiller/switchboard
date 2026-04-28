@@ -74,6 +74,7 @@
     const preLaunchValue = fieldValue('preLaunchCmd', '');
     const addDirsValue = fieldValue('addDirs', '');
     const visCountValue = fieldValue('visibleSessionCount', 10);
+    const sidebarWidthValue = fieldValue('sidebarWidth', 340);
     const maxAgeValue = fieldValue('sessionMaxAgeDays', 3);
     const themeValue = fieldValue('terminalTheme', 'switchboard');
     const mcpEmulationValue = fieldValue('mcpEmulation', true);
@@ -221,6 +222,17 @@
 
         <div class="settings-field">
           <div class="settings-field-info">
+            <span class="settings-label">Sidebar Width</span>
+            <div class="settings-description">Width of the sidebar in pixels (drag the resize handle or use this slider)</div>
+          </div>
+          <div class="settings-field-control">
+            <input type="range" class="settings-range" id="sv-sidebar-width" min="200" max="600" step="10" value="${sidebarWidthValue}">
+            <span class="settings-range-value" id="sv-sidebar-width-val">${sidebarWidthValue}px</span>
+          </div>
+        </div>
+
+        <div class="settings-field">
+          <div class="settings-field-info">
             <span class="settings-label">Session Max Age (days)</span>
             <div class="settings-description">Sessions older than this are hidden behind "+N older" even if under the count limit</div>
           </div>
@@ -326,6 +338,7 @@
         settings.terminalTheme = settingsViewerBody.querySelector('#sv-terminal-theme').value || 'switchboard';
         settings.mcpEmulation = settingsViewerBody.querySelector('#sv-mcp-emulation').checked;
         settings.shellProfile = settingsViewerBody.querySelector('#sv-shell-profile').value || 'auto';
+        settings.sidebarWidth = parseInt(settingsViewerBody.querySelector('#sv-sidebar-width').value) || 340;
       }
 
       // Merge form values into existing settings to preserve keys not managed by the form
@@ -336,7 +349,7 @@
 
       await window.api.setSetting(settingsKey, settings);
 
-      // Update visibleSessionCount, sessionMaxAgeDays, and theme
+      // Update visibleSessionCount, sessionMaxAgeDays, theme, and sidebarWidth
       if (!isProject) {
         if (settings.visibleSessionCount && typeof window._setVisibleSessionCount === 'function') {
           window._setVisibleSessionCount(settings.visibleSessionCount);
@@ -346,6 +359,9 @@
         }
         if (settings.terminalTheme && typeof window._applyTerminalTheme === 'function') {
           window._applyTerminalTheme(settings.terminalTheme);
+        }
+        if (settings.sidebarWidth) {
+          document.getElementById('sidebar').style.width = settings.sidebarWidth + 'px';
         }
         if (typeof refreshSidebar === 'function') refreshSidebar();
       }
@@ -394,6 +410,17 @@
     }
     if (brightnessSlider) {
       brightnessSlider.addEventListener('input', applyColorSliders);
+    }
+
+    // Sidebar width slider (live preview)
+    const sidebarWidthSlider = settingsViewerBody.querySelector('#sv-sidebar-width');
+    const sidebarWidthVal = settingsViewerBody.querySelector('#sv-sidebar-width-val');
+    if (sidebarWidthSlider) {
+      sidebarWidthSlider.addEventListener('input', () => {
+        const width = parseInt(sidebarWidthSlider.value);
+        if (sidebarWidthVal) sidebarWidthVal.textContent = width + 'px';
+        document.getElementById('sidebar').style.width = width + 'px';
+      });
     }
 
     // Apply on open (in case values changed since last save)

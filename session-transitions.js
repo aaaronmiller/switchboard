@@ -13,6 +13,18 @@ function init(ctx) {
   getMainWindow = ctx.getMainWindow;
   log = ctx.log;
   rekeyMcpServer = ctx.rekeyMcpServer;
+  
+  function safeSend(channel, ...args) {
+    try {
+      const mw = getMainWindow();
+      if (mw && !mw.isDestroyed() && mw.webContents) {
+        mw.webContents.send(channel, ...args);
+      }
+    } catch (err) {
+      if (err.message?.includes('disposed')) return;
+      log?.warn('[safeSend] error:', err.message);
+    }
+  }
 }
 
 // --- Fork / plan-accept detection ---
@@ -179,10 +191,7 @@ function detectSessionTransitions(folder) {
         activeSessions.set(newId, session);
         // Re-key MCP server to match new session ID
         rekeyMcpServer(sessionId, newId);
-        const mainWindow = getMainWindow();
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('session-forked', sessionId, newId);
-        }
+        safeSend('session-forked', sessionId, newId);
         break; // Only one transition per session per flush
       }
     }

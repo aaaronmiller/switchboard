@@ -71,8 +71,8 @@ Pop sessions into independent windows. Cross-window communication. Broadcast com
 ### Window Features
 - [x] **Focus mode** — Detached windows are terminal-only, no sidebar. `toggle-window-pin` handler for always-on-top.
 - [x] **Window arrangement** — `Ctrl+Shift+1/2/3` focus windows by creation order; `Ctrl+Shift+0` cascades all windows.
-- [ ] **Window state persistence** — Remember which sessions were detached and window positions. Restore on app restart.
-- [ ] **Cross-window sparklines** — Activity events broadcast to all windows so sparkline badges stay current everywhere.
+- [x] **Window state persistence** — Session state saved to localStorage. Detached sessions restored on app restart (partial - positions not persisted).
+- [x] **Cross-window sparklines** — IPC broadcasts activity events to all windows.
 
 ## Phase 5b: Multi-Agent Session History (NEW)
 

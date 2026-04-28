@@ -9,3 +9,13 @@ public/codemirror-bundle.js
 .env
 .cache/
 dev-app-update.yml
+__pycache__/
+
+# Build/packaging artifacts
+.flatpak-builder/
+squashfs-root/
+
+# Local agent/tooling state
+.remember/
+.claude/
+# trigger

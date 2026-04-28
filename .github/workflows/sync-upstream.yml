@@ -48,18 +48,22 @@ jobs:
 
       - name: Configure git identity
         run: |
+          set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Fetch upstream
         run: |
+          set -e
           git remote add upstream https://github.com/doctly/switchboard.git
           git fetch upstream main
 
       - name: Merge upstream into main
         id: merge
         run: |
+          set -e
           TAG="${{ needs.check-upstream.outputs.tag }}"
+          MAIN_SHA=$(git rev-parse HEAD)
 
           # Try clean merge first (without auto-committing)
           git merge --no-commit --no-ff upstream/main || true
@@ -72,8 +76,9 @@ jobs:
           if [ -z "$CONFLICTS" ]; then
             # Clean merge — commit and push directly to main
             git commit -m "chore: sync upstream $TAG" || echo "Nothing new to commit."
-            git push origin main
+            git push origin main --force-with-lease
             echo "mode=direct" >> "$GITHUB_OUTPUT"
+            echo "::notice::Synced upstream $TAG - no conflicts"
           else
             # Conflicts in code files — create a review PR
             echo "::warning::Conflicts in: $(echo $CONFLICTS | tr '\n' ' ')"
@@ -88,20 +93,26 @@ jobs:
             git checkout HEAD@{1} -- .github/workflows/ 2>/dev/null || true
             git diff --cached --quiet || git commit -m "chore: restore fork workflows after sync"
 
-            git push origin "$BRANCH"
+            git push origin "$BRANCH" --force-with-lease
             echo "mode=pr" >> "$GITHUB_OUTPUT"
             echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Open PR for conflict review
         if: steps.merge.outputs.mode == 'pr'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set +e
           TAG="${{ needs.check-upstream.outputs.tag }}"
           BRANCH="${{ steps.merge.outputs.branch }}"
+          REPO="${{ github.repository }}"
+          
+          # Debug: check branch exists
+          echo "::debug::Creating PR for branch: $BRANCH in repo: $REPO"
+          git ls-remote --heads origin "$BRANCH" || echo "::warning::Branch push may have failed"
+          
+          # Try creating PR, don't fail workflow if it errors
           gh pr create \
-            --repo "${{ github.repository }}" \
+            --repo "$REPO" \
             --head "$BRANCH" \
             --base main \
             --title "sync: upstream $TAG (review required)" \
@@ -110,7 +121,16 @@ jobs:
           - After merge, the build job below will run automatically.
 
           [Upstream release notes](https://github.com/doctly/switchboard/releases/tag/$TAG)"
-          echo "::notice::PR created for upstream $TAG — review at https://github.com/${{ github.repository }}/pulls"
+          PR_RESULT=$?
+          
+          if [ $PR_RESULT -eq 0 ]; then
+            echo "::notice::PR created for upstream $TAG"
+          else
+            echo "::warning::PR creation failed (exit $PR_RESULT) — branch $BRANCH pushed for manual PR, check: https://github.com/$REPO/branches"
+          fi
+          
+          # Always exit 0 to not fail the workflow
+          exit 0
 
       - name: Setup Node.js
         if: steps.merge.outputs.mode == 'direct'
@@ -123,10 +143,9 @@ jobs:
         if: steps.merge.outputs.mode == 'direct'
         run: python3 -m pip install setuptools
 
-      - name: Install rpm-build (for RPM target)
+      - name: Install rpm-build (optional)
         if: steps.merge.outputs.mode == 'direct'
-        run: sudo apt-get install -y rpm
-
+        run: sudo apt-get install -y rpm 2>/dev/null || echo "rpm-build not available, skipping RPM"
       - name: Install dependencies
         if: steps.merge.outputs.mode == 'direct'
         run: npm ci
@@ -137,13 +156,13 @@ jobs:
 
       - name: Build Linux packages
         if: steps.merge.outputs.mode == 'direct'
-        run: npx electron-builder --linux
+        run: npx electron-builder --linux AppImage deb
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: List build artifacts
         if: steps.merge.outputs.mode == 'direct'
-        run: ls -lh dist/*.AppImage dist/*.deb dist/*.rpm 2>/dev/null || ls -lh dist/
+        run: ls -lh dist/*.AppImage dist/*.deb 2>/dev/null || ls -lh dist/
 
       - name: Create GitHub Release with Linux artifacts
         if: steps.merge.outputs.mode == 'direct'
@@ -153,7 +172,7 @@ jobs:
           TAG="${{ needs.check-upstream.outputs.tag }}"
 
           ARTIFACTS=""
-          for f in dist/*.AppImage dist/*.deb dist/*.rpm; do
+          for f in dist/*.AppImage dist/*.deb; do
             [ -f "$f" ] && ARTIFACTS="$ARTIFACTS $f"
           done
 
