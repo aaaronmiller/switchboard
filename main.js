@@ -77,6 +77,7 @@ const cleanPtyEnv = Object.fromEntries(
 // Shell profiles → shell-profiles.js
 const { discoverShellProfiles, getShellProfiles, resolveShell, isWindows, isWslShell, windowsToWslPath, shellArgs } = require('./shell-profiles');
 const { startScheduler } = require('./schedule-runner');
+const { encodeProjectPath } = require('./encode-project-path');
 
 
 
@@ -338,7 +339,7 @@ ipcMain.handle('add-project', (_event, projectPath) => {
     }
 
     // Create the corresponding folder in ~/.claude/projects/ so it persists
-    const folder = projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
+    const folder = encodeProjectPath(projectPath);
     const folderPath = path.join(PROJECTS_DIR, folder);
     if (!fs.existsSync(folderPath)) {
       fs.mkdirSync(folderPath, { recursive: true });
@@ -374,7 +375,7 @@ ipcMain.handle('remove-project', (_event, projectPath) => {
     setSetting('global', global);
 
     // Clean up DB cache and search index for this folder
-    const folder = projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
+    const folder = encodeProjectPath(projectPath);
     deleteCachedFolder(folder);
     deleteSearchFolder(folder);
     deleteSetting('project:' + projectPath);
@@ -1015,7 +1016,7 @@ safeSendToSession(sessionId, 'terminal-data', '\x1b[?1049h');
 
   if (!isPlainTerminal) {
     // Snapshot existing .jsonl files before spawning (for new session + fork/plan detection)
-    projectFolder = projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
+    projectFolder = encodeProjectPath(projectPath);
     const claudeProjectDir = path.join(PROJECTS_DIR, projectFolder);
     if (fs.existsSync(claudeProjectDir)) {
       try {
