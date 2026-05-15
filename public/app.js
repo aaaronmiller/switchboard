@@ -1412,7 +1412,7 @@ async function loadProjects({ resort = false } = {}) {
     const activeTerminals = await window.api.getActiveTerminals();
     for (const { sessionId, projectPath } of activeTerminals) {
       if (pendingSessions.has(sessionId)) continue; // already tracked
-      const folder = projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
+      const folder = encodeProjectPath(projectPath);
       // Find the session object already injected by the backend
       let session;
       for (const proj of cachedAllProjects) {
@@ -2269,7 +2269,7 @@ async function launchNewSession(project, sessionOptions, initialPrompt) {
   };
 
   // Track as pending (no .jsonl yet)
-  const folder = projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
+  const folder = encodeProjectPath(projectPath);
   pendingSessions.set(sessionId, { session, projectPath, folder });
 
   // Inject into cached project data so it appears in sidebar immediately
