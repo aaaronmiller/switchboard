@@ -59,6 +59,17 @@ All notable changes to Switchboard are documented in this file.
 ### Changed
 - **CI workflow fixes** — build.yml arch support (linux x64/arm64), rpm install, CSC env guards; sync-upstream.yml restored with robust error handling and PR creation
 
+## [0.0.35] - 2026-05-29
+
+### Changed
+- **Merge upstream doctly/switchboard** — Integrated v0.0.30 changes: merge duplicate project groups, AI title support, and fix for AI titles overwriting user renames (#46)
+- **Release workflow fixed** — `build.yml` now creates GitHub releases with `contents: write` permission; Linux builds (AppImage + deb) uploaded on tag push
+- **Upstream code merged** — v0.0.27: WebGL terminal improvements; v0.0.28: CI split build/publish; v0.0.29: sidebar duplicate fix, cursor blink reduction, AI-title support
+
+### Fixed
+- **White screen crash fully resolved** — All `webContents.send()` calls wrapped in `safeSend()`/`safeSendToSession()` guards across all modules (main.js, session-cache.js, session-transitions.js, mcp-bridge.js)
+- **AI titles no longer overwrite user renames** — `session_meta.name` now only written by genuine user renames; AI titles displayed separately via `session.aiTitle`
+
 ## [Unreleased]
 
 ## [0.0.17] - 2026-03-25
