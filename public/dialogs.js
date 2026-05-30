@@ -49,7 +49,7 @@ async function launchScheduleCreator(project) {
   };
 
   // Inject into sidebar
-  const folder = project.projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
+  const folder = encodeProjectPath(project.projectPath);
   pendingSessions.set(result.sessionId, { session, projectPath: project.projectPath, folder });
   sessionMap.set(result.sessionId, session);
   for (const projList of [cachedProjects, cachedAllProjects]) {
@@ -141,7 +141,7 @@ async function launchTerminalSession(project) {
   };
 
   // Track as pending
-  const folder = projectPath.replace(/[/_]/g, '-').replace(/^-/, '-');
+  const folder = encodeProjectPath(projectPath);
   pendingSessions.set(sessionId, { session, projectPath, folder });
 
   // Inject into cached project data
@@ -331,7 +331,7 @@ async function showResumeSessionDialog(session) {
     `<button class="permission-option dangerous${dangerousSkip ? ' selected' : ''}" data-mode="dangerous-skip"><span class="perm-name">Dangerous Skip</span><span class="perm-desc">Skip all safety prompts (use with caution)</span></button>`;
   }
 
-  const sessionName = session.name || session.summary || session.sessionId.slice(0, 8);
+  const sessionName = session.name || session.aiTitle || session.summary || session.sessionId.slice(0, 8);
 
   dialog.innerHTML = `
     <h3>Resume Session — ${escapeHtml(sessionName)}</h3>
