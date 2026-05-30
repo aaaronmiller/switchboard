@@ -79,7 +79,14 @@ const { discoverShellProfiles, getShellProfiles, resolveShell, isWindows, isWslS
 const { startScheduler } = require('./schedule-runner');
 const { encodeProjectPath } = require('./encode-project-path');
 
+// --- Git status cache — avoids repeated `git status` calls across the same project ---
+const gitStatusCache = new Map(); // projectPath -> { data, timestamp }
+const GIT_CACHE_TTL = 60_000; // 60 seconds
 
+// Agent history scan cache — avoids full filesystem walks on every IPC call
+const agentScanCache = new Map(); // agentId -> { sessions, timestamp }
+const AGENT_SCAN_CACHE_TTL = 30_000; // 30 seconds
+const AGENT_SCAN_CACHE_MAX = 50; // cap total entries
 
 // --- Auto-updater (only in packaged builds) ---
 let autoUpdater = null;
@@ -113,6 +120,12 @@ const {
   searchByType, isSearchIndexPopulated, searchFtsRecreated,
   getSetting, setSetting, deleteSetting,
   closeDb,
+  // Token tracking
+  getSessionTokens, getAllSessionTokens,
+  // Loop detection
+  getSessionLoops, getAllSessionLoops,
+  // Session templates
+  saveTemplate, getAllTemplates, deleteTemplate,
 } = require('./db');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -120,6 +133,73 @@ const PLANS_DIR = path.join(os.homedir(), '.claude', 'plans');
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const STATS_CACHE_PATH = path.join(CLAUDE_DIR, 'stats-cache.json');
 const MAX_BUFFER_SIZE = 256 * 1024;
+
+// --- Git status discovery (async) with cache eviction ---
+async function getCachedGitStatus(projectPath, forceRefresh = false) {
+  if (!projectPath || typeof projectPath !== 'string') return { status: null, branch: null, error: true };
+  const now = Date.now();
+  const cached = gitStatusCache.get(projectPath);
+  if (cached && !forceRefresh && (now - cached.timestamp) < GIT_CACHE_TTL) {
+    return cached.data;
+  }
+  try {
+    const { execFileSync } = require('child_process');
+    const branch = execFileSync('git', ['branch', '--show-current'], { cwd: projectPath, timeout: 5000, encoding: 'utf8' }).trim();
+    let status = null;
+    try {
+      const porcelain = execFileSync('git', ['status', '--porcelain'], { cwd: projectPath, timeout: 5000, encoding: 'utf8' });
+      if (porcelain.length > 0) {
+        // Check for staged/unstaged changes
+        const lines = porcelain.split('\n').filter(Boolean);
+        const hasStaged = lines.some(l => l.startsWith('M') || l.startsWith('A') || l.startsWith('D') || l.startsWith('R'));
+        const hasUnstaged = lines.some(l => l[1] === 'M' || l[1] === 'D' || porcelain.includes('??'));
+        // Check for ahead/behind
+        try {
+          const branchStatus = execFileSync('git', ['status', '--short', '-b'], { cwd: projectPath, timeout: 5000, encoding: 'utf8' });
+          if (branchStatus.includes('ahead') && (branchStatus.includes('behind') || branchStatus.includes('ahead') && !branchStatus.includes('up-to-date'))) {
+            status = branchStatus.includes('behind') ? 'diverged' : 'ahead';
+          } else if (branchStatus.includes('behind')) {
+            status = 'behind';
+          } else if (hasStaged || hasUnstaged) {
+            status = 'dirty';
+          } else {
+            status = 'current';
+          }
+        } catch {
+          status = hasStaged ? 'dirty' : 'uncommitted';
+        }
+      } else {
+        status = 'current';
+      }
+    } catch {
+      status = null;
+    }
+    const data = { status, branch, error: false };
+    gitStatusCache.set(projectPath, { data, timestamp: now });
+    return data;
+  } catch (err) {
+    // Not a git repo or git not available
+    const data = { status: null, branch: null, error: true };
+    gitStatusCache.set(projectPath, { data, timestamp: now });
+    return data;
+  }
+}
+
+// Periodic git status cache eviction (run every 2 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [path, entry] of gitStatusCache) {
+    if (now - entry.timestamp > GIT_CACHE_TTL * 2) {
+      gitStatusCache.delete(path);
+    }
+  }
+  // Also evict stale agent scan cache entries
+  for (const [agentId, entry] of agentScanCache) {
+    if (now - entry.timestamp > AGENT_SCAN_CACHE_TTL * 2) {
+      agentScanCache.delete(agentId);
+    }
+  }
+}, 120_000);
 
 // Active PTY sessions
 const activeSessions = new Map();
@@ -868,6 +948,715 @@ const SETTING_DEFAULTS = {
   shellProfile: 'auto',
 };
 
+// --- CLI agent definitions ---
+const CLI_AGENTS = {
+  claude:    { name: 'Claude Code',   cmd: 'claude',    color: '#d97757', sessionFlag: '--session-id', resumeFlag: '--resume', forkFlag: '--fork-session', supportsPermissions: true,  supportsMcp: true  },
+  codex:     { name: 'Codex',         cmd: 'codex',     color: '#4ade80', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  qwen:      { name: 'Qwen Code',     cmd: 'qwen',      color: '#60a5fa', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  gemini:    { name: 'Gemini CLI',    cmd: 'gemini',    color: '#22d3ee', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  kimi:      { name: 'Kimi Code',     cmd: 'kimi',      color: '#fb923c', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  aider:     { name: 'Aider',         cmd: 'aider',     color: '#a78bfa', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  opencode:  { name: 'OpenCode',      cmd: 'opencode',  color: '#f472b6', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  hermes:    { name: 'Hermes Agent',  cmd: 'hermes',    color: '#fbbf24', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  letta:     { name: 'Letta Code',    cmd: 'letta',     color: '#34d399', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  // New agents
+  amp:       { name: 'Amp',           cmd: 'amp',       color: '#e879f9', sessionFlag: null,           resumeFlag: '--resume', forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  goose:     { name: 'Goose',         cmd: 'goose',     color: '#fb7185', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: true  },
+  continue:  { name: 'Continue',      cmd: 'continue',  color: '#06b6d4', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  cursor:    { name: 'Cursor CLI',    cmd: 'cursor',    color: '#8b5cf6', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  cline:     { name: 'Cline',         cmd: 'cline',     color: '#f97316', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+};
+
+// Session history discovery per agent
+const AGENT_HISTORY = {
+  claude: {
+    historyDir: () => path.join(os.homedir(), '.claude'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.claude', 'projects');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      for (const projectDir of fs.readdirSync(baseDir)) {
+        const projPath = path.join(baseDir, projectDir);
+        try {
+          const stat = fs.statSync(projPath);
+          if (!stat.isDirectory()) continue;
+          for (const file of fs.readdirSync(projPath)) {
+            if (!file.endsWith('.jsonl')) continue;
+            const fp = path.join(projPath, file);
+            const fstat = fs.statSync(fp);
+            sessions.push({
+              id: file.replace('.jsonl', ''),
+              file: fp,
+              project: projectDir,
+              modified: fstat.mtime,
+              size: fstat.size,
+              agent: 'claude',
+            });
+          }
+        } catch {}
+      }
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === 'human' || obj.role === 'user') userMsgs++;
+            else if (obj.type === 'assistant' || obj.role === 'assistant') assistantMsgs++;
+            if (obj.type === 'tool_use' || obj.type === 'tool_result') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+  codex: {
+    historyDir: () => path.join(os.homedir(), '.codex'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.codex', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      function walk(dir) {
+        try {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const fp = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(fp);
+            else if (entry.name.endsWith('.jsonl')) {
+              const fstat = fs.statSync(fp);
+              const idMatch = entry.name.match(/([0-9a-f-]{36})/);
+              sessions.push({
+                id: idMatch ? idMatch[1] : entry.name.replace('.jsonl', ''),
+                file: fp,
+                modified: fstat.mtime,
+                size: fstat.size,
+                agent: 'codex',
+              });
+            }
+          }
+        } catch {}
+      }
+      walk(baseDir);
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, model = null, cwd = null;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === 'session_meta' && obj.payload) {
+              model = obj.payload.model_provider;
+              cwd = obj.payload.cwd;
+            }
+            if (obj.type === 'response_item' && obj.payload?.role === 'developer') userMsgs++;
+            if (obj.type === 'response_item' && obj.payload?.role === 'assistant') assistantMsgs++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, model, cwd, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+  qwen: {
+    historyDir: () => path.join(os.homedir(), '.qwen'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.qwen', 'projects');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      for (const projectDir of fs.readdirSync(baseDir)) {
+        const chatsDir = path.join(baseDir, projectDir, 'chats');
+        try {
+          if (!fs.existsSync(chatsDir) || !fs.statSync(chatsDir).isDirectory()) continue;
+          for (const file of fs.readdirSync(chatsDir)) {
+            if (!file.endsWith('.jsonl')) continue;
+            const fp = path.join(chatsDir, file);
+            const fstat = fs.statSync(fp);
+            sessions.push({
+              id: file.replace('.jsonl', ''),
+              file: fp,
+              project: projectDir,
+              modified: fstat.mtime,
+              size: fstat.size,
+              agent: 'qwen',
+            });
+          }
+        } catch {}
+      }
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === 'user') userMsgs++;
+            else if (obj.type === 'assistant') assistantMsgs++;
+            if (obj.message?.parts) {
+              for (const part of obj.message.parts) {
+                if (part.functionCall) toolUses++;
+              }
+            }
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+  gemini: {
+    historyDir: () => path.join(os.homedir(), '.gemini'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.gemini', 'tmp');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      for (const projectDir of fs.readdirSync(baseDir)) {
+        const chatsDir = path.join(baseDir, projectDir, 'chats');
+        try {
+          if (!fs.existsSync(chatsDir) || !fs.statSync(chatsDir).isDirectory()) continue;
+          for (const file of fs.readdirSync(chatsDir)) {
+            if (!file.startsWith('session-')) continue;
+            if (!file.endsWith('.json') && !file.endsWith('.jsonl')) continue;
+            const fp = path.join(chatsDir, file);
+            const fstat = fs.statSync(fp);
+            const idMatch = file.match(/session-([0-9a-f-]{36})/);
+            sessions.push({
+              id: idMatch ? idMatch[1] : file.replace(/\.(json|jsonl)$/, ''),
+              file: fp,
+              project: projectDir,
+              modified: fstat.mtime,
+              size: fstat.size,
+              agent: 'gemini',
+              format: file.endsWith('.jsonl') ? 'jsonl' : 'json',
+            });
+          }
+        } catch {}
+      }
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const isJsonl = filePath.endsWith('.jsonl');
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0, totalLines = 0;
+        if (isJsonl) {
+          const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+          totalLines = lines.length;
+          for (const line of lines) {
+            try {
+              const obj = JSON.parse(line);
+              if (obj.type === 'user') userMsgs++;
+              else if (obj.type === 'gemini' || obj.type === 'assistant') assistantMsgs++;
+            } catch {}
+          }
+        } else {
+          const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          const messages = data.messages || data.history || (Array.isArray(data) ? data : []);
+          totalLines = messages.length;
+          for (const msg of messages) {
+            if (msg.role === 'user') userMsgs++;
+            else if (msg.role === 'model' || msg.role === 'assistant') assistantMsgs++;
+            if (msg.parts) {
+              for (const part of msg.parts) {
+                if (part.functionCall) toolUses++;
+              }
+            }
+          }
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines };
+      } catch { return null; }
+    },
+  },
+  kimi: {
+    historyDir: () => path.join(os.homedir(), '.kimi'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.kimi', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      function walk(dir) {
+        try {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const fp = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              const ctxFile = path.join(fp, 'context.jsonl');
+              if (fs.existsSync(ctxFile)) {
+                const fstat = fs.statSync(ctxFile);
+                sessions.push({
+                  id: entry.name,
+                  file: ctxFile,
+                  modified: fstat.mtime,
+                  size: fstat.size,
+                  agent: 'kimi',
+                });
+              } else {
+                walk(fp);
+              }
+            }
+          }
+        } catch {}
+      }
+      walk(baseDir);
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user') userMsgs++;
+            else if (obj.role === 'assistant') assistantMsgs++;
+            else if (obj.role === 'tool') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+  aider: {
+    historyDir: () => null,
+    getSessions: () => {
+      const sessions = [];
+      try {
+        const allCached = getAllCached();
+        const projectPaths = new Set();
+        for (const s of allCached) {
+          if (s.projectPath) projectPaths.add(s.projectPath);
+        }
+        for (const projPath of projectPaths) {
+          const histFile = path.join(projPath, '.aider.chat.history.md');
+          if (fs.existsSync(histFile)) {
+            const fstat = fs.statSync(histFile);
+            sessions.push({
+              id: projPath.replace(/[/\\]/g, '-'),
+              file: histFile,
+              project: path.basename(projPath),
+              modified: fstat.mtime,
+              size: fstat.size,
+              agent: 'aider',
+            });
+          }
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        const userMsgs = (content.match(/^####\s/gm) || []).length;
+        const assistantMsgs = userMsgs;
+        const totalLines = content.split('\n').length;
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses: 0, totalLines };
+      } catch { return null; }
+    },
+  },
+  opencode: {
+    historyDir: () => path.join(os.homedir(), '.local', 'share', 'opencode'),
+    getSessions: () => {
+      const dbPath = path.join(os.homedir(), '.local', 'share', 'opencode', 'opencode.db');
+      const sessions = [];
+      if (!fs.existsSync(dbPath)) return sessions;
+      try {
+        const Database = require('better-sqlite3');
+        const ocDb = new Database(dbPath, { readonly: true });
+        const rows = ocDb.prepare('SELECT id, title, directory, time_created, time_updated FROM session ORDER BY time_updated DESC').all();
+        for (const row of rows) {
+          sessions.push({
+            id: row.id,
+            file: dbPath,
+            project: row.directory ? path.basename(row.directory) : '',
+            modified: new Date(row.time_updated),
+            size: 0,
+            agent: 'opencode',
+            title: row.title,
+          });
+        }
+        ocDb.close();
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath, sessionId) => {
+      try {
+        const Database = require('better-sqlite3');
+        const ocDb = new Database(filePath, { readonly: true });
+        const msgs = ocDb.prepare("SELECT json_extract(data, '$.role') as role FROM message WHERE session_id = ?").all(sessionId);
+        let userMsgs = 0, assistantMsgs = 0;
+        for (const m of msgs) {
+          if (m.role === 'user') userMsgs++;
+          else if (m.role === 'assistant') assistantMsgs++;
+        }
+        const toolParts = ocDb.prepare("SELECT count(*) as cnt FROM part WHERE session_id = ? AND json_extract(data, '$.type') IN ('tool-call', 'tool-result')").get(sessionId);
+        ocDb.close();
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses: toolParts?.cnt || 0, totalLines: msgs.length };
+      } catch { return null; }
+    },
+  },
+  hermes: {
+    historyDir: () => path.join(os.homedir(), '.hermes'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.hermes', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          const dateMatch = file.match(/^(\d{8})_(\d{6})/);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'hermes',
+            date: dateMatch ? `${dateMatch[1].slice(0,4)}-${dateMatch[1].slice(4,6)}-${dateMatch[1].slice(6,8)}` : null,
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user') userMsgs++;
+            else if (obj.role === 'assistant') assistantMsgs++;
+            else if (obj.role === 'tool') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+  amp: {
+    historyDir: () => path.join(os.homedir(), '.amp'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.amp', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'amp',
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user' || obj.type === 'human') userMsgs++;
+            else if (obj.role === 'assistant' || obj.type === 'ai') assistantMsgs++;
+            if (obj.type === 'tool_use' || obj.type === 'tool') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+  goose: {
+    historyDir: () => path.join(os.homedir(), '.goose'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.goose', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'goose',
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user') userMsgs++;
+            else if (obj.role === 'assistant') assistantMsgs++;
+            if (obj.tools || obj.tool_calls) toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+  continue: {
+    historyDir: () => path.join(os.homedir(), '.continue'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.continue', 'sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'continue',
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user' || obj.role === 'human') userMsgs++;
+            else if (obj.role === 'assistant' || obj.role === 'ai') assistantMsgs++;
+            if (obj.tools || obj.tool_calls) toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+  cursor: {
+    historyDir: () => path.join(os.homedir(), '.cursor'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.cursor', 'cli-sessions');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'cursor',
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user') userMsgs++;
+            else if (obj.role === 'assistant') assistantMsgs++;
+            if (obj.type === 'tool_use') toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+  cline: {
+    historyDir: () => path.join(os.homedir(), '.cline'),
+    getSessions: () => {
+      const baseDir = path.join(os.homedir(), '.cline', 'history');
+      const sessions = [];
+      if (!fs.existsSync(baseDir)) return sessions;
+      try {
+        for (const file of fs.readdirSync(baseDir)) {
+          if (!file.endsWith('.jsonl')) continue;
+          const fp = path.join(baseDir, file);
+          const fstat = fs.statSync(fp);
+          sessions.push({
+            id: file.replace('.jsonl', ''),
+            file: fp,
+            modified: fstat.mtime,
+            size: fstat.size,
+            agent: 'cline',
+          });
+        }
+      } catch {}
+      return sessions;
+    },
+    parseSession: (filePath) => {
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
+        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.role === 'user' || obj.author === 'user') userMsgs++;
+            else if (obj.role === 'assistant' || obj.author === 'assistant') assistantMsgs++;
+            if (obj.tool_calls || obj.tools) toolUses++;
+          } catch {}
+        }
+        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
+      } catch { return null; }
+    },
+  },
+};
+
+// IPC: get-agent-stats — aggregate session history across all agents
+ipcMain.handle('get-agent-stats', () => {
+  const stats = {};
+  for (const [agentId, history] of Object.entries(AGENT_HISTORY)) {
+    try {
+      const sessions = history.getSessions();
+      const now = Date.now();
+      const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+      const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+
+      const recentSessions = sessions.filter(s => s.modified.getTime() > thirtyDaysAgo);
+      const weekSessions = sessions.filter(s => s.modified.getTime() > sevenDaysAgo);
+
+      let totalMessages = 0, totalToolUses = 0;
+      const sampled = recentSessions.slice(-10);
+      for (const s of sampled) {
+        const parsed = history.parseSession(s.file, s.id);
+        if (parsed) {
+          totalMessages += (parsed.userMessages || 0) + (parsed.assistantMessages || 0);
+          totalToolUses += parsed.toolUses || 0;
+        }
+      }
+
+      stats[agentId] = {
+        name: CLI_AGENTS[agentId]?.name || agentId,
+        color: CLI_AGENTS[agentId]?.color || '#888',
+        totalSessions: sessions.length,
+        last30Days: recentSessions.length,
+        last7Days: weekSessions.length,
+        estimatedMessages: totalMessages,
+        estimatedToolUses: totalToolUses,
+        lastUsed: sessions.length ? sessions.sort((a, b) => b.modified - a.modified)[0].modified.toISOString() : null,
+        totalSizeBytes: sessions.reduce((sum, s) => sum + s.size, 0),
+      };
+    } catch {
+      stats[agentId] = { name: CLI_AGENTS[agentId]?.name || agentId, error: true };
+    }
+  }
+  return stats;
+});
+
+ipcMain.handle('detect-agents', () => {
+  const { execFileSync } = require('child_process');
+  const results = {};
+  for (const [id, agent] of Object.entries(CLI_AGENTS)) {
+    let installed = false;
+    try {
+      execFileSync('which', [agent.cmd], { timeout: 2000, stdio: 'pipe' });
+      installed = true;
+    } catch {}
+    results[id] = { ...agent, id, installed };
+  }
+  return results;
+});
+
+// --- IPC: get-session-tokens ---
+const { estimateCostCents } = require('./tokens');
+
+ipcMain.handle('get-session-tokens', (_event, sessionId) => {
+  try {
+    const row = getSessionTokens(sessionId);
+    if (!row) return null;
+    const costCents = estimateCostCents(row);
+    return { ...row, costCents };
+  } catch { return null; }
+});
+
+ipcMain.handle('get-all-session-tokens', () => {
+  try {
+    const map = getAllSessionTokens();
+    const result = {};
+    for (const [sessionId, row] of map) {
+      result[sessionId] = { ...row, costCents: estimateCostCents(row) };
+    }
+    return result;
+  } catch { return {}; }
+});
+
+// --- IPC: loop detection ---
+ipcMain.handle('get-session-loops', (_event, sessionId) => {
+  try { return getSessionLoops(sessionId); } catch { return []; }
+});
+
+ipcMain.handle('get-all-session-loops', () => {
+  try {
+    const map = getAllSessionLoops();
+    const result = {};
+    for (const [sessionId, row] of map) result[sessionId] = row;
+    return result;
+  } catch { return {}; }
+});
+
+// --- IPC: session templates ---
+ipcMain.handle('save-template', (_event, data) => {
+  try {
+    const id = saveTemplate(data);
+    return { ok: true, id };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('get-templates', () => {
+  try { return { ok: true, templates: getAllTemplates() }; } catch (err) { return { ok: false, templates: [], error: err.message }; }
+});
+
+ipcMain.handle('delete-template', (_event, id) => {
+  try { deleteTemplate(id); return { ok: true }; } catch (err) { return { ok: false, error: err.message }; }
+});
+
+// --- IPC: read-session-conversation ---
+ipcMain.handle('read-session-conversation', (_event, sessionId, filePath, agentId) => {
+  try {
+    const history = AGENT_HISTORY[agentId];
+    if (!history) return { ok: false, error: `Unknown agent: ${agentId}` };
+
+    const sessions = history.getSessions();
+    const session = sessions.find(s => s.id === sessionId || s.file === filePath);
+    if (!session) return { ok: false, error: 'Session not found' };
+
+    // Read and parse the session file using the agent's parser
+    const parsed = history.parseSession(session.file, session.id);
+    if (!parsed) return { ok: false, error: 'Failed to parse session' };
+
+    return { ok: true, data: parsed };
+  } catch (err) {
+    log.error(`[read-session-conversation] Error:`, err);
+    return { ok: false, error: err.message };
+  }
+});
+
 ipcMain.handle('get-shell-profiles', () => {
   _shellProfiles = null; // refresh on each request
   return getShellProfiles();
@@ -886,6 +1675,188 @@ ipcMain.handle('get-effective-settings', (_event, projectPath) => {
     }
   }
   return effective;
+});
+
+// --- IPC: get-agent-sessions ---
+// Returns sessions for non-Claude agents using AGENT_HISTORY discovery.
+ipcMain.handle('get-agent-sessions', async (_event, agentId) => {
+  try {
+    const history = AGENT_HISTORY[agentId];
+    if (!history) return [];
+
+    const cached = agentScanCache.get(agentId);
+    if (cached && (Date.now() - cached.timestamp) < AGENT_SCAN_CACHE_TTL) {
+      return cached.sessions;
+    }
+
+    const rawSessions = history.getSessions();
+    if (!rawSessions || rawSessions.length === 0) return [];
+
+    const metaMap = getAllMeta();
+    const folderMap = new Map();
+
+    for (const raw of rawSessions) {
+      let projectPath = raw.project || path.dirname(raw.file);
+      let folder = raw.project || path.basename(path.dirname(raw.file));
+
+      if (history.parseSession) {
+        try {
+          const parsed = history.parseSession(raw.file);
+          if (parsed?.cwd) {
+            projectPath = parsed.cwd;
+            folder = parsed.cwd.split('/').filter(Boolean).slice(-2).join('/');
+          }
+        } catch {}
+      }
+
+      if (projectPath === raw.project || !projectPath.startsWith('/')) {
+        try {
+          const firstLine = fs.readFileSync(raw.file, 'utf8').split('\n')[0];
+          if (firstLine) {
+            const obj = JSON.parse(firstLine);
+            if (obj.cwd) {
+              projectPath = obj.cwd;
+              folder = obj.cwd.split('/').filter(Boolean).slice(-2).join('/');
+            } else if (obj.payload?.cwd) {
+              projectPath = obj.payload.cwd;
+              folder = obj.payload.cwd.split('/').filter(Boolean).slice(-2).join('/');
+            }
+          }
+        } catch {}
+      }
+
+      if (!folderMap.has(projectPath)) {
+        folderMap.set(projectPath, { folder, projectPath, sessions: [] });
+      }
+
+      const meta = metaMap.get(raw.id);
+      const summary = extractSessionSummary(raw.file);
+
+      let messageCount = 0;
+      let turnCount = 0;
+      let startTime = '';
+      let endTime = '';
+      try {
+        const parsed = history.parseSession(raw.file);
+        if (parsed) {
+          messageCount = (parsed.userMessages || 0) + (parsed.assistantMessages || 0);
+          turnCount = Math.min(parsed.userMessages || 0, parsed.assistantMessages || 0);
+        }
+      } catch {}
+
+      if (messageCount === 0 && raw.size) {
+        messageCount = Math.max(1, Math.round(raw.size / 500));
+      }
+
+      const mtime = raw.modified ? new Date(raw.modified) : new Date();
+      endTime = mtime.toISOString();
+
+      try {
+        const fd = fs.openSync(raw.file, 'r');
+        const buf = Buffer.alloc(8192);
+        const bytesRead = fs.readSync(fd, buf, 0, 8192, 0);
+        fs.closeSync(fd);
+        const firstChunk = buf.toString('utf8', 0, bytesRead);
+        const firstLine = firstChunk.split('\n').filter(Boolean)[0];
+        if (firstLine) {
+          const obj = JSON.parse(firstLine);
+          const ts = obj.timestamp || obj.created_at || obj.createdAt || obj.time || obj.created;
+          if (ts) {
+            startTime = new Date(ts).toISOString();
+          }
+        }
+      } catch {}
+
+      if (!startTime) {
+        try {
+          const stat = fs.statSync(raw.file);
+          startTime = stat.birthtime ? stat.birthtime.toISOString() : new Date(stat.ctime).toISOString();
+        } catch {
+          startTime = endTime;
+        }
+      }
+
+      let status = 'completed';
+      if (raw.modified) {
+        const age = Date.now() - raw.modified.getTime();
+        if (age < 60_000) status = 'running';
+        else if (age < 300_000) status = 'recent';
+      }
+
+      folderMap.get(projectPath).sessions.push({
+        sessionId: raw.id,
+        summary,
+        firstPrompt: summary,
+        startTime,
+        endTime,
+        created: startTime,
+        modified: endTime,
+        messageCount,
+        turnCount,
+        size: raw.size || 0,
+        status,
+        projectPath,
+        slug: null,
+        name: meta?.name || null,
+        starred: meta?.starred || 0,
+        archived: meta?.archived || 0,
+        agent: agentId,
+        file: raw.file,
+      });
+    }
+
+    // Build projects and sort
+    const projects = [];
+    for (const proj of folderMap.values()) {
+      proj.sessions.sort((a, b) => new Date(b.modified) - new Date(a.modified));
+      projects.push(proj);
+    }
+    projects.sort((a, b) => {
+      const aDate = a.sessions[0]?.modified || '';
+      const bDate = b.sessions[0]?.modified || '';
+      return new Date(bDate) - new Date(aDate);
+    });
+
+    // Batch-resolve git statuses
+    const gitPromises = new Map();
+    for (const proj of projects) {
+      for (const session of proj.sessions) {
+        if (session.projectPath && !gitPromises.has(session.projectPath)) {
+          gitPromises.set(session.projectPath, getCachedGitStatus(session.projectPath));
+        }
+      }
+    }
+    const gitResults = await Promise.all(
+      Array.from(gitPromises.entries()).map(async ([projPath, promise]) => {
+        const data = await promise;
+        return { projPath, data };
+      })
+    );
+    const gitResultMap = new Map(gitResults.map(r => [r.projPath, r.data]));
+    for (const proj of projects) {
+      for (const session of proj.sessions) {
+        if (session.projectPath && gitResultMap.has(session.projectPath)) {
+          const gd = gitResultMap.get(session.projectPath);
+          session.gitStatus = gd.status;
+          session.gitBranch = gd.branch;
+        }
+      }
+    }
+
+    // Evict oldest entry if over cap
+    if (agentScanCache.size >= AGENT_SCAN_CACHE_MAX) {
+      const oldest = Array.from(agentScanCache.entries()).reduce((a, b) =>
+        a[1].timestamp < b[1].timestamp ? a : b
+      );
+      agentScanCache.delete(oldest[0]);
+    }
+    agentScanCache.set(agentId, { sessions: projects, timestamp: Date.now() });
+
+    return projects;
+  } catch (err) {
+    log.error(`Error getting ${agentId} sessions:`, err);
+    return [];
+  }
 });
 
 // --- IPC: get-active-sessions ---
