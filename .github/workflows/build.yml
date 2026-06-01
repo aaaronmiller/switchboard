@@ -13,7 +13,51 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false   # don't cancel macOS if Linux passes, etc.
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux
+            build-args: --linux AppImage deb rpm freebsd
+            artifact-name: linux
+            artifact-patterns: |
+              dist/*.AppImage
+              dist/*.deb
+              dist/*.rpm
+              dist/*.freebsd
+              dist/latest-linux*.yml
+
+          - os: windows-latest
+            target: win
+            build-args: --win nsis portable
+            artifact-name: win
+            artifact-patterns: |
+              dist/*.exe
+              dist/*.exe.blockmap
+              dist/*.portable.exe
+              dist/latest.yml
+
+          - os: macos-13          # Intel macOS
+            target: mac-x64
+            build-args: --mac --x64
+            artifact-name: mac-x64
+            artifact-patterns: |
+              dist/*.dmg
+              dist/*.zip
+              dist/latest-mac.yml
+
+          - os: macos-latest       # Apple Silicon macOS
+            target: mac-arm64
+            build-args: --mac --arm64
+            artifact-name: mac-arm64
+            artifact-patterns: |
+              dist/*.dmg
+              dist/*.zip
+              dist/latest-mac.yml
+
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,34 +68,69 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install system dependencies
+      # ── System dependencies ───────────────────────────────────
+      - name: Install system deps (Linux)
+        if: matrix.target == 'linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq rpm 2>/dev/null || true
 
+      - name: Install system deps (macOS)
+        if: startsWith(matrix.target, 'mac')
+        run: |
+          # No extra deps needed — Xcode CLI tools are preinstalled
+          echo "macOS runner ready"
+
+      # ── Node dependencies ─────────────────────────────────────
       - name: Install dependencies
         run: npm ci
 
       - name: Bundle CodeMirror
         run: npm run bundle:codemirror
 
-      - name: Build Linux
-        run: npx electron-builder --linux AppImage deb --publish never
+      # ── Build ─────────────────────────────────────────────────
+      - name: Build (Linux)
+        if: matrix.target == 'linux'
+        run: npx electron-builder ${{ matrix.build-args }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
+      - name: Build (Windows)
+        if: matrix.target == 'win'
+        run: npx electron-builder ${{ matrix.build-args }} --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Build (macOS — unsigned, no notarization)
+        if: startsWith(matrix.target, 'mac')
+        run: |
+          # Fork does not have Apple Developer certs, so override
+          # hardenedRuntime & notarize from package.json.
+          # Write a small override file that electron-builder merges.
+          cat > ./ci-mac-override.yml << 'EOF'
+          mac:
+            hardenedRuntime: false
+            notarize: false
+          EOF
+          npx electron-builder ${{ matrix.build-args }} --publish never --config ./ci-mac-override.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      # ── Post-build ────────────────────────────────────────────
       - name: List build artifacts
-        run: ls -lh dist/
+        run: |
+          ls -lh dist/ 2>/dev/null || echo "(empty dist/)"
+          echo "---"
+          find dist/ -type f 2>/dev/null | head -20
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-linux
-          path: |
-            dist/*.AppImage
-            dist/*.deb
-            dist/latest-linux*.yml
+          name: dist-${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-patterns }}
           if-no-files-found: error
           retention-days: 7
 
@@ -70,7 +149,14 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Create GitHub release
+      - name: List artifacts for release
+        run: |
+          echo "=== All release artifacts ==="
+          ls -lh dist/
+          echo "---"
+          find dist/ -type f | sort
+
+      - name: Create GitHub release (draft)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
