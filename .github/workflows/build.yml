@@ -12,165 +12,183 @@ permissions:
   contents: write
 
 jobs:
-  # Generate the build matrix dynamically so main pushes only build Linux
-  # while tag pushes build Linux + Windows + macOS.
-  matrix-gen:
-    runs-on: ubuntu-24.04
-    outputs:
-      targets: ${{ steps.set-matrix.outputs.targets }}
-    steps:
-      - id: set-matrix
-        run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo 'targets=["linux","win","mac-x64","mac-arm64"]' >> "$GITHUB_OUTPUT"
-          else
-            echo 'targets=["linux"]' >> "$GITHUB_OUTPUT"
-          fi
-          echo "DEBUG: ref=${{ github.ref }} ref_type=${{ github.ref_type }} targets=$(cat $GITHUB_OUTPUT | grep targets)"
-
-  build:
-    needs: matrix-gen
+  # ── Linux (always builds) ────────────────────────────────────
+  build-linux:
     if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix:
-        target: ${{ fromJSON(needs.matrix-gen.outputs.targets) }}
-        include:
-          - target: linux
-            os: ubuntu-24.04
-            build-args: --linux AppImage deb rpm freebsd
-            artifact-name: linux
-            artifact-patterns: |
-              dist/*.AppImage
-              dist/*.deb
-              dist/*.rpm
-              dist/*.freebsd
-              dist/latest-linux*.yml
-
-          - target: win
-            os: windows-latest
-            build-args: --win nsis portable
-            artifact-name: win
-            artifact-patterns: |
-              dist/*.exe
-              dist/*.exe.blockmap
-              dist/*.portable.exe
-              dist/latest.yml
-
-          - target: mac-x64
-            os: macos-13
-            build-args: --mac --x64
-            artifact-name: mac-x64
-            artifact-patterns: |
-              dist/*.dmg
-              dist/*.zip
-              dist/latest-mac.yml
-
-          - target: mac-arm64
-            os: macos-latest
-            build-args: --mac --arm64
-            artifact-name: mac-arm64
-            artifact-patterns: |
-              dist/*.dmg
-              dist/*.zip
-              dist/latest-mac.yml
-
-    runs-on: ${{ matrix.os }}
-
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
-      # ── System dependencies ───────────────────────────────────
-      - name: Install system deps (Linux)
-        if: matrix.target == 'linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq rpm 2>/dev/null || true
-
-      - name: Install system deps (macOS)
-        if: startsWith(matrix.target, 'mac')
-        run: echo "macOS runner ready"
-
-      # ── Node dependencies ─────────────────────────────────────
+      - name: Install system deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rpm 2>/dev/null || true
       - name: Install dependencies
         run: npm ci
-
       - name: Bundle CodeMirror
         run: npm run bundle:codemirror
-
-      # ── Build ─────────────────────────────────────────────────
-      - name: Build (Linux)
-        if: matrix.target == 'linux'
-        run: npx electron-builder ${{ matrix.build-args }} --publish never
+      - name: Build
+        run: npx electron-builder --linux AppImage deb rpm freebsd --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: List build artifacts
+        run: ls -lh dist/ 2>/dev/null || true
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+            dist/*.freebsd
+            dist/latest-linux*.yml
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Build (Windows)
-        if: matrix.target == 'win'
-        run: npx electron-builder ${{ matrix.build-args }} --publish never
+  # ── Windows (tag pushes only) ────────────────────────────────
+  build-win:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !cancelled() }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Bundle CodeMirror
+        run: npm run bundle:codemirror
+      - name: Build
+        run: npx electron-builder --win nsis portable --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: List build artifacts
+        run: Get-ChildItem dist/ -Recurse | Select-Object Length,Name
+        shell: pwsh
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-win
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/*.portable.exe
+            dist/latest.yml
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Build (macOS — unsigned, no notarization)
-        if: startsWith(matrix.target, 'mac')
+  # ── macOS Intel (tag pushes only) ────────────────────────────
+  build-mac-x64:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !cancelled() }}
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Bundle CodeMirror
+        run: npm run bundle:codemirror
+      - name: Build (unsigned)
         run: |
           cat > ./ci-mac-override.yml << 'EOF'
           mac:
             hardenedRuntime: false
             notarize: false
           EOF
-          npx electron-builder ${{ matrix.build-args }} --publish never --config ./ci-mac-override.yml
+          npx electron-builder --mac --x64 --publish never --config ./ci-mac-override.yml
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
-
-      # ── Post-build ────────────────────────────────────────────
       - name: List build artifacts
-        run: |
-          ls -lh dist/ 2>/dev/null || echo "(empty dist/)"
-          echo "---"
-          find dist/ -type f 2>/dev/null | head -20
-
+        run: ls -lh dist/ 2>/dev/null || true
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.artifact-name }}
-          path: ${{ matrix.artifact-patterns }}
+          name: dist-mac-x64
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/latest-mac.yml
           if-no-files-found: error
           retention-days: 7
 
+  # ── macOS ARM (tag pushes only) ──────────────────────────────
+  build-mac-arm64:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !cancelled() }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Bundle CodeMirror
+        run: npm run bundle:codemirror
+      - name: Build (unsigned)
+        run: |
+          cat > ./ci-mac-override.yml << 'EOF'
+          mac:
+            hardenedRuntime: false
+            notarize: false
+          EOF
+          npx electron-builder --mac --arm64 --publish never --config ./ci-mac-override.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: List build artifacts
+        run: ls -lh dist/ 2>/dev/null || true
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-mac-arm64
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/latest-mac.yml
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── Publish (tag pushes only, after all builds) ──────────────
   publish:
     needs:
-      - matrix-gen
-      - build
-    if: startsWith(github.ref, 'refs/tags/v') && !cancelled()
+      - build-linux
+      - build-win
+      - build-mac-x64
+      - build-mac-arm64
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-
       - name: List artifacts for release
         run: |
           echo "=== All release artifacts ==="
-          ls -lh dist/
+          ls -lh dist/ 2>/dev/null
           find dist/ -type f | sort
-
       - name: Create GitHub release (draft)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -180,13 +198,3 @@ jobs:
             --title "${GITHUB_REF_NAME#v}" \
             --notes "See [CHANGELOG](./CHANGELOG.md) for details." \
             dist/*
-
-  # Also publish main-branch builds so CI results are visible on
-  # non-release commits (the publish job above only runs on tags).
-  # This dummy ensures the workflow shows green even on main pushes.
-  done:
-    needs: build
-    if: ${{ !startsWith(github.ref, 'refs/tags/v') && !cancelled() }}
-    runs-on: ubuntu-24.04
-    steps:
-      - run: echo "✅ Linux build complete (no release for non-tag push)"
