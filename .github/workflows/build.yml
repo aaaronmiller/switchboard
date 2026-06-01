@@ -21,11 +21,12 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo 'targets=["linux","win","mac-x64","mac-arm64"]' >> "$GITHUB_OUTPUT"
           else
             echo 'targets=["linux"]' >> "$GITHUB_OUTPUT"
           fi
+          echo "DEBUG: ref=${{ github.ref }} ref_type=${{ github.ref_type }} targets=$(cat $GITHUB_OUTPUT | grep targets)"
 
   build:
     needs: matrix-gen
