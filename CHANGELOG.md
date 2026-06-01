@@ -70,7 +70,21 @@ All notable changes to Switchboard are documented in this file.
 - **White screen crash fully resolved** — All `webContents.send()` calls wrapped in `safeSend()`/`safeSendToSession()` guards across all modules (main.js, session-cache.js, session-transitions.js, mcp-bridge.js)
 - **AI titles no longer overwrite user renames** — `session_meta.name` now only written by genuine user renames; AI titles displayed separately via `session.aiTitle`
 
-## [Unreleased]
+## [0.0.36] - 2026-06-01
+
+### Added
+- **Multi-agent stacked sidebar** — Toggle (≡) in session filters shows all CLI agents'
+  sessions simultaneously in per-agent collapsible panels with colored headers
+- **Flagged section** — Starred sessions from all agents collected at top of multi-agent view
+- **Cross-platform builds** — CI now builds for Linux (AppImage, deb, rpm, freebsd),
+  Windows (NSIS installer, portable exe), and macOS (unsigned DMG, ZIP) on every tag push
+- **macOS unsigned builds** — DMG + ZIP for both Intel and Apple Silicon (no
+  notarization — fork lacks Apple signing certificates; Gatekeeper warning on first launch)
+
+### Changed
+- **Build matrix** — Now runs 4 parallel builds (linux, win, mac-x64, mac-arm64)
+  with `fail-fast: false` so each platform completes independently
+- **Publish step** — Merges artifacts from all platforms into a single draft release
 
 ## [0.0.17] - 2026-03-25
 
