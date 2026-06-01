@@ -188,6 +188,7 @@ let headlessState = new Map(); // sessionId → { events: [], lastAction: '', st
 let sortedOrder = []; // [{ projectPath, itemIds: [itemId, ...] }, ...] — single source of truth for sidebar order
 let activeTab = 'sessions';
 let activeAgent = localStorage.getItem('activeAgent') || 'claude'; // which CLI agent's sessions to show
+let multiAgentMode = localStorage.getItem('multiAgentMode') === '1'; // show all agents stacked
 let cachedAgentProjects = new Map(); // agentId → projects[] cache
 let installedAgents = {}; // populated on init
 let cachedPlans = [];
@@ -1014,6 +1015,17 @@ function updateTimeFilterButtons() {
 // resort=true: re-sort items by priority+time (use for user-initiated actions)
 // resort=false (default): preserve existing DOM order, new items go to top
 function refreshSidebar({ resort = false } = {}) {
+  if (multiAgentMode) {
+    // Multi-agent mode: load all and render stacked
+    loadAllAgentsData().then(agentData => {
+      renderMultiSidebar(agentData);
+      renderDefaultStatus();
+    }).catch(err => {
+      console.error('Failed to load multi-agent data:', err);
+    });
+    return;
+  }
+
   // When searching, always use all projects (search ignores archive filter)
   let projects = (searchMatchIds !== null)
     ? cachedAllProjects
@@ -1110,6 +1122,27 @@ todayToggle.addEventListener('click', () => {
 resortBtn.addEventListener('click', () => {
   loadProjects({ resort: true });
 });
+
+// --- Multi-agent toggle ---
+const multiAgentToggle = document.getElementById('multi-agent-toggle');
+if (multiAgentToggle) {
+  multiAgentToggle.addEventListener('click', async () => {
+    multiAgentMode = !multiAgentMode;
+    localStorage.setItem('multiAgentMode', multiAgentMode ? '1' : '0');
+    multiAgentToggle.classList.toggle('active', multiAgentMode);
+
+    if (multiAgentMode) {
+      // Switch to multi-agent view
+      await loadAllAgentsData().then(agentData => {
+        renderMultiSidebar(agentData);
+        renderDefaultStatus();
+      });
+    } else {
+      // Switch back to single-agent view
+      loadProjectsForAgent();
+    }
+  });
+}
 
 // --- Global settings gear button ---
 globalSettingsBtn.innerHTML = ICONS.gear(18);
@@ -6360,6 +6393,332 @@ async function loadProjectsForAgent() {
   }
 }
 
+// --- Multi-Agent Mode ---
+// Loads ALL installed agents' sessions and renders them stacked in the sidebar.
+async function loadAllAgentsData() {
+  const agentIds = Object.entries(installedAgents)
+    .filter(([, a]) => a.installed)
+    .map(([id]) => id);
+
+  // Build agent → projects map
+  const agentData = new Map();
+
+  for (const id of agentIds) {
+    let projects;
+    if (id === 'claude') {
+      const [, all] = await Promise.all([window.api.getProjects(false), window.api.getProjects(true)]);
+      projects = all;
+    } else {
+      try {
+        projects = await window.api.getAgentSessions(id);
+      } catch { projects = []; }
+    }
+    if (!projects) projects = [];
+    // Tag sessions with agent id
+    for (const proj of projects) {
+      for (const s of proj.sessions) {
+        if (!s.agent) s.agent = id;
+        sessionAgentMap.set(s.sessionId, id);
+        // Also populate sessionMap so openSession() can find them
+        if (!sessionMap.has(s.sessionId)) {
+          sessionMap.set(s.sessionId, s);
+        }
+      }
+    }
+    cachedAgentProjects.set(id, projects);
+    agentData.set(id, projects);
+  }
+
+  return agentData;
+}
+
+// Render all agents' sessions stacked in the sidebar with:
+//   1. Pinned section at top (all starred sessions across agents)
+//   2. Per-agent collapsible panels below
+function renderMultiSidebar(agentData) {
+  const container = document.createElement('div');
+  container.className = 'multi-agent-sidebar';
+
+  // --- Step 1: Pinned section at top ---
+  const pinnedSection = document.createElement('div');
+  pinnedSection.className = 'multi-pinned-section';
+
+  const pinnedHeader = document.createElement('div');
+  pinnedHeader.className = 'agent-panel-header pinned-header';
+  pinnedHeader.innerHTML = `
+    <span class="agent-panel-dot pinned-dot">&#9733;</span>
+    <span class="agent-panel-name">Flagged</span>
+    <span class="agent-panel-count"></span>
+    <span class="agent-panel-arrow">&#9660;</span>
+  `;
+
+  const pinnedBody = document.createElement('div');
+  pinnedBody.className = 'agent-panel-body';
+  pinnedBody.id = 'multi-pinned-body';
+
+  pinnedSection.appendChild(pinnedHeader);
+  pinnedSection.appendChild(pinnedBody);
+  container.appendChild(pinnedSection);
+
+  // --- Step 2: Per-agent panels ---
+  for (const [agentId, projects] of agentData) {
+    const agentInfo = installedAgents[agentId] || AGENT_COLORS[agentId] || {};
+    const color = agentInfo.color || AGENT_COLORS[agentId] || '#888';
+    const name = agentInfo.name || agentId.charAt(0).toUpperCase() + agentId.slice(1);
+
+    // Compute total sessions and active across projects
+    let totalSessions = 0;
+    let activeCount = 0;
+    let pinnedCount = 0;
+    for (const proj of projects) {
+      for (const s of proj.sessions) {
+        totalSessions++;
+        if (activePtyIds.has(s.sessionId)) activeCount++;
+        if (s.starred) pinnedCount++;
+      }
+    }
+
+    if (totalSessions === 0) continue; // skip agents with no data
+
+    const panel = document.createElement('div');
+    panel.className = 'agent-panel';
+    panel.id = 'agent-panel-' + agentId;
+
+    const header = document.createElement('div');
+    header.className = 'agent-panel-header';
+    header.style.borderLeftColor = color;
+    header.innerHTML = `
+      <span class="agent-panel-dot" style="background:${color}"></span>
+      <span class="agent-panel-name">${name}</span>
+      <span class="agent-panel-count">${activeCount ? activeCount + ' \u25CF ' : ''}${totalSessions}</span>
+      <span class="agent-panel-arrow">&#9660;</span>
+    `;
+
+    const body = document.createElement('div');
+    body.className = 'agent-panel-body';
+
+    // Collapsed by default if > 3 days since last activity
+    const lastActivity = projects.reduce((latest, p) => {
+      const last = p.sessions[0]?.modified;
+      return last && (!latest || last > latest) ? last : latest;
+    }, null);
+    const isStale = lastActivity && (Date.now() - new Date(lastActivity)) > 3 * 86400000;
+
+    panel.appendChild(header);
+    panel.appendChild(body);
+    container.appendChild(panel);
+
+    // Build project groups into the agent panel body
+    buildAgentProjectsInto(projects, body, agentId);
+
+    // Collapse if stale
+    if (isStale) {
+      panel.classList.add('collapsed');
+    }
+  }
+
+  // --- Populate pinned section ---
+  populatePinnedSection(pinnedBody, agentData);
+
+  // Replace sidebar content
+  sidebarContent.innerHTML = '';
+  sidebarContent.appendChild(container);
+
+  // Bind collapse/expand toggles
+  container.querySelectorAll('.agent-panel-header').forEach(hdr => {
+    hdr.addEventListener('click', (e) => {
+      if (e.target.closest('.agent-panel-header')) {
+        hdr.parentElement.classList.toggle('collapsed');
+        saveExpandedSlugs(); // reuse same storage
+      }
+    });
+  });
+
+  rebindMultiSidebarEvents();
+}
+
+// Build project group DOM into a container for multi-agent mode.
+// Reuses buildSessionItem from sidebar.js and builds project-group divs.
+function buildAgentProjectsInto(projects, container, agentId) {
+  const savedProjects = cachedProjects;
+  const savedAll = cachedAllProjects;
+  cachedProjects = projects;
+  cachedAllProjects = projects;
+  const savedAgent = activeAgent;
+  activeAgent = agentId;
+
+  // Process each project: filter, sort, slug-group
+  for (const project of projects) {
+    let filtered = project.sessions;
+    if (filtered.length === 0) continue;
+
+    // Sort: running first, then pinned, then by date
+    filtered = [...filtered].sort((a, b) => {
+      const aRunning = activePtyIds.has(a.sessionId);
+      const bRunning = activePtyIds.has(b.sessionId);
+      const aPri = (a.starred && aRunning ? 3 : aRunning ? 2 : a.starred ? 1 : 0);
+      const bPri = (b.starred && bRunning ? 3 : bRunning ? 2 : b.starred ? 1 : 0);
+      if (aPri !== bPri) return bPri - aPri;
+      return new Date(b.modified) - new Date(a.modified);
+    });
+
+    // Build project group
+    const fId = folderId(project.projectPath);
+    const group = document.createElement('div');
+    group.className = 'project-group';
+    group.id = fId;
+
+    const header = document.createElement('div');
+    header.className = 'project-header';
+    header.id = 'ph-' + fId;
+    const shortName = project.projectPath.split('/').filter(Boolean).slice(-2).join('/') || project.folder || 'unknown';
+    header.innerHTML = `<span class="arrow">&#9660;</span> <span class="project-name">${shortName}</span>`;
+    group.appendChild(header);
+
+    // Slug grouping
+    const slugMap = new Map();
+    const ungrouped = [];
+    for (const session of filtered) {
+      if (session.slug) {
+        if (!slugMap.has(session.slug)) slugMap.set(session.slug, []);
+        slugMap.get(session.slug).push(session);
+      } else {
+        ungrouped.push(session);
+      }
+    }
+
+    const sessionsList = document.createElement('div');
+    sessionsList.className = 'project-sessions';
+    sessionsList.id = 'sessions-' + fId;
+
+    for (const session of ungrouped) {
+      sessionsList.appendChild(buildSessionItem(session));
+    }
+    for (const [slug, sessions] of slugMap) {
+      const element = sessions.length === 1 ? buildSessionItem(sessions[0]) : buildSlugGroup(slug, sessions);
+      sessionsList.appendChild(element);
+    }
+
+    group.appendChild(sessionsList);
+    container.appendChild(group);
+
+    // Auto-collapse if stale
+    const mostRecent = filtered[0]?.modified;
+    if (mostRecent && (Date.now() - new Date(mostRecent)) > 3 * 86400000) {
+      header.classList.add('collapsed');
+    }
+  }
+
+  // Restore global state
+  cachedProjects = savedProjects;
+  cachedAllProjects = savedAll;
+  activeAgent = savedAgent;
+}
+
+function populatePinnedSection(body, agentData) {
+  // Gather all pinned sessions across all agents
+  const allPinned = [];
+  for (const [agentId, projects] of agentData) {
+    for (const proj of projects) {
+      for (const s of proj.sessions) {
+        if (s.starred) {
+          allPinned.push({ ...s, agent: s.agent || agentId });
+        }
+      }
+    }
+  }
+
+  if (allPinned.length === 0) {
+    body.innerHTML = '<div class="multi-empty">No pinned sessions</div>';
+    // Update count
+    const pinnedHeader = document.querySelector('.pinned-header .agent-panel-count');
+    if (pinnedHeader) pinnedHeader.textContent = '0';
+    return;
+  }
+
+  // Update count
+  const pinnedHeader = document.querySelector('.pinned-header .agent-panel-count');
+  if (pinnedHeader) pinnedHeader.textContent = String(allPinned.length);
+
+  // Build session items for pinned
+  const pinnedContainer = document.createElement('div');
+  pinnedContainer.className = 'multi-agent-pinned-sessions';
+  for (const session of allPinned) {
+    const item = buildSessionItem(session);
+    // Add agent badge
+    const info = item.querySelector('.session-info');
+    if (info) {
+      const agentBadge = document.createElement('span');
+      agentBadge.className = 'session-agent-badge';
+      const color = AGENT_COLORS[session.agent] || '#888';
+      agentBadge.style.color = color;
+      agentBadge.textContent = session.agent;
+      info.appendChild(agentBadge);
+    }
+    pinnedContainer.appendChild(item);
+  }
+  body.innerHTML = '';
+  body.appendChild(pinnedContainer);
+}
+
+function rebindMultiSidebarEvents() {
+  // Session item clicks
+  sidebarContent.querySelectorAll('.session-item').forEach(item => {
+    const sessionId = item.dataset.sessionId;
+    const session = sessionMap.get(sessionId);
+    if (!session) return;
+    item.onclick = () => openSession(session);
+
+    const pin = item.querySelector('.session-pin');
+    if (pin) {
+      pin.onclick = async (e) => {
+        e.stopPropagation();
+        const { starred } = await window.api.toggleStar(session.sessionId);
+        session.starred = starred;
+        // Refresh multi-agent view
+        if (multiAgentMode) {
+          const data = await loadAllAgentsData();
+          renderMultiSidebar(data);
+        }
+      };
+    }
+
+    const summaryEl = item.querySelector('.session-summary');
+    if (summaryEl) {
+      summaryEl.ondblclick = (e) => { e.stopPropagation(); startRename(summaryEl, session); };
+    }
+
+    const stopBtn = item.querySelector('.session-stop-btn');
+    if (stopBtn) {
+      stopBtn.onclick = (e) => {
+        e.stopPropagation();
+        confirmAndStopSession(session.sessionId);
+      };
+    }
+
+    // Other buttons: fork, jsonl, archive, launch config
+    const archiveBtn = item.querySelector('.session-archive-btn');
+    if (archiveBtn) {
+      archiveBtn.onclick = async (e) => {
+        e.stopPropagation();
+        const newVal = session.archived ? 0 : 1;
+        if (newVal && activePtyIds.has(session.sessionId)) {
+          await window.api.stopSession(session.sessionId);
+          pollActiveSessions();
+        }
+        await window.api.archiveSession(session.sessionId, newVal);
+        session.archived = newVal;
+        if (multiAgentMode) {
+          const data = await loadAllAgentsData();
+          renderMultiSidebar(data);
+        } else {
+          loadProjects();
+        }
+      };
+    }
+  });
+}
+
 // --- Detached window mode ---
 // When loaded with ?detached=<sessionId>, show just the terminal (no sidebar nav).
 const _detachedSessionId = new URLSearchParams(window.location.search).get('detached');
@@ -6409,7 +6768,16 @@ if (_detachedSessionId) {
   });
 } else {
 
-// Initial load — respect saved meta-view or agent selection
+// Initial load — respect saved meta-view, agent selection, or multi-agent mode
+if (multiAgentMode) {
+  loadAllAgentsData().then(agentData => {
+    renderMultiSidebar(agentData);
+    renderDefaultStatus();
+    // Sync multi-agent toggle state
+    const mat = document.getElementById('multi-agent-toggle');
+    if (mat) mat.classList.add('active');
+  });
+} else
 (activeAgent.startsWith('_') ? loadMetaView(activeAgent) : loadProjects()).then(() => {
   // Sync filter button states for meta-views
   if (activeAgent === '_active') { showRunningOnly = true; runningToggle.classList.add('active'); }

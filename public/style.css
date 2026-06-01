@@ -5985,6 +5985,172 @@ button:focus:not(:focus-visible),
   font-size: 14px;
 }
 
+/* ========== Multi-Agent Sidebar ========== */
+.multi-agent-sidebar {
+  padding: 0 0 12px;
+}
+
+/* Agent panel (collapsible section for each CLI agent) */
+.agent-panel {
+  margin: 6px 8px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.06);
+  transition: background 0.15s;
+}
+.agent-panel:hover {
+  border-color: rgba(255,255,255,0.10);
+}
+
+.agent-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #c0c0d8;
+  cursor: pointer;
+  user-select: none;
+  border-left: 3px solid #888;
+  background: rgba(255,255,255,0.02);
+  transition: background 0.15s;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.agent-panel-header:hover {
+  background: rgba(255,255,255,0.04);
+  color: #d8d8f0;
+}
+
+.agent-panel-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.agent-panel-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-panel-count {
+  font-size: 11px;
+  font-weight: 500;
+  color: #666680;
+  white-space: nowrap;
+}
+
+.agent-panel-arrow {
+  font-size: 10px;
+  color: #555570;
+  transition: transform 0.2s;
+}
+
+.agent-panel.collapsed .agent-panel-arrow {
+  transform: rotate(-90deg);
+}
+
+.agent-panel.collapsed .agent-panel-body {
+  display: none;
+}
+
+.agent-panel-body {
+  padding: 0 0 4px;
+}
+
+.agent-panel-body .project-group {
+  margin: 4px 6px;
+}
+
+.agent-panel-body .project-group:first-child {
+  margin-top: 4px;
+}
+
+/* Pinned section at top of multi-agent view */
+.multi-pinned-section {
+  margin: 6px 8px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(250, 204, 21, 0.04);
+  border: 1px solid rgba(250, 204, 21, 0.15);
+}
+.multi-pinned-section:hover {
+  border-color: rgba(250, 204, 21, 0.25);
+}
+.multi-pinned-section .agent-panel-header {
+  border-left-color: #eab308;
+  background: rgba(250, 204, 21, 0.04);
+}
+.pinned-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  color: #eab308;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: none !important;
+  width: 14px;
+  height: 14px;
+}
+
+.multi-agent-pinned-sessions {
+  padding: 2px 0;
+}
+.multi-agent-pinned-sessions .session-item {
+  border-left: 2px solid rgba(250, 204, 21, 0.2);
+}
+
+.multi-empty {
+  padding: 16px 14px;
+  color: #666680;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* Agent badge on session items in multi-agent view */
+.session-agent-badge {
+  font-size: 10px;
+  font-weight: 600;
+  margin-top: 2px;
+  display: inline-block;
+  opacity: 0.8;
+}
+
+/* Multi-agent toggle button */
+#multi-agent-toggle {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #7a7a90;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 13px;
+  line-height: 1.4;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.15s;
+}
+#multi-agent-toggle:hover {
+  background: rgba(255,255,255,0.06);
+  color: #aaa;
+  border-color: rgba(255,255,255,0.12);
+}
+#multi-agent-toggle.active {
+  background: rgba(120, 130, 255, 0.15);
+  color: #8088ff;
+  border-color: rgba(120, 130, 255, 0.3);
+}
+
 /* ========== Feature 4: Enhanced activity-recent styling ========== */
 .session-item.activity-recent {
   box-shadow: 0 0 8px rgba(34,197,94,0.3), inset 0 0 0 1px rgba(34,197,94,0.15);
