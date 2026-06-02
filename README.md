@@ -197,7 +197,7 @@ Output goes to `dist/`.
 │   └── codemirror-setup.js    # Editor configuration
 ├── scripts/                   # Build & postinstall scripts
 ├── build/                     # Icons, entitlements, resources
-├── ROADMAP.md                 # Feature roadmap & implementation plan
+├── archive/                   # Stale planning docs and tools (historical reference)
 └── .github/workflows/         # CI/CD pipelines
 ```
 
@@ -205,20 +205,22 @@ Output goes to `dist/`.
 
 ## Fork: What's Different
 
-This is a fork of [doctly/switchboard](https://github.com/doctly/switchboard) with significant additions for multi-agent orchestration:
+This is a fork of [doctly/switchboard](https://github.com/doctly/switchboard) with significant additions for multi-agent orchestration and cross-platform distribution:
 
 | Addition | Description |
 |----------|-------------|
-| **Multi-session management** | Run multiple AI CLI sessions in parallel to bypass per-session token limits |
+| **Multi-agent session history** | 15 CLI tools detected (Claude, Codex, Qwen, Gemini, Kimi, Aider, OpenCode, Hermes, Letta, Amp, Goose, Continue, Cursor, Cline) — session discovery, live IPC handlers, per-agent caching |
+| **Multi-agent stacked sidebar** | Toggle (≡) switches between single-agent view and a stacked view showing ALL agents' sessions simultaneously, with collapsible per-agent panels, colored headers, and a pinned section across all agents |
 | **Command Scheduler** | 1,375-line visual workflow engine with 9 step types |
 | **Pattern Library** | 20+ built-in orchestration recipes (315 lines) |
 | **Session Roles & Broadcast** | Tag-based targeting and live input mirroring |
 | **Macro Recording** | Capture keystrokes, auto-detect pauses, save as patterns |
 | **Peer Messaging Integration** | Scheduler can send peer messages and launch headless sessions as workflow steps |
+| **Cross-platform distribution** | CI builds Linux (AppImage, deb, rpm, freebsd), Windows (NSIS installer + portable), and macOS (DMG + ZIP for Intel + Apple Silicon) |
 
 ### Auto-Sync with Upstream
 
-A GitHub Action runs daily to auto-merge upstream changes (if no conflicts).
+A scheduled GitHub Action runs daily for automated upstream sync:
 
 ```bash
 # Manual sync (if needed)
@@ -227,9 +229,10 @@ git fetch upstream
 git merge upstream/main
 ```
 
+Upstream merges follow a careful strategy: the sync workflow restores fork-specific files (`.github/workflows/`, `main.js` customizations, `public/app.js`) after merge, and opens a review PR if conflicts are detected.
+
 ---
 
 ## License
 
 MIT — See [LICENSE](LICENSE) for details.
-test
