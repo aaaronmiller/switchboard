@@ -7,24 +7,26 @@ const fs = require('fs');
  */
 let PROJECTS_DIR, activeSessions, getMainWindow, log, rekeyMcpServer;
 
+// Module-scope so detectSessionTransitions() can reference it (it closes over the
+// module-level getMainWindow/log bindings that init() assigns).
+function safeSend(channel, ...args) {
+  try {
+    const mw = getMainWindow?.();
+    if (mw && !mw.isDestroyed() && mw.webContents) {
+      mw.webContents.send(channel, ...args);
+    }
+  } catch (err) {
+    if (err.message?.includes('disposed')) return;
+    log?.warn('[safeSend] error:', err.message);
+  }
+}
+
 function init(ctx) {
   PROJECTS_DIR = ctx.PROJECTS_DIR;
   activeSessions = ctx.activeSessions;
   getMainWindow = ctx.getMainWindow;
   log = ctx.log;
   rekeyMcpServer = ctx.rekeyMcpServer;
-  
-  function safeSend(channel, ...args) {
-    try {
-      const mw = getMainWindow();
-      if (mw && !mw.isDestroyed() && mw.webContents) {
-        mw.webContents.send(channel, ...args);
-      }
-    } catch (err) {
-      if (err.message?.includes('disposed')) return;
-      log?.warn('[safeSend] error:', err.message);
-    }
-  }
 }
 
 // --- Fork / plan-accept detection ---

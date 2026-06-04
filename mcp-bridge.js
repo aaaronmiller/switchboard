@@ -36,6 +36,19 @@ function findFreePort() {
   });
 }
 
+/** Safely send an IPC message to a session's renderer window, guarding against
+ *  disposed render frames. Module-scoped so every handler can use it. */
+function safeSend(win, log, channel, ...args) {
+  try {
+    if (win && !win.isDestroyed() && win.webContents) {
+      win.webContents.send(channel, ...args);
+    }
+  } catch (err) {
+    if (err.message?.includes('disposed')) return;
+    log?.warn('[mcp safeSend] error:', err.message);
+  }
+}
+
 /** Build the JSON-RPC 2.0 response envelope. */
 function rpcResult(id, result) {
   return JSON.stringify({ jsonrpc: '2.0', id, result });
@@ -252,19 +265,8 @@ async function handleOpenDiff(entry, rpcId, args, log) {
   });
 
   // Send to renderer
-  function safeSend(channel, ...args) {
-    try {
-      if (entry.mainWindow && !entry.mainWindow.isDestroyed() && entry.mainWindow.webContents) {
-        entry.mainWindow.webContents.send(channel, ...args);
-      }
-    } catch (err) {
-      if (err.message?.includes('disposed')) return;
-      log?.warn('[mcp safeSend] error:', err.message);
-    }
-  }
-  
   if (entry.mainWindow && !entry.mainWindow.isDestroyed()) {
-    safeSend('mcp-open-diff', entry.sessionId, diffId, {
+    safeSend(entry.mainWindow, log, 'mcp-open-diff', entry.sessionId, diffId, {
       oldFilePath: old_file_path,
       oldContent,
       newContent: new_file_contents,
@@ -315,7 +317,7 @@ async function handleOpenFile(entry, rpcId, args, log) {
   }
 
   if (entry.mainWindow && !entry.mainWindow.isDestroyed()) {
-    safeSend('mcp-open-file', entry.sessionId, {
+    safeSend(entry.mainWindow, log, 'mcp-open-file', entry.sessionId, {
       filePath,
       content,
       preview: preview ?? false,
@@ -340,7 +342,7 @@ async function handleCloseTab(entry, rpcId, args, log) {
       pending.resolve({ action: 'accept' });
 
       // Notify renderer to close the tab
-      safeSend('mcp-close-tab', entry.sessionId, diffId);
+      safeSend(entry.mainWindow, log, 'mcp-close-tab', entry.sessionId, diffId);
       break;
     }
   }
@@ -359,7 +361,7 @@ async function handleCloseAllDiffTabs(entry, rpcId, log) {
   }
   entry.pendingDiffs.clear();
 
-  safeSend('mcp-close-all-diffs', entry.sessionId);
+  safeSend(entry.mainWindow, log, 'mcp-close-all-diffs', entry.sessionId);
 
   sendResult(entry, rpcId, {
     content: [{ type: 'text', text: 'ok' }],

@@ -3,11 +3,17 @@ const AGENT_COLORS = {
   claude: '#d97757', codex: '#4ade80', qwen: '#60a5fa',
   gemini: '#22d3ee', kimi: '#fb923c', aider: '#a78bfa',
   opencode: '#f472b6', hermes: '#fbbf24', letta: '#34d399',
+  amp: '#e879f9', goose: '#fb7185', continue: '#06b6d4',
+  cursor: '#8b5cf6', cline: '#f97316',
+  antigravity: '#2dd4bf', pi: '#c084fc', kilo: '#facc15',
 };
 const AGENT_LABELS = {
   claude: 'Claude', codex: 'Codex', qwen: 'Qwen',
   gemini: 'Gemini', kimi: 'Kimi', aider: 'Aider',
   opencode: 'OpenCode', hermes: 'Hermes', letta: 'Letta',
+  amp: 'Amp', goose: 'Goose', continue: 'Continue',
+  cursor: 'Cursor', cline: 'Cline',
+  antigravity: 'Antigravity', pi: 'Pi', kilo: 'Kilo',
 };
 
 const statusBarInfo = document.getElementById('status-bar-info');
@@ -191,6 +197,21 @@ let activeAgent = localStorage.getItem('activeAgent') || 'claude'; // which CLI 
 let multiAgentMode = localStorage.getItem('multiAgentMode') === '1'; // show all agents stacked
 let cachedAgentProjects = new Map(); // agentId → projects[] cache
 let installedAgents = {}; // populated on init
+// Flagged agents: a user-curated set of CLIs whose sessions are shown together
+// in the "Flagged" meta-view (lets you watch >1 CLI at once without losing the
+// single-CLI views). Persisted across restarts.
+let flaggedAgents = new Set((() => {
+  try { return JSON.parse(localStorage.getItem('flaggedAgents') || '[]'); } catch { return []; }
+})());
+function saveFlaggedAgents() {
+  localStorage.setItem('flaggedAgents', JSON.stringify([...flaggedAgents]));
+}
+// Allow the settings panel to push flag changes back into the live sidebar.
+window._syncFlaggedAgents = function () {
+  try { flaggedAgents = new Set(JSON.parse(localStorage.getItem('flaggedAgents') || '[]')); } catch {}
+  if (typeof rebuildAgentSelector === 'function') rebuildAgentSelector();
+  if (activeAgent === '_flagged' && typeof loadMetaView === 'function') loadMetaView('_flagged');
+};
 let cachedPlans = [];
 let visibleSessionCount = 10;
 let sessionMaxAgeDays = 3;
@@ -2080,6 +2101,17 @@ function buildSessionItem(session) {
   // F5.6: Git status color class
   const gitClass = session.gitStatus ? `git-${session.gitStatus}` : 'git-unknown';
   item.classList.add(gitClass);
+
+  // Per-CLI color accent: tint the card's left edge with the agent's color so
+  // sessions from different CLIs are visually distinguishable (esp. in combined
+  // / flagged / running views that mix multiple agents).
+  const cardAgent = session.agent || sessionAgentMap.get(session.sessionId) || 'claude';
+  const cardAgentColor = AGENT_COLORS[cardAgent];
+  if (cardAgentColor) {
+    item.classList.add('has-agent-color');
+    item.dataset.agent = cardAgent;
+    item.style.setProperty('--agent-color', cardAgentColor);
+  }
 
   item.dataset.sessionId = session.sessionId;
 
@@ -5879,60 +5911,113 @@ function showAddProjectDialog() {
   collapseBtn.addEventListener('click', () => sidebar.classList.add('collapsed'));
   expandBtn.addEventListener('click', () => sidebar.classList.remove('collapsed'));
 
-  // Right-click context menu on sidebar expand button
+  // Right-click context menu \u2014 pick a CLI to view, or flag CLIs to combine.
+  // Attached to both the sidebar expand button and the Claude logo (sessions tab).
   const ctxMenu = document.getElementById('agent-context-menu');
-  expandBtn.addEventListener('contextmenu', async (e) => {
+
+  function selectAgentView(id) {
+    activeAgent = id;
+    localStorage.setItem('activeAgent', id);
+    const selContainer = document.getElementById('agent-selector');
+    if (selContainer) {
+      selContainer.querySelectorAll('.agent-selector-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.agent === id)
+      );
+    }
+    showStarredOnly = false; showRunningOnly = false;
+    if (starToggle) starToggle.classList.remove('active');
+    if (runningToggle) runningToggle.classList.remove('active');
+    if (typeof rebuildAgentSelector === 'function') rebuildAgentSelector();
+    loadProjectsForAgent();
+  }
+
+  async function openAgentContextMenu(anchorEl, e) {
     e.preventDefault();
     e.stopPropagation();
 
-    // Detect agents if not already cached
     let agents = installedAgents;
     if (!agents || Object.keys(agents).length === 0) {
       try { agents = await window.api.detectAgents(); } catch { agents = {}; }
     }
-
     const installedEntries = Object.entries(agents).filter(([, a]) => a.installed);
     if (installedEntries.length === 0) return;
 
-    // Build menu items
     ctxMenu.innerHTML = '';
+
+    // Header
+    const hdr = document.createElement('div');
+    hdr.className = 'agent-context-menu-header';
+    hdr.textContent = 'Show CLI sessions';
+    ctxMenu.appendChild(hdr);
+
     for (const [id, agent] of installedEntries) {
-      const item = document.createElement('button');
-      item.className = 'agent-context-menu-item';
-      const dotColor = agent.color || '#888';
+      const item = document.createElement('div');
+      item.className = 'agent-context-menu-item' + (id === activeAgent ? ' active' : '');
+      const dotColor = agent.color || AGENT_COLORS[id] || '#888';
       const isActive = id === activeAgent;
-      item.innerHTML = `
+      const isFlagged = flaggedAgents.has(id);
+
+      const label = document.createElement('button');
+      label.className = 'ctx-item-label';
+      label.innerHTML = `
         <span class="ctx-dot" style="background:${dotColor}"></span>
         <span>${agent.name}</span>
         ${isActive ? '<span class="ctx-checkmark">\u2713</span>' : ''}
       `;
-      item.addEventListener('click', () => {
-        if (id === activeAgent) return;
-        activeAgent = id;
-        localStorage.setItem('activeAgent', id);
-        // Update agent-selector buttons
-        const selContainer = document.getElementById('agent-selector');
-        if (selContainer) {
-          selContainer.querySelectorAll('.agent-selector-btn').forEach(b =>
-            b.classList.toggle('active', b.dataset.agent === id)
-          );
-        }
-        // Clear meta-view state
-        showStarredOnly = false; showRunningOnly = false;
-        if (starToggle) starToggle.classList.remove('active');
-        if (runningToggle) runningToggle.classList.remove('active');
-        loadProjectsForAgent();
+      label.addEventListener('click', () => {
+        selectAgentView(id);
         ctxMenu.style.display = 'none';
       });
+
+      // Flag toggle \u2014 adds/removes this CLI from the combined "Flagged" view
+      const flagBtn = document.createElement('button');
+      flagBtn.className = 'ctx-flag-btn' + (isFlagged ? ' flagged' : '');
+      flagBtn.title = isFlagged ? 'Remove from Flagged view' : 'Add to Flagged view';
+      flagBtn.innerHTML = isFlagged ? '\u2691' : '\u2690'; // filled / outline flag
+      flagBtn.style.color = isFlagged ? dotColor : '';
+      flagBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (flaggedAgents.has(id)) flaggedAgents.delete(id);
+        else flaggedAgents.add(id);
+        saveFlaggedAgents();
+        flagBtn.classList.toggle('flagged');
+        flagBtn.innerHTML = flaggedAgents.has(id) ? '\u2691' : '\u2690';
+        flagBtn.style.color = flaggedAgents.has(id) ? dotColor : '';
+        if (typeof rebuildAgentSelector === 'function') rebuildAgentSelector();
+        // If currently viewing the flagged combined view, refresh it live
+        if (activeAgent === '_flagged') loadMetaView('_flagged');
+      });
+
+      item.appendChild(label);
+      item.appendChild(flagBtn);
       ctxMenu.appendChild(item);
     }
 
-    // Position menu below the button
-    const rect = expandBtn.getBoundingClientRect();
+    // Footer action: open the combined Flagged view
+    const sep = document.createElement('div');
+    sep.className = 'agent-context-menu-sep';
+    ctxMenu.appendChild(sep);
+    const flaggedView = document.createElement('button');
+    flaggedView.className = 'agent-context-menu-item ctx-item-label';
+    flaggedView.innerHTML = `<span class="ctx-dot" style="background:#ef4444">\u2691</span><span>View Flagged (${flaggedAgents.size})</span>`;
+    flaggedView.addEventListener('click', () => {
+      selectAgentView('_flagged');
+      ctxMenu.style.display = 'none';
+    });
+    ctxMenu.appendChild(flaggedView);
+
+    const rect = anchorEl.getBoundingClientRect();
     ctxMenu.style.top = (rect.bottom + 4) + 'px';
     ctxMenu.style.left = rect.left + 'px';
     ctxMenu.style.display = 'block';
-  });
+  }
+
+  expandBtn.addEventListener('contextmenu', (e) => openAgentContextMenu(expandBtn, e));
+  // The Claude logo (sessions tab) \u2014 primary right-click target per UX request.
+  const sessionsTabIcon = document.querySelector('.sidebar-tab[data-tab="sessions"]');
+  if (sessionsTabIcon) {
+    sessionsTabIcon.addEventListener('contextmenu', (e) => openAgentContextMenu(sessionsTabIcon, e));
+  }
 
   // Close context menu on click outside or Escape
   document.addEventListener('mousedown', (e) => {
@@ -6224,13 +6309,20 @@ document.addEventListener('keydown', (e) => {
 // Meta-views: special sidebar views that aggregate across CLIs
 const META_VIEWS = {
   '_active': { label: 'Active', icon: '&#9679;', color: '#22c55e', title: 'All running sessions across every CLI' },
+  '_flagged': { label: 'Flagged', icon: '&#9873;', color: '#ef4444', title: 'Combined sessions from all flagged CLIs' },
   '_pinned': { label: 'Pinned', icon: '&#9733;', color: '#eab308', title: 'Pinned sessions from all CLIs' },
 };
 
 async function loadMetaView(viewId) {
-  // Gather sessions from ALL installed agents
+  // Gather sessions from the relevant agent set. The "_flagged" view aggregates
+  // only the user's flagged CLIs; the other meta-views span all installed agents.
   const allProjects = [];
-  const agentIds = Object.entries(installedAgents).filter(([, a]) => a.installed).map(([id]) => id);
+  let agentIds = Object.entries(installedAgents).filter(([, a]) => a.installed).map(([id]) => id);
+  if (viewId === '_flagged') {
+    agentIds = agentIds.filter(id => flaggedAgents.has(id));
+    // Always include claude if flagged even when not in installedAgents map
+    if (flaggedAgents.has('claude') && !agentIds.includes('claude')) agentIds.push('claude');
+  }
 
   const results = await Promise.all(agentIds.map(async (id) => {
     if (id === 'claude') {
@@ -6291,44 +6383,52 @@ async function loadMetaView(viewId) {
   startSessionFileWatchers(projects);
 }
 
-(async function initAgentSelector() {
-  try {
-    installedAgents = await window.api.detectAgents();
-  } catch { installedAgents = {}; }
+// Ordered list of selectable views (meta-views + per-CLI agents) — the order the
+// rotate arrows cycle through. Rebuilt whenever the selector is rebuilt.
+let orderedAgentViews = [];
 
+function setActiveAgentView(viewId) {
+  activeAgent = viewId;
+  localStorage.setItem('activeAgent', viewId);
+  showStarredOnly = false; showRunningOnly = false;
+  if (starToggle) starToggle.classList.remove('active');
+  if (runningToggle) runningToggle.classList.remove('active');
+  if (typeof rebuildAgentSelector === 'function') rebuildAgentSelector();
+  if (viewId.startsWith('_')) loadMetaView(viewId);
+  else loadProjectsForAgent();
+}
+
+// Rotate the active CLI to the previous/next view in the toolbar (arrow buttons).
+function rotateAgentView(dir) {
+  if (orderedAgentViews.length === 0) return;
+  let idx = orderedAgentViews.indexOf(activeAgent);
+  if (idx === -1) idx = 0;
+  idx = (idx + dir + orderedAgentViews.length) % orderedAgentViews.length;
+  setActiveAgentView(orderedAgentViews[idx]);
+}
+
+function rebuildAgentSelector() {
   const container = document.getElementById('agent-selector');
   if (!container) return;
 
   const agentsToShow = Object.entries(installedAgents).filter(([, a]) => a.installed);
-
-  // Always show — meta-views are useful even with only Claude
   container.style.display = '';
   container.innerHTML = '';
+  orderedAgentViews = [];
 
-  function setActive(viewId) {
-    activeAgent = viewId;
-    localStorage.setItem('activeAgent', viewId);
-    container.querySelectorAll('.agent-selector-btn').forEach(b =>
-      b.classList.toggle('active', b.dataset.agent === viewId)
-    );
-  }
-
-  // Meta-view buttons first
+  // Meta-view buttons first. The "_flagged" combined view is only shown once the
+  // user has flagged at least one CLI (otherwise it would always be empty).
   for (const [viewId, meta] of Object.entries(META_VIEWS)) {
+    if (viewId === '_flagged' && flaggedAgents.size === 0) continue;
     const btn = document.createElement('button');
     btn.className = 'agent-selector-btn meta-view-btn' + (viewId === activeAgent ? ' active' : '');
     btn.dataset.agent = viewId;
+    const extra = viewId === '_flagged' ? ` (${flaggedAgents.size})` : '';
     btn.title = meta.title;
-    btn.innerHTML = `<span class="agent-dot meta-dot" style="background:${meta.color}">${meta.icon}</span><span class="agent-selector-label">${meta.label}</span>`;
-    btn.addEventListener('click', () => {
-      if (viewId === activeAgent) return;
-      setActive(viewId);
-      // Clear filters when switching to meta view (they're built-in)
-      showStarredOnly = false; showRunningOnly = false;
-      starToggle.classList.remove('active'); runningToggle.classList.remove('active');
-      loadMetaView(viewId);
-    });
+    btn.innerHTML = `<span class="agent-dot meta-dot" style="background:${meta.color}">${meta.icon}</span><span class="agent-selector-label">${meta.label}${extra}</span>`;
+    btn.addEventListener('click', () => { if (viewId !== activeAgent) setActiveAgentView(viewId); });
     container.appendChild(btn);
+    orderedAgentViews.push(viewId);
   }
 
   // Separator
@@ -6336,23 +6436,55 @@ async function loadMetaView(viewId) {
   sep.className = 'agent-selector-sep';
   container.appendChild(sep);
 
-  // Per-CLI agent buttons
+  // Per-CLI agent buttons (flagged ones get a small flag marker)
   for (const [id, agent] of agentsToShow) {
     const btn = document.createElement('button');
-    btn.className = 'agent-selector-btn' + (id === activeAgent ? ' active' : '');
+    btn.className = 'agent-selector-btn' + (id === activeAgent ? ' active' : '') + (flaggedAgents.has(id) ? ' flagged' : '');
     btn.dataset.agent = id;
-    btn.title = agent.name;
-    btn.innerHTML = `<span class="agent-dot" style="background:${agent.color}"></span><span class="agent-selector-label">${agent.name.split(' ')[0]}</span>`;
-    btn.addEventListener('click', () => {
-      if (id === activeAgent) return;
-      setActive(id);
-      // Clear meta-view state
-      showStarredOnly = false; showRunningOnly = false;
-      starToggle.classList.remove('active'); runningToggle.classList.remove('active');
-      loadProjectsForAgent();
+    btn.title = agent.name + (agent.onPath === false ? ' (history only — not on PATH)' : '');
+    const flagMark = flaggedAgents.has(id) ? '<span class="agent-flag-mark">⚑</span>' : '';
+    btn.innerHTML = `<span class="agent-dot" style="background:${agent.color || AGENT_COLORS[id] || '#888'}"></span><span class="agent-selector-label">${agent.name.split(' ')[0]}</span>${flagMark}`;
+    btn.addEventListener('click', () => { if (id !== activeAgent) setActiveAgentView(id); });
+    // Right-click a CLI button to toggle its flag quickly
+    btn.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (flaggedAgents.has(id)) flaggedAgents.delete(id); else flaggedAgents.add(id);
+      saveFlaggedAgents();
+      rebuildAgentSelector();
+      if (activeAgent === '_flagged') loadMetaView('_flagged');
     });
     container.appendChild(btn);
+    orderedAgentViews.push(id);
   }
+
+  // Rotate arrows at the bottom of the toolbar — cycle to prev/next CLI view.
+  const rotateRow = document.createElement('div');
+  rotateRow.className = 'agent-rotate-row';
+  const prevBtn = document.createElement('button');
+  prevBtn.className = 'agent-rotate-btn';
+  prevBtn.title = 'Previous CLI (rotate toolbar)';
+  prevBtn.innerHTML = '&#9664;';
+  prevBtn.addEventListener('click', () => rotateAgentView(-1));
+  const label = document.createElement('span');
+  label.className = 'agent-rotate-label';
+  const curMeta = META_VIEWS[activeAgent];
+  label.textContent = curMeta ? curMeta.label : (AGENT_LABELS[activeAgent] || activeAgent);
+  const nextBtn = document.createElement('button');
+  nextBtn.className = 'agent-rotate-btn';
+  nextBtn.title = 'Next CLI (rotate toolbar)';
+  nextBtn.innerHTML = '&#9654;';
+  nextBtn.addEventListener('click', () => rotateAgentView(1));
+  rotateRow.appendChild(prevBtn);
+  rotateRow.appendChild(label);
+  rotateRow.appendChild(nextBtn);
+  container.appendChild(rotateRow);
+}
+
+(async function initAgentSelector() {
+  try {
+    installedAgents = await window.api.detectAgents();
+  } catch { installedAgents = {}; }
+  rebuildAgentSelector();
 })();
 
 // Start file watchers for recently active sessions (last 24h) that have JSONL files.
