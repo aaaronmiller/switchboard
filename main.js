@@ -78,6 +78,7 @@ const cleanPtyEnv = Object.fromEntries(
 const { discoverShellProfiles, getShellProfiles, resolveShell, isWindows, isWslShell, windowsToWslPath, shellArgs } = require('./shell-profiles');
 const { startScheduler } = require('./schedule-runner');
 const { encodeProjectPath } = require('./encode-project-path');
+const gitUtils = require('./git-utils');
 
 // --- Git status cache — avoids repeated `git status` calls across the same project ---
 const gitStatusCache = new Map(); // projectPath -> { data, timestamp }
@@ -135,6 +136,9 @@ const STATS_CACHE_PATH = path.join(CLAUDE_DIR, 'stats-cache.json');
 const MAX_BUFFER_SIZE = 256 * 1024;
 
 // --- Git status discovery (async) with cache eviction ---
+// Async (non-blocking) git status via git-utils. Returns the enriched shape
+// { status, branch, dirty, ahead, behind, hasUpstream, error } and caches it.
+// `status`/`branch` are kept for backward compatibility with existing callers.
 async function getCachedGitStatus(projectPath, forceRefresh = false) {
   if (!projectPath || typeof projectPath !== 'string') return { status: null, branch: null, error: true };
   const now = Date.now();
@@ -143,47 +147,35 @@ async function getCachedGitStatus(projectPath, forceRefresh = false) {
     return cached.data;
   }
   try {
-    const { execFileSync } = require('child_process');
-    const branch = execFileSync('git', ['branch', '--show-current'], { cwd: projectPath, timeout: 5000, encoding: 'utf8' }).trim();
-    let status = null;
-    try {
-      const porcelain = execFileSync('git', ['status', '--porcelain'], { cwd: projectPath, timeout: 5000, encoding: 'utf8' });
-      if (porcelain.length > 0) {
-        // Check for staged/unstaged changes
-        const lines = porcelain.split('\n').filter(Boolean);
-        const hasStaged = lines.some(l => l.startsWith('M') || l.startsWith('A') || l.startsWith('D') || l.startsWith('R'));
-        const hasUnstaged = lines.some(l => l[1] === 'M' || l[1] === 'D' || porcelain.includes('??'));
-        // Check for ahead/behind
-        try {
-          const branchStatus = execFileSync('git', ['status', '--short', '-b'], { cwd: projectPath, timeout: 5000, encoding: 'utf8' });
-          if (branchStatus.includes('ahead') && (branchStatus.includes('behind') || branchStatus.includes('ahead') && !branchStatus.includes('up-to-date'))) {
-            status = branchStatus.includes('behind') ? 'diverged' : 'ahead';
-          } else if (branchStatus.includes('behind')) {
-            status = 'behind';
-          } else if (hasStaged || hasUnstaged) {
-            status = 'dirty';
-          } else {
-            status = 'current';
-          }
-        } catch {
-          status = hasStaged ? 'dirty' : 'uncommitted';
-        }
-      } else {
-        status = 'current';
-      }
-    } catch {
-      status = null;
-    }
-    const data = { status, branch, error: false };
+    const info = await gitUtils.getGitInfo(projectPath);
+    const data = info.isRepo
+      ? { status: info.status, branch: info.branch, dirty: info.dirty, ahead: info.ahead, behind: info.behind, hasUpstream: info.hasUpstream, error: false }
+      : { status: null, branch: null, error: false };
     gitStatusCache.set(projectPath, { data, timestamp: now });
     return data;
-  } catch (err) {
-    // Not a git repo or git not available
+  } catch {
     const data = { status: null, branch: null, error: true };
     gitStatusCache.set(projectPath, { data, timestamp: now });
     return data;
   }
 }
+
+// --- Project metadata (last-modified file) cache ---
+const projectMetaCache = new Map(); // projectPath -> { mtimeMs, timestamp }
+const PROJECT_META_TTL = 60_000;
+function getCachedProjectLastModified(projectPath) {
+  if (!projectPath || typeof projectPath !== 'string') return null;
+  const now = Date.now();
+  const cached = projectMetaCache.get(projectPath);
+  if (cached && (now - cached.timestamp) < PROJECT_META_TTL) return cached.mtimeMs;
+  const mtimeMs = gitUtils.getProjectLastModified(projectPath);
+  projectMetaCache.set(projectPath, { mtimeMs, timestamp: now });
+  return mtimeMs;
+}
+
+// Throttle remote fetches so the "pull available" check never spams the network.
+const lastFetchAt = new Map(); // projectPath -> ms
+const FETCH_THROTTLE_MS = 5 * 60_000;
 
 // Periodic git status cache eviction (run every 2 minutes)
 setInterval(() => {
@@ -198,6 +190,10 @@ setInterval(() => {
     if (now - entry.timestamp > AGENT_SCAN_CACHE_TTL * 2) {
       agentScanCache.delete(agentId);
     }
+  }
+  // And stale project-meta entries
+  for (const [p, entry] of projectMetaCache) {
+    if (now - entry.timestamp > PROJECT_META_TTL * 2) projectMetaCache.delete(p);
   }
 }, 120_000);
 
@@ -1040,6 +1036,57 @@ ipcMain.handle('detect-agents', () => {
     results[id] = { ...agent, id, installed: installed || hasHistory, onPath: installed };
   }
   return results;
+});
+
+// --- IPC: project card metadata + git controls ---
+
+// Project metadata: last-modified file mtime + (cached) git status, for cards.
+ipcMain.handle('get-project-meta', async (_event, projectPath) => {
+  try {
+    const lastModifiedMs = getCachedProjectLastModified(projectPath);
+    const git = await getCachedGitStatus(projectPath);
+    return { ok: true, lastModifiedMs, git };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('git-list-branches', async (_event, projectPath) => {
+  try { return { ok: true, ...(await gitUtils.listBranches(projectPath)) }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('git-checkout-branch', async (_event, projectPath, branch, opts) => {
+  try {
+    const res = await gitUtils.checkoutBranch(projectPath, branch, opts || {});
+    if (res.ok) gitStatusCache.delete(projectPath); // force fresh status next read
+    return res;
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+
+// Throttled remote fetch so "pull available" reflects the real cloud state.
+ipcMain.handle('git-fetch-remote', async (_event, projectPath, opts) => {
+  try {
+    const now = Date.now();
+    const last = lastFetchAt.get(projectPath) || 0;
+    if (!opts?.force && (now - last) < FETCH_THROTTLE_MS) {
+      // Skip the network call; just return the (cached) current state.
+      return { ok: true, throttled: true, git: await getCachedGitStatus(projectPath) };
+    }
+    const res = await gitUtils.fetchRemote(projectPath);
+    lastFetchAt.set(projectPath, now);
+    gitStatusCache.delete(projectPath);
+    return { ...res, git: await getCachedGitStatus(projectPath, true) };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('git-pull', async (_event, projectPath) => {
+  try {
+    const res = await gitUtils.pullFastForward(projectPath);
+    gitStatusCache.delete(projectPath);
+    projectMetaCache.delete(projectPath);
+    return { ...res, git: await getCachedGitStatus(projectPath, true) };
+  } catch (err) { return { ok: false, error: err.message }; }
 });
 
 // --- IPC: get-session-tokens ---
