@@ -1687,6 +1687,7 @@ function renderProjects(projects, resort) {
         sortTime: new Date(session.modified).getTime(),
         pinned: !!session.starred, running: isRunning,
         element: buildSessionItem(session),
+        session, isSlug: false,
       });
     }
     for (const [slug, sessions] of slugMap) {
@@ -1695,6 +1696,8 @@ function renderProjects(projects, resort) {
       const hasPinned = sessions.some(s => s.starred);
       const element = sessions.length === 1 ? buildSessionItem(sessions[0]) : buildSlugGroup(slug, sessions);
       allItems.push({
+        session: sessions.length === 1 ? sessions[0] : null,
+        isSlug: sessions.length > 1,
         sortTime: mostRecentTime,
         pinned: hasPinned, running: hasRunning,
         element,
@@ -1726,27 +1729,27 @@ function renderProjects(projects, resort) {
     // Save current order for this project
     newSortedOrder.push({ projectPath: project.projectPath, itemIds: allItems.map(item => item.element.id) });
 
-    // === STEP 5: Truncate — split into visible vs older ===
+    // === STEP 5: Split items for display ===
+    // Two modes:
+    //  • Flat (search / star / running / today): show every matching item, as before.
+    //  • Card model (default project view): show running + pinned + slug-groups
+    //    EXPANDED, and collapse the remaining dormant sessions into a per-project
+    //    pulldown — so each project reads as a single card unless work is running.
+    const flatMode = searchMatchIds !== null || showStarredOnly || showRunningOnly || showTodayOnly;
     let visible = [];
     let older = [];
-    if (searchMatchIds !== null || showStarredOnly || showRunningOnly || showTodayOnly) {
+    let dormant = []; // card-model pulldown contents
+    if (flatMode) {
       visible = allItems;
     } else {
-      let count = 0;
-      const ageCutoff = Date.now() - sessionMaxAgeDays * 86400000;
       for (const item of allItems) {
-        // Running and pinned always show; others must be within count AND age limit
-        if (item.running || item.pinned || (count < visibleSessionCount && item.sortTime >= ageCutoff)) {
-          visible.push(item);
-          count++;
-        } else {
-          older.push(item);
-        }
+        if (item.running || item.pinned || item.isSlug) visible.push(item);
+        else dormant.push(item);
       }
-      // If visible is empty but older has items, show them directly
-      if (visible.length === 0 && older.length > 0) {
-        visible = older;
-        older = [];
+      // A lone dormant session with nothing expanded renders inline (no pulldown).
+      if (visible.length === 0 && dormant.length === 1) {
+        visible = dormant;
+        dormant = [];
       }
     }
 
@@ -1754,6 +1757,18 @@ function renderProjects(projects, resort) {
     const group = document.createElement('div');
     group.className = 'project-group';
     group.id = fId;
+
+    // Per-CLI color accent for the card. In a per-CLI view use that CLI's color;
+    // otherwise color by the agent that owns the project's newest session.
+    const cardAgent = (activeAgent && !activeAgent.startsWith('_'))
+      ? activeAgent
+      : (filtered[0]?.agent || sessionAgentMap.get(filtered[0]?.sessionId) || 'claude');
+    const cardAgentColor = AGENT_COLORS[cardAgent];
+    if (cardAgentColor) {
+      group.classList.add('has-agent-color');
+      group.dataset.agent = cardAgent;
+      group.style.setProperty('--agent-color', cardAgentColor);
+    }
 
     const header = document.createElement('div');
     header.className = 'project-header';
@@ -1779,12 +1794,49 @@ function renderProjects(projects, resort) {
     newBtn.title = 'New session';
     header.appendChild(newBtn);
 
+    // Project card metadata row (path · last-modified · git branch/status).
+    // Rendered with placeholders here; filled asynchronously after morphdom by
+    // enrichProjectCards(). Sits between header and sessions so it stays visible
+    // even when the group is collapsed.
+    const metaRow = document.createElement('div');
+    metaRow.className = 'project-card-meta';
+    metaRow.id = 'pcm-' + fId;
+    metaRow.dataset.projectPath = project.projectPath;
+    metaRow.innerHTML = `
+      <span class="pcm-path" title="${escapeHtml(project.projectPath)}">${escapeHtml(project.projectPath)}</span>
+      <span class="pcm-modified" title="Most recently modified file in project"></span>
+      <span class="pcm-git"></span>`;
+
     const sessionsList = document.createElement('div');
     sessionsList.className = 'project-sessions';
     sessionsList.id = 'sessions-' + fId;
 
     for (const item of visible) {
       sessionsList.appendChild(item.element);
+    }
+
+    // Card-model pulldown for dormant (non-running, non-pinned) sessions.
+    if (dormant.length > 0) {
+      const wrap = document.createElement('div');
+      wrap.className = 'session-pulldown-wrap';
+      const select = document.createElement('select');
+      select.className = 'session-pulldown';
+      select.id = 'pull-' + fId;
+      const ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = `${dormant.length} session${dormant.length > 1 ? 's' : ''} — open…`;
+      select.appendChild(ph);
+      for (const it of dormant) {
+        if (!it.session) continue;
+        const opt = document.createElement('option');
+        opt.value = it.session.sessionId;
+        const d = formatDate(new Date(it.session.modified));
+        const name = cleanDisplayName(it.session.name || it.session.summary) || 'session';
+        opt.textContent = `${d} · ${name}`.slice(0, 80);
+        select.appendChild(opt);
+      }
+      wrap.appendChild(select);
+      sessionsList.appendChild(wrap);
     }
 
     if (older.length > 0) {
@@ -1814,6 +1866,7 @@ function renderProjects(projects, resort) {
     }
 
     group.appendChild(header);
+    group.appendChild(metaRow);
     group.appendChild(sessionsList);
     newSidebar.appendChild(group);
   }
@@ -1876,6 +1929,143 @@ function renderProjects(projects, resort) {
   const isUserTyping = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable || ae.closest('.modal-overlay'));
   if (activeSessionId && openSessions.has(activeSessionId) && !isUserTyping) {
     openSessions.get(activeSessionId).terminal.focus();
+  }
+}
+
+// Frontend cache for project card metadata (backend already caches; this avoids
+// redundant IPC on every morphdom refresh).
+const _projectMetaCache = new Map(); // projectPath -> { data, ts }
+const PROJECT_META_FE_TTL = 30_000;
+
+// Lightweight transient status for card git actions (reuses the status bar).
+function cardStatus(text, type) {
+  try {
+    if (!statusBarActivity) return;
+    statusBarActivity.textContent = text;
+    statusBarActivity.className = type === 'error' ? 'status-error' : (type === 'done' ? 'status-done' : '');
+    setTimeout(() => {
+      if (statusBarActivity.textContent === text) {
+        statusBarActivity.textContent = '';
+        statusBarActivity.className = '';
+      }
+    }, 3000);
+  } catch {}
+}
+
+function _renderCardGit(gitEl, projectPath, git) {
+  gitEl.innerHTML = '';
+  if (!git || !git.branch) return;
+  // Branch chip — click to switch branch (lazy-loads branch list).
+  const branchChip = document.createElement('button');
+  branchChip.className = 'pcm-branch';
+  branchChip.title = 'Switch branch';
+  branchChip.innerHTML = `<span class="pcm-branch-icon">&#9095;</span> ${escapeHtml(git.branch)}`;
+  branchChip.onclick = async (e) => {
+    e.stopPropagation();
+    const res = await window.api.gitListBranches(projectPath);
+    if (!res.ok || !res.branches?.length) return;
+    const sel = document.createElement('select');
+    sel.className = 'pcm-branch-select';
+    for (const b of res.branches) {
+      const opt = document.createElement('option');
+      opt.value = b; opt.textContent = b;
+      if (b === res.current) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.onclick = (ev) => ev.stopPropagation();
+    sel.onchange = async () => {
+      const target = sel.value;
+      const out = await window.api.gitCheckoutBranch(projectPath, target, {});
+      if (out.ok) {
+        cardStatus(`Switched to ${target}`, 'done');
+        _projectMetaCache.delete(projectPath);
+        refreshSidebar({ resort: false });
+      } else if (out.dirty) {
+        cardStatus(`Can't switch: uncommitted changes in ${projectPath.split('/').pop()}`, 'error');
+        _renderCardGit(gitEl, projectPath, git); // restore chip
+      } else {
+        cardStatus(out.error || 'Checkout failed', 'error');
+        _renderCardGit(gitEl, projectPath, git);
+      }
+    };
+    branchChip.replaceWith(sel);
+    sel.focus();
+  };
+  gitEl.appendChild(branchChip);
+
+  if (git.dirty) {
+    const b = document.createElement('span');
+    b.className = 'pcm-badge pcm-dirty'; b.title = 'Uncommitted changes'; b.textContent = '●';
+    gitEl.appendChild(b);
+  }
+  if (git.ahead > 0) {
+    const b = document.createElement('span');
+    b.className = 'pcm-badge pcm-ahead'; b.title = `${git.ahead} commit(s) ahead of upstream`; b.textContent = `↑${git.ahead}`;
+    gitEl.appendChild(b);
+  }
+  if (git.behind > 0) {
+    // The cloud-ahead signifier: a "pull" affordance that runs git pull --ff-only.
+    const pull = document.createElement('button');
+    pull.className = 'pcm-badge pcm-pull';
+    pull.title = `${git.behind} commit(s) on the remote not in your folder — click to pull (fast-forward)`;
+    pull.textContent = `⇩${git.behind}`;
+    pull.onclick = async (e) => {
+      e.stopPropagation();
+      pull.disabled = true;
+      const out = await window.api.gitPull(projectPath);
+      if (out.ok) {
+        cardStatus('Pulled latest changes', 'done');
+        _projectMetaCache.delete(projectPath);
+        refreshSidebar({ resort: false });
+      } else {
+        cardStatus(out.error || 'Pull failed', 'error');
+        pull.disabled = false;
+      }
+    };
+    gitEl.appendChild(pull);
+  }
+  // Manual "check remote" (throttled fetch) so the pull signifier is accurate.
+  const fetchBtn = document.createElement('button');
+  fetchBtn.className = 'pcm-badge pcm-fetch'; fetchBtn.title = 'Check remote for new commits';
+  fetchBtn.textContent = '⟳';
+  fetchBtn.onclick = async (e) => {
+    e.stopPropagation();
+    fetchBtn.disabled = true; fetchBtn.classList.add('spinning');
+    const out = await window.api.gitFetchRemote(projectPath, {});
+    fetchBtn.classList.remove('spinning'); fetchBtn.disabled = false;
+    if (out.git) { _renderCardGit(gitEl, projectPath, out.git); }
+  };
+  gitEl.appendChild(fetchBtn);
+}
+
+async function enrichProjectCards(projects) {
+  for (const project of projects) {
+    const fId = folderId(project.projectPath);
+    const metaEl = document.getElementById('pcm-' + fId);
+    if (!metaEl) continue;
+    const modEl = metaEl.querySelector('.pcm-modified');
+    const gitEl = metaEl.querySelector('.pcm-git');
+
+    const cached = _projectMetaCache.get(project.projectPath);
+    const fresh = cached && (Date.now() - cached.ts) < PROJECT_META_FE_TTL;
+    const apply = (data) => {
+      if (!data) return;
+      if (modEl && data.lastModifiedMs) {
+        modEl.textContent = '🕓 ' + formatDate(new Date(data.lastModifiedMs));
+      }
+      if (gitEl) _renderCardGit(gitEl, project.projectPath, data.git);
+    };
+    if (fresh) { apply(cached.data); continue; }
+
+    try {
+      const data = await window.api.getProjectMeta(project.projectPath);
+      if (data && data.ok) {
+        _projectMetaCache.set(project.projectPath, { data, ts: Date.now() });
+        // Element may have been replaced by a later morphdom pass — re-query.
+        const stillThere = document.getElementById('pcm-' + fId);
+        if (stillThere) apply(data);
+      }
+    } catch {}
   }
 }
 
@@ -1952,6 +2142,19 @@ function rebindSidebarEvents(projects) {
       }
     };
   });
+
+  // Card-model session pulldown — open the chosen dormant session.
+  sidebarContent.querySelectorAll('.session-pulldown').forEach(sel => {
+    sel.onclick = (e) => e.stopPropagation();
+    sel.onchange = () => {
+      const s = sessionMap.get(sel.value);
+      if (s) openSession(s);
+      sel.value = '';
+    };
+  });
+
+  // Fill project cards with last-modified + git metadata (async, cached).
+  enrichProjectCards(projects);
 
   sidebarContent.querySelectorAll('.sessions-more-toggle').forEach(moreBtn => {
     const olderList = moreBtn.nextElementSibling;

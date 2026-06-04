@@ -637,6 +637,84 @@ body { display: flex; flex-direction: column; }
   border-color: rgba(255,255,255,0.10);
 }
 
+/* Per-CLI color accent on the project card's left edge */
+.project-group.has-agent-color {
+  border-left: 3px solid var(--agent-color, transparent);
+}
+
+/* Project card metadata row: path · last-modified · git */
+.project-card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 2px 12px 8px;
+  font-size: 10.5px;
+  color: #777790;
+}
+.pcm-path {
+  font-family: var(--mono, monospace);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;          /* keep the meaningful tail of long paths visible */
+  text-align: left;
+  opacity: 0.8;
+  flex: 1 1 100%;
+}
+.pcm-modified { color: #8a8aa0; white-space: nowrap; }
+.pcm-git { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.pcm-branch, .pcm-branch-select {
+  font: inherit;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #b8b8d0;
+  border-radius: 4px;
+  padding: 1px 6px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.pcm-branch:hover { background: rgba(255,255,255,0.1); }
+.pcm-branch-icon { opacity: 0.7; }
+.pcm-badge {
+  font: inherit;
+  border: none;
+  border-radius: 4px;
+  padding: 1px 5px;
+  line-height: 1.4;
+  cursor: default;
+}
+.pcm-dirty { color: #fbbf24; background: transparent; padding: 0; }
+.pcm-ahead { color: #60a5fa; background: rgba(96,165,250,0.12); }
+.pcm-pull {
+  color: #f59e0b;
+  background: rgba(245,158,11,0.15);
+  cursor: pointer;
+  font-weight: 700;
+}
+.pcm-pull:hover { background: rgba(245,158,11,0.28); }
+.pcm-fetch { color: #777790; background: transparent; cursor: pointer; }
+.pcm-fetch:hover { color: #b8b8d0; }
+.pcm-fetch.spinning { animation: pcm-spin 0.8s linear infinite; display: inline-block; }
+@keyframes pcm-spin { to { transform: rotate(360deg); } }
+
+/* Card-model session pulldown (dormant sessions) */
+.session-pulldown-wrap { padding: 4px 10px 8px; }
+.session-pulldown {
+  width: 100%;
+  font: inherit;
+  font-size: 11px;
+  background: rgba(255,255,255,0.04);
+  color: #aaaac4;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.session-pulldown:hover { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.14); }
+#status-bar-activity.status-error { color: #f87171; }
+
 .project-header {
   padding: 10px 12px;
   font-size: 12px;
@@ -736,7 +814,9 @@ body { display: flex; flex-direction: column; }
   padding: 0 0 4px;
 }
 
-.project-header.collapsed + .project-sessions {
+/* General sibling (~) because the project-card-meta row now sits between the
+   header and the sessions list. Collapsing hides sessions but keeps card meta. */
+.project-header.collapsed ~ .project-sessions {
   display: none;
 }
 
