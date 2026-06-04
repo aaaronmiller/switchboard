@@ -259,9 +259,21 @@ async function handleOpenDiff(entry, rpcId, args, log) {
 
   const diffId = crypto.randomUUID();
 
-  // Create a promise that will be resolved when the user acts on the diff
+  // Create a promise that resolves when the user acts on the diff — or after a
+  // timeout, so a never-answered diff can't pin the RPC open forever (B7).
+  const DIFF_TIMEOUT_MS = 5 * 60_000;
   const diffPromise = new Promise((resolve) => {
-    entry.pendingDiffs.set(diffId, { resolve, rpcId, tabName: tab_name });
+    const timer = setTimeout(() => {
+      if (entry.pendingDiffs.has(diffId)) {
+        entry.pendingDiffs.delete(diffId);
+        safeSend(entry.mainWindow, log, 'mcp-close-tab', entry.sessionId, diffId);
+        resolve({ action: 'timeout' });
+      }
+    }, DIFF_TIMEOUT_MS);
+    entry.pendingDiffs.set(diffId, {
+      resolve: (v) => { clearTimeout(timer); resolve(v); },
+      rpcId, tabName: tab_name,
+    });
   });
 
   // Send to renderer

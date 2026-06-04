@@ -133,6 +133,30 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const PLANS_DIR = path.join(os.homedir(), '.claude', 'plans');
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const STATS_CACHE_PATH = path.join(CLAUDE_DIR, 'stats-cache.json');
+
+// --- Path sandbox for viewer file reads (FULL-AUDIT #4/#32, IMPROVEMENTS B6) ---
+// Resolves symlinks (realpath) before checking, so a symlink inside an allowed
+// root can't be used to escape it. Allowed roots: the Claude data dirs and any
+// active session's project path (plus the project dirs of cached sessions).
+function isPathAllowed(filePath) {
+  if (!filePath || typeof filePath !== 'string') return false;
+  let resolved;
+  try {
+    resolved = fs.realpathSync(path.resolve(filePath));
+  } catch {
+    // File may not exist yet — fall back to the lexical resolve.
+    resolved = path.resolve(filePath);
+  }
+  const roots = [PROJECTS_DIR, PLANS_DIR, CLAUDE_DIR];
+  for (const [, session] of activeSessions) {
+    if (session.projectPath) roots.push(session.projectPath);
+  }
+  return roots.some((root) => {
+    let r;
+    try { r = fs.realpathSync(root); } catch { r = path.resolve(root); }
+    return resolved === r || resolved.startsWith(r + path.sep);
+  });
+}
 const MAX_BUFFER_SIZE = 256 * 1024;
 
 // --- Git status discovery (async) with cache eviction ---
@@ -476,6 +500,10 @@ ipcMain.on('mcp-diff-response', (_event, sessionId, diffId, action, editedConten
 
 ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
   try {
+    if (!isPathAllowed(filePath)) {
+      log.warn('[read-file-for-panel] blocked path outside sandbox:', filePath);
+      return { ok: false, error: 'Access denied: path outside allowed directories' };
+    }
     const content = fs.readFileSync(filePath, 'utf8');
     return { ok: true, content };
   } catch (err) {
@@ -485,6 +513,10 @@ ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
 
 ipcMain.handle('save-file-for-panel', async (_event, filePath, content) => {
   try {
+    if (!isPathAllowed(filePath)) {
+      log.warn('[save-file-for-panel] blocked path outside sandbox:', filePath);
+      return { ok: false, error: 'Access denied: path outside allowed directories' };
+    }
     const resolved = path.resolve(filePath);
     if (!fs.existsSync(resolved)) return { ok: false, error: 'File does not exist' };
     fs.writeFileSync(resolved, content, 'utf8');
@@ -523,6 +555,92 @@ ipcMain.handle('unwatch-file', (_event, filePath) => {
     watcher.close();
     fileWatchers.delete(resolved);
   }
+  return { ok: true };
+});
+
+// ── Session JSONL activity watchers (sparklines for all CLIs) ─────────
+// Tails a session's JSONL file and emits `session-activity` events as new
+// lines are appended. Restores the cross-CLI sparkline feature whose IPC
+// handlers were dropped during module refactoring; cleaned up on PTY exit (B4).
+const sessionFileWatchers = new Map(); // sessionId → { watcher, debounce, offset }
+
+function classifyActivityLine(obj) {
+  // Tool activity across the various agent JSONL shapes.
+  const t = obj.type;
+  const role = obj.role || obj.message?.role || obj.payload?.role;
+  if (t === 'tool_use' || t === 'tool_result' || t === 'tool') {
+    return { type: 'tool_use', name: obj.name || obj.tool || obj.tool_name || 'tool', ts: Date.now() };
+  }
+  // Claude-style assistant message carrying tool_use blocks
+  const content = obj.message?.content;
+  if (Array.isArray(content)) {
+    const tu = content.find(c => c && c.type === 'tool_use');
+    if (tu) return { type: 'tool_use', name: tu.name || 'tool', ts: Date.now() };
+  }
+  // Gemini/Qwen functionCall parts
+  const parts = obj.message?.parts || obj.parts;
+  if (Array.isArray(parts) && parts.some(p => p && p.functionCall)) {
+    const fc = parts.find(p => p.functionCall).functionCall;
+    return { type: 'tool_use', name: fc?.name || 'tool', ts: Date.now() };
+  }
+  if (t === 'error' || obj.error || obj.level === 'error') {
+    return { type: 'error', text: String(obj.error || obj.message || 'error').slice(0, 60), ts: Date.now() };
+  }
+  if (role === 'assistant' || t === 'assistant' || t === 'response_item') {
+    return { type: 'text', ts: Date.now() };
+  }
+  return null;
+}
+
+function stopSessionFileWatcher(sessionId) {
+  const entry = sessionFileWatchers.get(sessionId);
+  if (entry) {
+    try { entry.watcher.close(); } catch {}
+    if (entry.debounce) clearTimeout(entry.debounce);
+    sessionFileWatchers.delete(sessionId);
+  }
+}
+
+ipcMain.handle('watch-session-file', (_event, sessionId, filePath, _agentId) => {
+  if (!sessionId || !filePath) return { ok: false, error: 'missing args' };
+  if (sessionFileWatchers.has(sessionId)) return { ok: true };
+  let resolved;
+  try { resolved = path.resolve(filePath); } catch { return { ok: false, error: 'bad path' }; }
+  if (!resolved.endsWith('.jsonl') || !fs.existsSync(resolved)) return { ok: false, error: 'not a jsonl file' };
+  try {
+    // Start from current EOF so we only report NEW activity.
+    const entry = { watcher: null, debounce: null, offset: fs.statSync(resolved).size };
+    entry.watcher = fs.watch(resolved, (eventType) => {
+      if (eventType !== 'change') return;
+      if (entry.debounce) clearTimeout(entry.debounce);
+      entry.debounce = setTimeout(() => {
+        try {
+          const size = fs.statSync(resolved).size;
+          if (size <= entry.offset) { entry.offset = size; return; } // truncated/rotated
+          const start = Math.max(entry.offset, size - 262144); // cap delta at 256KB
+          const fd = fs.openSync(resolved, 'r');
+          const buf = Buffer.alloc(size - start);
+          fs.readSync(fd, buf, 0, buf.length, start);
+          fs.closeSync(fd);
+          entry.offset = size;
+          for (const line of buf.toString('utf8').split('\n')) {
+            if (!line.trim()) continue;
+            let obj; try { obj = JSON.parse(line); } catch { continue; }
+            const ev = classifyActivityLine(obj);
+            if (ev) safeSend('session-activity', sessionId, ev);
+          }
+        } catch {}
+      }, 150);
+    });
+    sessionFileWatchers.set(sessionId, entry);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('unwatch-session-file', (_event, sessionId) => {
+  stopSessionFileWatcher(sessionId);
   return { ok: true };
 });
 
@@ -916,7 +1034,23 @@ ipcMain.handle('get-setting', (_event, key) => {
   return getSetting(key);
 });
 
+// Settings keys are 'global', 'project:<path>', or other short scope strings.
+// Validate to stop arbitrary/oversized blobs (FULL-AUDIT #35).
+const MAX_SETTING_BYTES = 256 * 1024;
 ipcMain.handle('set-setting', (_event, key, value) => {
+  if (typeof key !== 'string' || key.length === 0 || key.length > 512) {
+    return { ok: false, error: 'Invalid setting key' };
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, error: 'Setting value must be a JSON object' };
+  }
+  try {
+    if (JSON.stringify(value).length > MAX_SETTING_BYTES) {
+      return { ok: false, error: 'Setting value too large' };
+    }
+  } catch {
+    return { ok: false, error: 'Setting value is not serializable' };
+  }
   setSetting(key, value);
   return { ok: true };
 });
@@ -1006,8 +1140,10 @@ ipcMain.handle('get-agent-stats', () => {
         lastUsed: sessions.length ? sessions.sort((a, b) => b.modified - a.modified)[0].modified.toISOString() : null,
         totalSizeBytes: sessions.reduce((sum, s) => sum + s.size, 0),
       };
-    } catch {
-      stats[agentId] = { name: CLI_AGENTS[agentId]?.name || agentId, error: true };
+    } catch (err) {
+      // Surface the reason (IMPROVEMENTS B10) instead of a silent flag.
+      log.warn(`[get-agent-stats] ${agentId} failed:`, err.message);
+      stats[agentId] = { name: CLI_AGENTS[agentId]?.name || agentId, error: true, errorMessage: err.message };
     }
   }
   return stats;
@@ -1733,6 +1869,9 @@ safeSendToSession(sessionId, 'terminal-data', '\x1b[?1049h');
     if (realId !== sessionId && activeSessions.has(sessionId)) {
       safeSend('process-exited', sessionId, exitCode);
     }
+    // Clean up any session JSONL activity watchers (B4: no watcher leak on exit).
+    stopSessionFileWatcher(realId);
+    stopSessionFileWatcher(sessionId);
     activeSessions.delete(realId);
     // Clean up the original key too in case transition detection hasn't run yet
     activeSessions.delete(sessionId);
