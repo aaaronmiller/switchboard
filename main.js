@@ -78,6 +78,7 @@ const cleanPtyEnv = Object.fromEntries(
 const { discoverShellProfiles, getShellProfiles, resolveShell, isWindows, isWslShell, windowsToWslPath, shellArgs } = require('./shell-profiles');
 const { startScheduler } = require('./schedule-runner');
 const { encodeProjectPath } = require('./encode-project-path');
+const gitUtils = require('./git-utils');
 
 // --- Git status cache — avoids repeated `git status` calls across the same project ---
 const gitStatusCache = new Map(); // projectPath -> { data, timestamp }
@@ -132,9 +133,36 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const PLANS_DIR = path.join(os.homedir(), '.claude', 'plans');
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const STATS_CACHE_PATH = path.join(CLAUDE_DIR, 'stats-cache.json');
+
+// --- Path sandbox for viewer file reads (FULL-AUDIT #4/#32, IMPROVEMENTS B6) ---
+// Resolves symlinks (realpath) before checking, so a symlink inside an allowed
+// root can't be used to escape it. Allowed roots: the Claude data dirs and any
+// active session's project path (plus the project dirs of cached sessions).
+function isPathAllowed(filePath) {
+  if (!filePath || typeof filePath !== 'string') return false;
+  let resolved;
+  try {
+    resolved = fs.realpathSync(path.resolve(filePath));
+  } catch {
+    // File may not exist yet — fall back to the lexical resolve.
+    resolved = path.resolve(filePath);
+  }
+  const roots = [PROJECTS_DIR, PLANS_DIR, CLAUDE_DIR];
+  for (const [, session] of activeSessions) {
+    if (session.projectPath) roots.push(session.projectPath);
+  }
+  return roots.some((root) => {
+    let r;
+    try { r = fs.realpathSync(root); } catch { r = path.resolve(root); }
+    return resolved === r || resolved.startsWith(r + path.sep);
+  });
+}
 const MAX_BUFFER_SIZE = 256 * 1024;
 
 // --- Git status discovery (async) with cache eviction ---
+// Async (non-blocking) git status via git-utils. Returns the enriched shape
+// { status, branch, dirty, ahead, behind, hasUpstream, error } and caches it.
+// `status`/`branch` are kept for backward compatibility with existing callers.
 async function getCachedGitStatus(projectPath, forceRefresh = false) {
   if (!projectPath || typeof projectPath !== 'string') return { status: null, branch: null, error: true };
   const now = Date.now();
@@ -143,47 +171,35 @@ async function getCachedGitStatus(projectPath, forceRefresh = false) {
     return cached.data;
   }
   try {
-    const { execFileSync } = require('child_process');
-    const branch = execFileSync('git', ['branch', '--show-current'], { cwd: projectPath, timeout: 5000, encoding: 'utf8' }).trim();
-    let status = null;
-    try {
-      const porcelain = execFileSync('git', ['status', '--porcelain'], { cwd: projectPath, timeout: 5000, encoding: 'utf8' });
-      if (porcelain.length > 0) {
-        // Check for staged/unstaged changes
-        const lines = porcelain.split('\n').filter(Boolean);
-        const hasStaged = lines.some(l => l.startsWith('M') || l.startsWith('A') || l.startsWith('D') || l.startsWith('R'));
-        const hasUnstaged = lines.some(l => l[1] === 'M' || l[1] === 'D' || porcelain.includes('??'));
-        // Check for ahead/behind
-        try {
-          const branchStatus = execFileSync('git', ['status', '--short', '-b'], { cwd: projectPath, timeout: 5000, encoding: 'utf8' });
-          if (branchStatus.includes('ahead') && (branchStatus.includes('behind') || branchStatus.includes('ahead') && !branchStatus.includes('up-to-date'))) {
-            status = branchStatus.includes('behind') ? 'diverged' : 'ahead';
-          } else if (branchStatus.includes('behind')) {
-            status = 'behind';
-          } else if (hasStaged || hasUnstaged) {
-            status = 'dirty';
-          } else {
-            status = 'current';
-          }
-        } catch {
-          status = hasStaged ? 'dirty' : 'uncommitted';
-        }
-      } else {
-        status = 'current';
-      }
-    } catch {
-      status = null;
-    }
-    const data = { status, branch, error: false };
+    const info = await gitUtils.getGitInfo(projectPath);
+    const data = info.isRepo
+      ? { status: info.status, branch: info.branch, dirty: info.dirty, ahead: info.ahead, behind: info.behind, hasUpstream: info.hasUpstream, error: false }
+      : { status: null, branch: null, error: false };
     gitStatusCache.set(projectPath, { data, timestamp: now });
     return data;
-  } catch (err) {
-    // Not a git repo or git not available
+  } catch {
     const data = { status: null, branch: null, error: true };
     gitStatusCache.set(projectPath, { data, timestamp: now });
     return data;
   }
 }
+
+// --- Project metadata (last-modified file) cache ---
+const projectMetaCache = new Map(); // projectPath -> { mtimeMs, timestamp }
+const PROJECT_META_TTL = 60_000;
+function getCachedProjectLastModified(projectPath) {
+  if (!projectPath || typeof projectPath !== 'string') return null;
+  const now = Date.now();
+  const cached = projectMetaCache.get(projectPath);
+  if (cached && (now - cached.timestamp) < PROJECT_META_TTL) return cached.mtimeMs;
+  const mtimeMs = gitUtils.getProjectLastModified(projectPath);
+  projectMetaCache.set(projectPath, { mtimeMs, timestamp: now });
+  return mtimeMs;
+}
+
+// Throttle remote fetches so the "pull available" check never spams the network.
+const lastFetchAt = new Map(); // projectPath -> ms
+const FETCH_THROTTLE_MS = 5 * 60_000;
 
 // Periodic git status cache eviction (run every 2 minutes)
 setInterval(() => {
@@ -198,6 +214,10 @@ setInterval(() => {
     if (now - entry.timestamp > AGENT_SCAN_CACHE_TTL * 2) {
       agentScanCache.delete(agentId);
     }
+  }
+  // And stale project-meta entries
+  for (const [p, entry] of projectMetaCache) {
+    if (now - entry.timestamp > PROJECT_META_TTL * 2) projectMetaCache.delete(p);
   }
 }, 120_000);
 
@@ -480,6 +500,10 @@ ipcMain.on('mcp-diff-response', (_event, sessionId, diffId, action, editedConten
 
 ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
   try {
+    if (!isPathAllowed(filePath)) {
+      log.warn('[read-file-for-panel] blocked path outside sandbox:', filePath);
+      return { ok: false, error: 'Access denied: path outside allowed directories' };
+    }
     const content = fs.readFileSync(filePath, 'utf8');
     return { ok: true, content };
   } catch (err) {
@@ -489,6 +513,10 @@ ipcMain.handle('read-file-for-panel', async (_event, filePath) => {
 
 ipcMain.handle('save-file-for-panel', async (_event, filePath, content) => {
   try {
+    if (!isPathAllowed(filePath)) {
+      log.warn('[save-file-for-panel] blocked path outside sandbox:', filePath);
+      return { ok: false, error: 'Access denied: path outside allowed directories' };
+    }
     const resolved = path.resolve(filePath);
     if (!fs.existsSync(resolved)) return { ok: false, error: 'File does not exist' };
     fs.writeFileSync(resolved, content, 'utf8');
@@ -527,6 +555,92 @@ ipcMain.handle('unwatch-file', (_event, filePath) => {
     watcher.close();
     fileWatchers.delete(resolved);
   }
+  return { ok: true };
+});
+
+// ── Session JSONL activity watchers (sparklines for all CLIs) ─────────
+// Tails a session's JSONL file and emits `session-activity` events as new
+// lines are appended. Restores the cross-CLI sparkline feature whose IPC
+// handlers were dropped during module refactoring; cleaned up on PTY exit (B4).
+const sessionFileWatchers = new Map(); // sessionId → { watcher, debounce, offset }
+
+function classifyActivityLine(obj) {
+  // Tool activity across the various agent JSONL shapes.
+  const t = obj.type;
+  const role = obj.role || obj.message?.role || obj.payload?.role;
+  if (t === 'tool_use' || t === 'tool_result' || t === 'tool') {
+    return { type: 'tool_use', name: obj.name || obj.tool || obj.tool_name || 'tool', ts: Date.now() };
+  }
+  // Claude-style assistant message carrying tool_use blocks
+  const content = obj.message?.content;
+  if (Array.isArray(content)) {
+    const tu = content.find(c => c && c.type === 'tool_use');
+    if (tu) return { type: 'tool_use', name: tu.name || 'tool', ts: Date.now() };
+  }
+  // Gemini/Qwen functionCall parts
+  const parts = obj.message?.parts || obj.parts;
+  if (Array.isArray(parts) && parts.some(p => p && p.functionCall)) {
+    const fc = parts.find(p => p.functionCall).functionCall;
+    return { type: 'tool_use', name: fc?.name || 'tool', ts: Date.now() };
+  }
+  if (t === 'error' || obj.error || obj.level === 'error') {
+    return { type: 'error', text: String(obj.error || obj.message || 'error').slice(0, 60), ts: Date.now() };
+  }
+  if (role === 'assistant' || t === 'assistant' || t === 'response_item') {
+    return { type: 'text', ts: Date.now() };
+  }
+  return null;
+}
+
+function stopSessionFileWatcher(sessionId) {
+  const entry = sessionFileWatchers.get(sessionId);
+  if (entry) {
+    try { entry.watcher.close(); } catch {}
+    if (entry.debounce) clearTimeout(entry.debounce);
+    sessionFileWatchers.delete(sessionId);
+  }
+}
+
+ipcMain.handle('watch-session-file', (_event, sessionId, filePath, _agentId) => {
+  if (!sessionId || !filePath) return { ok: false, error: 'missing args' };
+  if (sessionFileWatchers.has(sessionId)) return { ok: true };
+  let resolved;
+  try { resolved = path.resolve(filePath); } catch { return { ok: false, error: 'bad path' }; }
+  if (!resolved.endsWith('.jsonl') || !fs.existsSync(resolved)) return { ok: false, error: 'not a jsonl file' };
+  try {
+    // Start from current EOF so we only report NEW activity.
+    const entry = { watcher: null, debounce: null, offset: fs.statSync(resolved).size };
+    entry.watcher = fs.watch(resolved, (eventType) => {
+      if (eventType !== 'change') return;
+      if (entry.debounce) clearTimeout(entry.debounce);
+      entry.debounce = setTimeout(() => {
+        try {
+          const size = fs.statSync(resolved).size;
+          if (size <= entry.offset) { entry.offset = size; return; } // truncated/rotated
+          const start = Math.max(entry.offset, size - 262144); // cap delta at 256KB
+          const fd = fs.openSync(resolved, 'r');
+          const buf = Buffer.alloc(size - start);
+          fs.readSync(fd, buf, 0, buf.length, start);
+          fs.closeSync(fd);
+          entry.offset = size;
+          for (const line of buf.toString('utf8').split('\n')) {
+            if (!line.trim()) continue;
+            let obj; try { obj = JSON.parse(line); } catch { continue; }
+            const ev = classifyActivityLine(obj);
+            if (ev) safeSend('session-activity', sessionId, ev);
+          }
+        } catch {}
+      }, 150);
+    });
+    sessionFileWatchers.set(sessionId, entry);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('unwatch-session-file', (_event, sessionId) => {
+  stopSessionFileWatcher(sessionId);
   return { ok: true };
 });
 
@@ -920,7 +1034,23 @@ ipcMain.handle('get-setting', (_event, key) => {
   return getSetting(key);
 });
 
+// Settings keys are 'global', 'project:<path>', or other short scope strings.
+// Validate to stop arbitrary/oversized blobs (FULL-AUDIT #35).
+const MAX_SETTING_BYTES = 256 * 1024;
 ipcMain.handle('set-setting', (_event, key, value) => {
+  if (typeof key !== 'string' || key.length === 0 || key.length > 512) {
+    return { ok: false, error: 'Invalid setting key' };
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, error: 'Setting value must be a JSON object' };
+  }
+  try {
+    if (JSON.stringify(value).length > MAX_SETTING_BYTES) {
+      return { ok: false, error: 'Setting value too large' };
+    }
+  } catch {
+    return { ok: false, error: 'Setting value is not serializable' };
+  }
   setSetting(key, value);
   return { ok: true };
 });
@@ -965,566 +1095,16 @@ const CLI_AGENTS = {
   continue:  { name: 'Continue',      cmd: 'continue',  color: '#06b6d4', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
   cursor:    { name: 'Cursor CLI',    cmd: 'cursor',    color: '#8b5cf6', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
   cline:     { name: 'Cline',         cmd: 'cline',     color: '#f97316', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  // Focus agents (multi-CLI session history)
+  antigravity: { name: 'Antigravity', cmd: 'antigravity', altCmds: ['agy'], color: '#2dd4bf', sessionFlag: null, resumeFlag: '--resume', forkFlag: null, supportsPermissions: false, supportsMcp: false },
+  pi:        { name: 'Pi Agent',      cmd: 'pi',        color: '#c084fc', sessionFlag: null,           resumeFlag: '-r',       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
+  kilo:      { name: 'Kilo Code',     cmd: 'kilo',      color: '#facc15', sessionFlag: null,           resumeFlag: null,       forkFlag: null,             supportsPermissions: false, supportsMcp: false },
 };
 
 // Session history discovery per agent
-const AGENT_HISTORY = {
-  claude: {
-    historyDir: () => path.join(os.homedir(), '.claude'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.claude', 'projects');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      for (const projectDir of fs.readdirSync(baseDir)) {
-        const projPath = path.join(baseDir, projectDir);
-        try {
-          const stat = fs.statSync(projPath);
-          if (!stat.isDirectory()) continue;
-          for (const file of fs.readdirSync(projPath)) {
-            if (!file.endsWith('.jsonl')) continue;
-            const fp = path.join(projPath, file);
-            const fstat = fs.statSync(fp);
-            sessions.push({
-              id: file.replace('.jsonl', ''),
-              file: fp,
-              project: projectDir,
-              modified: fstat.mtime,
-              size: fstat.size,
-              agent: 'claude',
-            });
-          }
-        } catch {}
-      }
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.type === 'human' || obj.role === 'user') userMsgs++;
-            else if (obj.type === 'assistant' || obj.role === 'assistant') assistantMsgs++;
-            if (obj.type === 'tool_use' || obj.type === 'tool_result') toolUses++;
-          } catch {}
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
-      } catch { return null; }
-    },
-  },
-  codex: {
-    historyDir: () => path.join(os.homedir(), '.codex'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.codex', 'sessions');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      function walk(dir) {
-        try {
-          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-            const fp = path.join(dir, entry.name);
-            if (entry.isDirectory()) walk(fp);
-            else if (entry.name.endsWith('.jsonl')) {
-              const fstat = fs.statSync(fp);
-              const idMatch = entry.name.match(/([0-9a-f-]{36})/);
-              sessions.push({
-                id: idMatch ? idMatch[1] : entry.name.replace('.jsonl', ''),
-                file: fp,
-                modified: fstat.mtime,
-                size: fstat.size,
-                agent: 'codex',
-              });
-            }
-          }
-        } catch {}
-      }
-      walk(baseDir);
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-        let userMsgs = 0, assistantMsgs = 0, model = null, cwd = null;
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.type === 'session_meta' && obj.payload) {
-              model = obj.payload.model_provider;
-              cwd = obj.payload.cwd;
-            }
-            if (obj.type === 'response_item' && obj.payload?.role === 'developer') userMsgs++;
-            if (obj.type === 'response_item' && obj.payload?.role === 'assistant') assistantMsgs++;
-          } catch {}
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, model, cwd, totalLines: lines.length };
-      } catch { return null; }
-    },
-  },
-  qwen: {
-    historyDir: () => path.join(os.homedir(), '.qwen'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.qwen', 'projects');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      for (const projectDir of fs.readdirSync(baseDir)) {
-        const chatsDir = path.join(baseDir, projectDir, 'chats');
-        try {
-          if (!fs.existsSync(chatsDir) || !fs.statSync(chatsDir).isDirectory()) continue;
-          for (const file of fs.readdirSync(chatsDir)) {
-            if (!file.endsWith('.jsonl')) continue;
-            const fp = path.join(chatsDir, file);
-            const fstat = fs.statSync(fp);
-            sessions.push({
-              id: file.replace('.jsonl', ''),
-              file: fp,
-              project: projectDir,
-              modified: fstat.mtime,
-              size: fstat.size,
-              agent: 'qwen',
-            });
-          }
-        } catch {}
-      }
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.type === 'user') userMsgs++;
-            else if (obj.type === 'assistant') assistantMsgs++;
-            if (obj.message?.parts) {
-              for (const part of obj.message.parts) {
-                if (part.functionCall) toolUses++;
-              }
-            }
-          } catch {}
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
-      } catch { return null; }
-    },
-  },
-  gemini: {
-    historyDir: () => path.join(os.homedir(), '.gemini'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.gemini', 'tmp');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      for (const projectDir of fs.readdirSync(baseDir)) {
-        const chatsDir = path.join(baseDir, projectDir, 'chats');
-        try {
-          if (!fs.existsSync(chatsDir) || !fs.statSync(chatsDir).isDirectory()) continue;
-          for (const file of fs.readdirSync(chatsDir)) {
-            if (!file.startsWith('session-')) continue;
-            if (!file.endsWith('.json') && !file.endsWith('.jsonl')) continue;
-            const fp = path.join(chatsDir, file);
-            const fstat = fs.statSync(fp);
-            const idMatch = file.match(/session-([0-9a-f-]{36})/);
-            sessions.push({
-              id: idMatch ? idMatch[1] : file.replace(/\.(json|jsonl)$/, ''),
-              file: fp,
-              project: projectDir,
-              modified: fstat.mtime,
-              size: fstat.size,
-              agent: 'gemini',
-              format: file.endsWith('.jsonl') ? 'jsonl' : 'json',
-            });
-          }
-        } catch {}
-      }
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const isJsonl = filePath.endsWith('.jsonl');
-        let userMsgs = 0, assistantMsgs = 0, toolUses = 0, totalLines = 0;
-        if (isJsonl) {
-          const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-          totalLines = lines.length;
-          for (const line of lines) {
-            try {
-              const obj = JSON.parse(line);
-              if (obj.type === 'user') userMsgs++;
-              else if (obj.type === 'gemini' || obj.type === 'assistant') assistantMsgs++;
-            } catch {}
-          }
-        } else {
-          const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-          const messages = data.messages || data.history || (Array.isArray(data) ? data : []);
-          totalLines = messages.length;
-          for (const msg of messages) {
-            if (msg.role === 'user') userMsgs++;
-            else if (msg.role === 'model' || msg.role === 'assistant') assistantMsgs++;
-            if (msg.parts) {
-              for (const part of msg.parts) {
-                if (part.functionCall) toolUses++;
-              }
-            }
-          }
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines };
-      } catch { return null; }
-    },
-  },
-  kimi: {
-    historyDir: () => path.join(os.homedir(), '.kimi'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.kimi', 'sessions');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      function walk(dir) {
-        try {
-          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-            const fp = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-              const ctxFile = path.join(fp, 'context.jsonl');
-              if (fs.existsSync(ctxFile)) {
-                const fstat = fs.statSync(ctxFile);
-                sessions.push({
-                  id: entry.name,
-                  file: ctxFile,
-                  modified: fstat.mtime,
-                  size: fstat.size,
-                  agent: 'kimi',
-                });
-              } else {
-                walk(fp);
-              }
-            }
-          }
-        } catch {}
-      }
-      walk(baseDir);
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.role === 'user') userMsgs++;
-            else if (obj.role === 'assistant') assistantMsgs++;
-            else if (obj.role === 'tool') toolUses++;
-          } catch {}
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
-      } catch { return null; }
-    },
-  },
-  aider: {
-    historyDir: () => null,
-    getSessions: () => {
-      const sessions = [];
-      try {
-        const allCached = getAllCached();
-        const projectPaths = new Set();
-        for (const s of allCached) {
-          if (s.projectPath) projectPaths.add(s.projectPath);
-        }
-        for (const projPath of projectPaths) {
-          const histFile = path.join(projPath, '.aider.chat.history.md');
-          if (fs.existsSync(histFile)) {
-            const fstat = fs.statSync(histFile);
-            sessions.push({
-              id: projPath.replace(/[/\\]/g, '-'),
-              file: histFile,
-              project: path.basename(projPath),
-              modified: fstat.mtime,
-              size: fstat.size,
-              agent: 'aider',
-            });
-          }
-        }
-      } catch {}
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const content = fs.readFileSync(filePath, 'utf8');
-        const userMsgs = (content.match(/^####\s/gm) || []).length;
-        const assistantMsgs = userMsgs;
-        const totalLines = content.split('\n').length;
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses: 0, totalLines };
-      } catch { return null; }
-    },
-  },
-  opencode: {
-    historyDir: () => path.join(os.homedir(), '.local', 'share', 'opencode'),
-    getSessions: () => {
-      const dbPath = path.join(os.homedir(), '.local', 'share', 'opencode', 'opencode.db');
-      const sessions = [];
-      if (!fs.existsSync(dbPath)) return sessions;
-      try {
-        const Database = require('better-sqlite3');
-        const ocDb = new Database(dbPath, { readonly: true });
-        const rows = ocDb.prepare('SELECT id, title, directory, time_created, time_updated FROM session ORDER BY time_updated DESC').all();
-        for (const row of rows) {
-          sessions.push({
-            id: row.id,
-            file: dbPath,
-            project: row.directory ? path.basename(row.directory) : '',
-            modified: new Date(row.time_updated),
-            size: 0,
-            agent: 'opencode',
-            title: row.title,
-          });
-        }
-        ocDb.close();
-      } catch {}
-      return sessions;
-    },
-    parseSession: (filePath, sessionId) => {
-      try {
-        const Database = require('better-sqlite3');
-        const ocDb = new Database(filePath, { readonly: true });
-        const msgs = ocDb.prepare("SELECT json_extract(data, '$.role') as role FROM message WHERE session_id = ?").all(sessionId);
-        let userMsgs = 0, assistantMsgs = 0;
-        for (const m of msgs) {
-          if (m.role === 'user') userMsgs++;
-          else if (m.role === 'assistant') assistantMsgs++;
-        }
-        const toolParts = ocDb.prepare("SELECT count(*) as cnt FROM part WHERE session_id = ? AND json_extract(data, '$.type') IN ('tool-call', 'tool-result')").get(sessionId);
-        ocDb.close();
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses: toolParts?.cnt || 0, totalLines: msgs.length };
-      } catch { return null; }
-    },
-  },
-  hermes: {
-    historyDir: () => path.join(os.homedir(), '.hermes'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.hermes', 'sessions');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      try {
-        for (const file of fs.readdirSync(baseDir)) {
-          if (!file.endsWith('.jsonl')) continue;
-          const fp = path.join(baseDir, file);
-          const fstat = fs.statSync(fp);
-          const dateMatch = file.match(/^(\d{8})_(\d{6})/);
-          sessions.push({
-            id: file.replace('.jsonl', ''),
-            file: fp,
-            modified: fstat.mtime,
-            size: fstat.size,
-            agent: 'hermes',
-            date: dateMatch ? `${dateMatch[1].slice(0,4)}-${dateMatch[1].slice(4,6)}-${dateMatch[1].slice(6,8)}` : null,
-          });
-        }
-      } catch {}
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.role === 'user') userMsgs++;
-            else if (obj.role === 'assistant') assistantMsgs++;
-            else if (obj.role === 'tool') toolUses++;
-          } catch {}
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
-      } catch { return null; }
-    },
-  },
-  amp: {
-    historyDir: () => path.join(os.homedir(), '.amp'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.amp', 'sessions');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      try {
-        for (const file of fs.readdirSync(baseDir)) {
-          if (!file.endsWith('.jsonl')) continue;
-          const fp = path.join(baseDir, file);
-          const fstat = fs.statSync(fp);
-          sessions.push({
-            id: file.replace('.jsonl', ''),
-            file: fp,
-            modified: fstat.mtime,
-            size: fstat.size,
-            agent: 'amp',
-          });
-        }
-      } catch {}
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.role === 'user' || obj.type === 'human') userMsgs++;
-            else if (obj.role === 'assistant' || obj.type === 'ai') assistantMsgs++;
-            if (obj.type === 'tool_use' || obj.type === 'tool') toolUses++;
-          } catch {}
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
-      } catch { return null; }
-    },
-  },
-  goose: {
-    historyDir: () => path.join(os.homedir(), '.goose'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.goose', 'sessions');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      try {
-        for (const file of fs.readdirSync(baseDir)) {
-          if (!file.endsWith('.jsonl')) continue;
-          const fp = path.join(baseDir, file);
-          const fstat = fs.statSync(fp);
-          sessions.push({
-            id: file.replace('.jsonl', ''),
-            file: fp,
-            modified: fstat.mtime,
-            size: fstat.size,
-            agent: 'goose',
-          });
-        }
-      } catch {}
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.role === 'user') userMsgs++;
-            else if (obj.role === 'assistant') assistantMsgs++;
-            if (obj.tools || obj.tool_calls) toolUses++;
-          } catch {}
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
-      } catch { return null; }
-    },
-  },
-  continue: {
-    historyDir: () => path.join(os.homedir(), '.continue'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.continue', 'sessions');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      try {
-        for (const file of fs.readdirSync(baseDir)) {
-          if (!file.endsWith('.jsonl')) continue;
-          const fp = path.join(baseDir, file);
-          const fstat = fs.statSync(fp);
-          sessions.push({
-            id: file.replace('.jsonl', ''),
-            file: fp,
-            modified: fstat.mtime,
-            size: fstat.size,
-            agent: 'continue',
-          });
-        }
-      } catch {}
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.role === 'user' || obj.role === 'human') userMsgs++;
-            else if (obj.role === 'assistant' || obj.role === 'ai') assistantMsgs++;
-            if (obj.tools || obj.tool_calls) toolUses++;
-          } catch {}
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
-      } catch { return null; }
-    },
-  },
-  cursor: {
-    historyDir: () => path.join(os.homedir(), '.cursor'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.cursor', 'cli-sessions');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      try {
-        for (const file of fs.readdirSync(baseDir)) {
-          if (!file.endsWith('.jsonl')) continue;
-          const fp = path.join(baseDir, file);
-          const fstat = fs.statSync(fp);
-          sessions.push({
-            id: file.replace('.jsonl', ''),
-            file: fp,
-            modified: fstat.mtime,
-            size: fstat.size,
-            agent: 'cursor',
-          });
-        }
-      } catch {}
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.role === 'user') userMsgs++;
-            else if (obj.role === 'assistant') assistantMsgs++;
-            if (obj.type === 'tool_use') toolUses++;
-          } catch {}
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
-      } catch { return null; }
-    },
-  },
-  cline: {
-    historyDir: () => path.join(os.homedir(), '.cline'),
-    getSessions: () => {
-      const baseDir = path.join(os.homedir(), '.cline', 'history');
-      const sessions = [];
-      if (!fs.existsSync(baseDir)) return sessions;
-      try {
-        for (const file of fs.readdirSync(baseDir)) {
-          if (!file.endsWith('.jsonl')) continue;
-          const fp = path.join(baseDir, file);
-          const fstat = fs.statSync(fp);
-          sessions.push({
-            id: file.replace('.jsonl', ''),
-            file: fp,
-            modified: fstat.mtime,
-            size: fstat.size,
-            agent: 'cline',
-          });
-        }
-      } catch {}
-      return sessions;
-    },
-    parseSession: (filePath) => {
-      try {
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-        let userMsgs = 0, assistantMsgs = 0, toolUses = 0;
-        for (const line of lines) {
-          try {
-            const obj = JSON.parse(line);
-            if (obj.role === 'user' || obj.author === 'user') userMsgs++;
-            else if (obj.role === 'assistant' || obj.author === 'assistant') assistantMsgs++;
-            if (obj.tool_calls || obj.tools) toolUses++;
-          } catch {}
-        }
-        return { userMessages: userMsgs, assistantMessages: assistantMsgs, toolUses, totalLines: lines.length };
-      } catch { return null; }
-    },
-  },
-};
+// AGENT_HISTORY: per-CLI session-history adapters (see agent-history.js).
+const { createAgentHistory } = require('./agent-history');
+const AGENT_HISTORY = createAgentHistory({ getAllCached });
 
 // IPC: get-agent-stats — aggregate session history across all agents
 ipcMain.handle('get-agent-stats', () => {
@@ -1560,8 +1140,10 @@ ipcMain.handle('get-agent-stats', () => {
         lastUsed: sessions.length ? sessions.sort((a, b) => b.modified - a.modified)[0].modified.toISOString() : null,
         totalSizeBytes: sessions.reduce((sum, s) => sum + s.size, 0),
       };
-    } catch {
-      stats[agentId] = { name: CLI_AGENTS[agentId]?.name || agentId, error: true };
+    } catch (err) {
+      // Surface the reason (IMPROVEMENTS B10) instead of a silent flag.
+      log.warn(`[get-agent-stats] ${agentId} failed:`, err.message);
+      stats[agentId] = { name: CLI_AGENTS[agentId]?.name || agentId, error: true, errorMessage: err.message };
     }
   }
   return stats;
@@ -1572,13 +1154,75 @@ ipcMain.handle('detect-agents', () => {
   const results = {};
   for (const [id, agent] of Object.entries(CLI_AGENTS)) {
     let installed = false;
-    try {
-      execFileSync('which', [agent.cmd], { timeout: 2000, stdio: 'pipe' });
-      installed = true;
-    } catch {}
-    results[id] = { ...agent, id, installed };
+    const candidates = [agent.cmd, ...(agent.altCmds || [])];
+    for (const cmd of candidates) {
+      try {
+        execFileSync('which', [cmd], { timeout: 2000, stdio: 'pipe' });
+        installed = true;
+        break;
+      } catch {}
+    }
+    // A non-Claude agent with discoverable on-disk session history should also
+    // surface in the sidebar even when its binary isn't on PATH (e.g. installed
+    // in a non-login shell, or run via npx), so users can still browse old work.
+    let hasHistory = false;
+    if (!installed && AGENT_HISTORY[id]) {
+      try { hasHistory = (AGENT_HISTORY[id].getSessions() || []).length > 0; } catch {}
+    }
+    results[id] = { ...agent, id, installed: installed || hasHistory, onPath: installed };
   }
   return results;
+});
+
+// --- IPC: project card metadata + git controls ---
+
+// Project metadata: last-modified file mtime + (cached) git status, for cards.
+ipcMain.handle('get-project-meta', async (_event, projectPath) => {
+  try {
+    const lastModifiedMs = getCachedProjectLastModified(projectPath);
+    const git = await getCachedGitStatus(projectPath);
+    return { ok: true, lastModifiedMs, git };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('git-list-branches', async (_event, projectPath) => {
+  try { return { ok: true, ...(await gitUtils.listBranches(projectPath)) }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('git-checkout-branch', async (_event, projectPath, branch, opts) => {
+  try {
+    const res = await gitUtils.checkoutBranch(projectPath, branch, opts || {});
+    if (res.ok) gitStatusCache.delete(projectPath); // force fresh status next read
+    return res;
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+
+// Throttled remote fetch so "pull available" reflects the real cloud state.
+ipcMain.handle('git-fetch-remote', async (_event, projectPath, opts) => {
+  try {
+    const now = Date.now();
+    const last = lastFetchAt.get(projectPath) || 0;
+    if (!opts?.force && (now - last) < FETCH_THROTTLE_MS) {
+      // Skip the network call; just return the (cached) current state.
+      return { ok: true, throttled: true, git: await getCachedGitStatus(projectPath) };
+    }
+    const res = await gitUtils.fetchRemote(projectPath);
+    lastFetchAt.set(projectPath, now);
+    gitStatusCache.delete(projectPath);
+    return { ...res, git: await getCachedGitStatus(projectPath, true) };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+
+ipcMain.handle('git-pull', async (_event, projectPath) => {
+  try {
+    const res = await gitUtils.pullFastForward(projectPath);
+    gitStatusCache.delete(projectPath);
+    projectMetaCache.delete(projectPath);
+    return { ...res, git: await getCachedGitStatus(projectPath, true) };
+  } catch (err) { return { ok: false, error: err.message }; }
 });
 
 // --- IPC: get-session-tokens ---
@@ -2225,6 +1869,9 @@ safeSendToSession(sessionId, 'terminal-data', '\x1b[?1049h');
     if (realId !== sessionId && activeSessions.has(sessionId)) {
       safeSend('process-exited', sessionId, exitCode);
     }
+    // Clean up any session JSONL activity watchers (B4: no watcher leak on exit).
+    stopSessionFileWatcher(realId);
+    stopSessionFileWatcher(sessionId);
     activeSessions.delete(realId);
     // Clean up the original key too in case transition detection hasn't run yet
     activeSessions.delete(sessionId);

@@ -15,24 +15,28 @@ let deleteCachedFolder, getCachedByFolder, upsertCachedSessions, deleteCachedSes
 let deleteSearchFolder, deleteSearchSession, upsertSearchEntries;
 let setFolderMeta, getAllFolderMeta, getAllMeta, getAllCached, getSetting, getMeta, setName;
 
+// Safe send wrapper to prevent white screen crashes.
+// Defined at module scope so module-level functions (notifyRendererProjectsChanged,
+// sendStatus, populateCacheViaWorker) can reference it. It closes over the
+// module-level getMainWindow/log bindings that init() assigns.
+function safeSend(channel, ...args) {
+  try {
+    const mw = getMainWindow?.();
+    if (mw && !mw.isDestroyed() && mw.webContents) {
+      mw.webContents.send(channel, ...args);
+    }
+  } catch (err) {
+    if (err.message?.includes('disposed')) return;
+    log?.warn('[safeSend] error:', err.message);
+  }
+}
+
 function init(ctx) {
   PROJECTS_DIR = ctx.PROJECTS_DIR;
   activeSessions = ctx.activeSessions;
   getMainWindow = ctx.getMainWindow;
   log = ctx.log;
-  
-  // Safe send wrapper to prevent white screen crashes
-  function safeSend(channel, ...args) {
-    try {
-      const mw = getMainWindow();
-      if (mw && !mw.isDestroyed() && mw.webContents) {
-        mw.webContents.send(channel, ...args);
-      }
-    } catch (err) {
-      if (err.message?.includes('disposed')) return;
-      log?.warn('[safeSend] error:', err.message);
-    }
-  }
+
   // DB functions
   deleteCachedFolder = ctx.db.deleteCachedFolder;
   getCachedByFolder = ctx.db.getCachedByFolder;

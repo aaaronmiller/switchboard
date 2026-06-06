@@ -3,11 +3,17 @@ const AGENT_COLORS = {
   claude: '#d97757', codex: '#4ade80', qwen: '#60a5fa',
   gemini: '#22d3ee', kimi: '#fb923c', aider: '#a78bfa',
   opencode: '#f472b6', hermes: '#fbbf24', letta: '#34d399',
+  amp: '#e879f9', goose: '#fb7185', continue: '#06b6d4',
+  cursor: '#8b5cf6', cline: '#f97316',
+  antigravity: '#2dd4bf', pi: '#c084fc', kilo: '#facc15',
 };
 const AGENT_LABELS = {
   claude: 'Claude', codex: 'Codex', qwen: 'Qwen',
   gemini: 'Gemini', kimi: 'Kimi', aider: 'Aider',
   opencode: 'OpenCode', hermes: 'Hermes', letta: 'Letta',
+  amp: 'Amp', goose: 'Goose', continue: 'Continue',
+  cursor: 'Cursor', cline: 'Cline',
+  antigravity: 'Antigravity', pi: 'Pi', kilo: 'Kilo',
 };
 
 const statusBarInfo = document.getElementById('status-bar-info');
@@ -191,6 +197,21 @@ let activeAgent = localStorage.getItem('activeAgent') || 'claude'; // which CLI 
 let multiAgentMode = localStorage.getItem('multiAgentMode') === '1'; // show all agents stacked
 let cachedAgentProjects = new Map(); // agentId → projects[] cache
 let installedAgents = {}; // populated on init
+// Flagged agents: a user-curated set of CLIs whose sessions are shown together
+// in the "Flagged" meta-view (lets you watch >1 CLI at once without losing the
+// single-CLI views). Persisted across restarts.
+let flaggedAgents = new Set((() => {
+  try { return JSON.parse(localStorage.getItem('flaggedAgents') || '[]'); } catch { return []; }
+})());
+function saveFlaggedAgents() {
+  localStorage.setItem('flaggedAgents', JSON.stringify([...flaggedAgents]));
+}
+// Allow the settings panel to push flag changes back into the live sidebar.
+window._syncFlaggedAgents = function () {
+  try { flaggedAgents = new Set(JSON.parse(localStorage.getItem('flaggedAgents') || '[]')); } catch {}
+  if (typeof rebuildAgentSelector === 'function') rebuildAgentSelector();
+  if (activeAgent === '_flagged' && typeof loadMetaView === 'function') loadMetaView('_flagged');
+};
 let cachedPlans = [];
 let visibleSessionCount = 10;
 let sessionMaxAgeDays = 3;
@@ -1666,6 +1687,7 @@ function renderProjects(projects, resort) {
         sortTime: new Date(session.modified).getTime(),
         pinned: !!session.starred, running: isRunning,
         element: buildSessionItem(session),
+        session, isSlug: false,
       });
     }
     for (const [slug, sessions] of slugMap) {
@@ -1674,6 +1696,8 @@ function renderProjects(projects, resort) {
       const hasPinned = sessions.some(s => s.starred);
       const element = sessions.length === 1 ? buildSessionItem(sessions[0]) : buildSlugGroup(slug, sessions);
       allItems.push({
+        session: sessions.length === 1 ? sessions[0] : null,
+        isSlug: sessions.length > 1,
         sortTime: mostRecentTime,
         pinned: hasPinned, running: hasRunning,
         element,
@@ -1705,27 +1729,27 @@ function renderProjects(projects, resort) {
     // Save current order for this project
     newSortedOrder.push({ projectPath: project.projectPath, itemIds: allItems.map(item => item.element.id) });
 
-    // === STEP 5: Truncate — split into visible vs older ===
+    // === STEP 5: Split items for display ===
+    // Two modes:
+    //  • Flat (search / star / running / today): show every matching item, as before.
+    //  • Card model (default project view): show running + pinned + slug-groups
+    //    EXPANDED, and collapse the remaining dormant sessions into a per-project
+    //    pulldown — so each project reads as a single card unless work is running.
+    const flatMode = searchMatchIds !== null || showStarredOnly || showRunningOnly || showTodayOnly;
     let visible = [];
     let older = [];
-    if (searchMatchIds !== null || showStarredOnly || showRunningOnly || showTodayOnly) {
+    let dormant = []; // card-model pulldown contents
+    if (flatMode) {
       visible = allItems;
     } else {
-      let count = 0;
-      const ageCutoff = Date.now() - sessionMaxAgeDays * 86400000;
       for (const item of allItems) {
-        // Running and pinned always show; others must be within count AND age limit
-        if (item.running || item.pinned || (count < visibleSessionCount && item.sortTime >= ageCutoff)) {
-          visible.push(item);
-          count++;
-        } else {
-          older.push(item);
-        }
+        if (item.running || item.pinned || item.isSlug) visible.push(item);
+        else dormant.push(item);
       }
-      // If visible is empty but older has items, show them directly
-      if (visible.length === 0 && older.length > 0) {
-        visible = older;
-        older = [];
+      // A lone dormant session with nothing expanded renders inline (no pulldown).
+      if (visible.length === 0 && dormant.length === 1) {
+        visible = dormant;
+        dormant = [];
       }
     }
 
@@ -1733,6 +1757,18 @@ function renderProjects(projects, resort) {
     const group = document.createElement('div');
     group.className = 'project-group';
     group.id = fId;
+
+    // Per-CLI color accent for the card. In a per-CLI view use that CLI's color;
+    // otherwise color by the agent that owns the project's newest session.
+    const cardAgent = (activeAgent && !activeAgent.startsWith('_'))
+      ? activeAgent
+      : (filtered[0]?.agent || sessionAgentMap.get(filtered[0]?.sessionId) || 'claude');
+    const cardAgentColor = AGENT_COLORS[cardAgent];
+    if (cardAgentColor) {
+      group.classList.add('has-agent-color');
+      group.dataset.agent = cardAgent;
+      group.style.setProperty('--agent-color', cardAgentColor);
+    }
 
     const header = document.createElement('div');
     header.className = 'project-header';
@@ -1758,12 +1794,49 @@ function renderProjects(projects, resort) {
     newBtn.title = 'New session';
     header.appendChild(newBtn);
 
+    // Project card metadata row (path · last-modified · git branch/status).
+    // Rendered with placeholders here; filled asynchronously after morphdom by
+    // enrichProjectCards(). Sits between header and sessions so it stays visible
+    // even when the group is collapsed.
+    const metaRow = document.createElement('div');
+    metaRow.className = 'project-card-meta';
+    metaRow.id = 'pcm-' + fId;
+    metaRow.dataset.projectPath = project.projectPath;
+    metaRow.innerHTML = `
+      <span class="pcm-path" title="${escapeHtml(project.projectPath)}">${escapeHtml(project.projectPath)}</span>
+      <span class="pcm-modified" title="Most recently modified file in project"></span>
+      <span class="pcm-git"></span>`;
+
     const sessionsList = document.createElement('div');
     sessionsList.className = 'project-sessions';
     sessionsList.id = 'sessions-' + fId;
 
     for (const item of visible) {
       sessionsList.appendChild(item.element);
+    }
+
+    // Card-model pulldown for dormant (non-running, non-pinned) sessions.
+    if (dormant.length > 0) {
+      const wrap = document.createElement('div');
+      wrap.className = 'session-pulldown-wrap';
+      const select = document.createElement('select');
+      select.className = 'session-pulldown';
+      select.id = 'pull-' + fId;
+      const ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = `${dormant.length} session${dormant.length > 1 ? 's' : ''} — open…`;
+      select.appendChild(ph);
+      for (const it of dormant) {
+        if (!it.session) continue;
+        const opt = document.createElement('option');
+        opt.value = it.session.sessionId;
+        const d = formatDate(new Date(it.session.modified));
+        const name = cleanDisplayName(it.session.name || it.session.summary) || 'session';
+        opt.textContent = `${d} · ${name}`.slice(0, 80);
+        select.appendChild(opt);
+      }
+      wrap.appendChild(select);
+      sessionsList.appendChild(wrap);
     }
 
     if (older.length > 0) {
@@ -1793,6 +1866,7 @@ function renderProjects(projects, resort) {
     }
 
     group.appendChild(header);
+    group.appendChild(metaRow);
     group.appendChild(sessionsList);
     newSidebar.appendChild(group);
   }
@@ -1855,6 +1929,143 @@ function renderProjects(projects, resort) {
   const isUserTyping = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable || ae.closest('.modal-overlay'));
   if (activeSessionId && openSessions.has(activeSessionId) && !isUserTyping) {
     openSessions.get(activeSessionId).terminal.focus();
+  }
+}
+
+// Frontend cache for project card metadata (backend already caches; this avoids
+// redundant IPC on every morphdom refresh).
+const _projectMetaCache = new Map(); // projectPath -> { data, ts }
+const PROJECT_META_FE_TTL = 30_000;
+
+// Lightweight transient status for card git actions (reuses the status bar).
+function cardStatus(text, type) {
+  try {
+    if (!statusBarActivity) return;
+    statusBarActivity.textContent = text;
+    statusBarActivity.className = type === 'error' ? 'status-error' : (type === 'done' ? 'status-done' : '');
+    setTimeout(() => {
+      if (statusBarActivity.textContent === text) {
+        statusBarActivity.textContent = '';
+        statusBarActivity.className = '';
+      }
+    }, 3000);
+  } catch {}
+}
+
+function _renderCardGit(gitEl, projectPath, git) {
+  gitEl.innerHTML = '';
+  if (!git || !git.branch) return;
+  // Branch chip — click to switch branch (lazy-loads branch list).
+  const branchChip = document.createElement('button');
+  branchChip.className = 'pcm-branch';
+  branchChip.title = 'Switch branch';
+  branchChip.innerHTML = `<span class="pcm-branch-icon">&#9095;</span> ${escapeHtml(git.branch)}`;
+  branchChip.onclick = async (e) => {
+    e.stopPropagation();
+    const res = await window.api.gitListBranches(projectPath);
+    if (!res.ok || !res.branches?.length) return;
+    const sel = document.createElement('select');
+    sel.className = 'pcm-branch-select';
+    for (const b of res.branches) {
+      const opt = document.createElement('option');
+      opt.value = b; opt.textContent = b;
+      if (b === res.current) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.onclick = (ev) => ev.stopPropagation();
+    sel.onchange = async () => {
+      const target = sel.value;
+      const out = await window.api.gitCheckoutBranch(projectPath, target, {});
+      if (out.ok) {
+        cardStatus(`Switched to ${target}`, 'done');
+        _projectMetaCache.delete(projectPath);
+        refreshSidebar({ resort: false });
+      } else if (out.dirty) {
+        cardStatus(`Can't switch: uncommitted changes in ${projectPath.split('/').pop()}`, 'error');
+        _renderCardGit(gitEl, projectPath, git); // restore chip
+      } else {
+        cardStatus(out.error || 'Checkout failed', 'error');
+        _renderCardGit(gitEl, projectPath, git);
+      }
+    };
+    branchChip.replaceWith(sel);
+    sel.focus();
+  };
+  gitEl.appendChild(branchChip);
+
+  if (git.dirty) {
+    const b = document.createElement('span');
+    b.className = 'pcm-badge pcm-dirty'; b.title = 'Uncommitted changes'; b.textContent = '●';
+    gitEl.appendChild(b);
+  }
+  if (git.ahead > 0) {
+    const b = document.createElement('span');
+    b.className = 'pcm-badge pcm-ahead'; b.title = `${git.ahead} commit(s) ahead of upstream`; b.textContent = `↑${git.ahead}`;
+    gitEl.appendChild(b);
+  }
+  if (git.behind > 0) {
+    // The cloud-ahead signifier: a "pull" affordance that runs git pull --ff-only.
+    const pull = document.createElement('button');
+    pull.className = 'pcm-badge pcm-pull';
+    pull.title = `${git.behind} commit(s) on the remote not in your folder — click to pull (fast-forward)`;
+    pull.textContent = `⇩${git.behind}`;
+    pull.onclick = async (e) => {
+      e.stopPropagation();
+      pull.disabled = true;
+      const out = await window.api.gitPull(projectPath);
+      if (out.ok) {
+        cardStatus('Pulled latest changes', 'done');
+        _projectMetaCache.delete(projectPath);
+        refreshSidebar({ resort: false });
+      } else {
+        cardStatus(out.error || 'Pull failed', 'error');
+        pull.disabled = false;
+      }
+    };
+    gitEl.appendChild(pull);
+  }
+  // Manual "check remote" (throttled fetch) so the pull signifier is accurate.
+  const fetchBtn = document.createElement('button');
+  fetchBtn.className = 'pcm-badge pcm-fetch'; fetchBtn.title = 'Check remote for new commits';
+  fetchBtn.textContent = '⟳';
+  fetchBtn.onclick = async (e) => {
+    e.stopPropagation();
+    fetchBtn.disabled = true; fetchBtn.classList.add('spinning');
+    const out = await window.api.gitFetchRemote(projectPath, {});
+    fetchBtn.classList.remove('spinning'); fetchBtn.disabled = false;
+    if (out.git) { _renderCardGit(gitEl, projectPath, out.git); }
+  };
+  gitEl.appendChild(fetchBtn);
+}
+
+async function enrichProjectCards(projects) {
+  for (const project of projects) {
+    const fId = folderId(project.projectPath);
+    const metaEl = document.getElementById('pcm-' + fId);
+    if (!metaEl) continue;
+    const modEl = metaEl.querySelector('.pcm-modified');
+    const gitEl = metaEl.querySelector('.pcm-git');
+
+    const cached = _projectMetaCache.get(project.projectPath);
+    const fresh = cached && (Date.now() - cached.ts) < PROJECT_META_FE_TTL;
+    const apply = (data) => {
+      if (!data) return;
+      if (modEl && data.lastModifiedMs) {
+        modEl.textContent = '🕓 ' + formatDate(new Date(data.lastModifiedMs));
+      }
+      if (gitEl) _renderCardGit(gitEl, project.projectPath, data.git);
+    };
+    if (fresh) { apply(cached.data); continue; }
+
+    try {
+      const data = await window.api.getProjectMeta(project.projectPath);
+      if (data && data.ok) {
+        _projectMetaCache.set(project.projectPath, { data, ts: Date.now() });
+        // Element may have been replaced by a later morphdom pass — re-query.
+        const stillThere = document.getElementById('pcm-' + fId);
+        if (stillThere) apply(data);
+      }
+    } catch {}
   }
 }
 
@@ -1931,6 +2142,19 @@ function rebindSidebarEvents(projects) {
       }
     };
   });
+
+  // Card-model session pulldown — open the chosen dormant session.
+  sidebarContent.querySelectorAll('.session-pulldown').forEach(sel => {
+    sel.onclick = (e) => e.stopPropagation();
+    sel.onchange = () => {
+      const s = sessionMap.get(sel.value);
+      if (s) openSession(s);
+      sel.value = '';
+    };
+  });
+
+  // Fill project cards with last-modified + git metadata (async, cached).
+  enrichProjectCards(projects);
 
   sidebarContent.querySelectorAll('.sessions-more-toggle').forEach(moreBtn => {
     const olderList = moreBtn.nextElementSibling;
@@ -2080,6 +2304,17 @@ function buildSessionItem(session) {
   // F5.6: Git status color class
   const gitClass = session.gitStatus ? `git-${session.gitStatus}` : 'git-unknown';
   item.classList.add(gitClass);
+
+  // Per-CLI color accent: tint the card's left edge with the agent's color so
+  // sessions from different CLIs are visually distinguishable (esp. in combined
+  // / flagged / running views that mix multiple agents).
+  const cardAgent = session.agent || sessionAgentMap.get(session.sessionId) || 'claude';
+  const cardAgentColor = AGENT_COLORS[cardAgent];
+  if (cardAgentColor) {
+    item.classList.add('has-agent-color');
+    item.dataset.agent = cardAgent;
+    item.style.setProperty('--agent-color', cardAgentColor);
+  }
 
   item.dataset.sessionId = session.sessionId;
 
@@ -5879,60 +6114,113 @@ function showAddProjectDialog() {
   collapseBtn.addEventListener('click', () => sidebar.classList.add('collapsed'));
   expandBtn.addEventListener('click', () => sidebar.classList.remove('collapsed'));
 
-  // Right-click context menu on sidebar expand button
+  // Right-click context menu \u2014 pick a CLI to view, or flag CLIs to combine.
+  // Attached to both the sidebar expand button and the Claude logo (sessions tab).
   const ctxMenu = document.getElementById('agent-context-menu');
-  expandBtn.addEventListener('contextmenu', async (e) => {
+
+  function selectAgentView(id) {
+    activeAgent = id;
+    localStorage.setItem('activeAgent', id);
+    const selContainer = document.getElementById('agent-selector');
+    if (selContainer) {
+      selContainer.querySelectorAll('.agent-selector-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.agent === id)
+      );
+    }
+    showStarredOnly = false; showRunningOnly = false;
+    if (starToggle) starToggle.classList.remove('active');
+    if (runningToggle) runningToggle.classList.remove('active');
+    if (typeof rebuildAgentSelector === 'function') rebuildAgentSelector();
+    loadProjectsForAgent();
+  }
+
+  async function openAgentContextMenu(anchorEl, e) {
     e.preventDefault();
     e.stopPropagation();
 
-    // Detect agents if not already cached
     let agents = installedAgents;
     if (!agents || Object.keys(agents).length === 0) {
       try { agents = await window.api.detectAgents(); } catch { agents = {}; }
     }
-
     const installedEntries = Object.entries(agents).filter(([, a]) => a.installed);
     if (installedEntries.length === 0) return;
 
-    // Build menu items
     ctxMenu.innerHTML = '';
+
+    // Header
+    const hdr = document.createElement('div');
+    hdr.className = 'agent-context-menu-header';
+    hdr.textContent = 'Show CLI sessions';
+    ctxMenu.appendChild(hdr);
+
     for (const [id, agent] of installedEntries) {
-      const item = document.createElement('button');
-      item.className = 'agent-context-menu-item';
-      const dotColor = agent.color || '#888';
+      const item = document.createElement('div');
+      item.className = 'agent-context-menu-item' + (id === activeAgent ? ' active' : '');
+      const dotColor = agent.color || AGENT_COLORS[id] || '#888';
       const isActive = id === activeAgent;
-      item.innerHTML = `
+      const isFlagged = flaggedAgents.has(id);
+
+      const label = document.createElement('button');
+      label.className = 'ctx-item-label';
+      label.innerHTML = `
         <span class="ctx-dot" style="background:${dotColor}"></span>
         <span>${agent.name}</span>
         ${isActive ? '<span class="ctx-checkmark">\u2713</span>' : ''}
       `;
-      item.addEventListener('click', () => {
-        if (id === activeAgent) return;
-        activeAgent = id;
-        localStorage.setItem('activeAgent', id);
-        // Update agent-selector buttons
-        const selContainer = document.getElementById('agent-selector');
-        if (selContainer) {
-          selContainer.querySelectorAll('.agent-selector-btn').forEach(b =>
-            b.classList.toggle('active', b.dataset.agent === id)
-          );
-        }
-        // Clear meta-view state
-        showStarredOnly = false; showRunningOnly = false;
-        if (starToggle) starToggle.classList.remove('active');
-        if (runningToggle) runningToggle.classList.remove('active');
-        loadProjectsForAgent();
+      label.addEventListener('click', () => {
+        selectAgentView(id);
         ctxMenu.style.display = 'none';
       });
+
+      // Flag toggle \u2014 adds/removes this CLI from the combined "Flagged" view
+      const flagBtn = document.createElement('button');
+      flagBtn.className = 'ctx-flag-btn' + (isFlagged ? ' flagged' : '');
+      flagBtn.title = isFlagged ? 'Remove from Flagged view' : 'Add to Flagged view';
+      flagBtn.innerHTML = isFlagged ? '\u2691' : '\u2690'; // filled / outline flag
+      flagBtn.style.color = isFlagged ? dotColor : '';
+      flagBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (flaggedAgents.has(id)) flaggedAgents.delete(id);
+        else flaggedAgents.add(id);
+        saveFlaggedAgents();
+        flagBtn.classList.toggle('flagged');
+        flagBtn.innerHTML = flaggedAgents.has(id) ? '\u2691' : '\u2690';
+        flagBtn.style.color = flaggedAgents.has(id) ? dotColor : '';
+        if (typeof rebuildAgentSelector === 'function') rebuildAgentSelector();
+        // If currently viewing the flagged combined view, refresh it live
+        if (activeAgent === '_flagged') loadMetaView('_flagged');
+      });
+
+      item.appendChild(label);
+      item.appendChild(flagBtn);
       ctxMenu.appendChild(item);
     }
 
-    // Position menu below the button
-    const rect = expandBtn.getBoundingClientRect();
+    // Footer action: open the combined Flagged view
+    const sep = document.createElement('div');
+    sep.className = 'agent-context-menu-sep';
+    ctxMenu.appendChild(sep);
+    const flaggedView = document.createElement('button');
+    flaggedView.className = 'agent-context-menu-item ctx-item-label';
+    flaggedView.innerHTML = `<span class="ctx-dot" style="background:#ef4444">\u2691</span><span>View Flagged (${flaggedAgents.size})</span>`;
+    flaggedView.addEventListener('click', () => {
+      selectAgentView('_flagged');
+      ctxMenu.style.display = 'none';
+    });
+    ctxMenu.appendChild(flaggedView);
+
+    const rect = anchorEl.getBoundingClientRect();
     ctxMenu.style.top = (rect.bottom + 4) + 'px';
     ctxMenu.style.left = rect.left + 'px';
     ctxMenu.style.display = 'block';
-  });
+  }
+
+  expandBtn.addEventListener('contextmenu', (e) => openAgentContextMenu(expandBtn, e));
+  // The Claude logo (sessions tab) \u2014 primary right-click target per UX request.
+  const sessionsTabIcon = document.querySelector('.sidebar-tab[data-tab="sessions"]');
+  if (sessionsTabIcon) {
+    sessionsTabIcon.addEventListener('contextmenu', (e) => openAgentContextMenu(sessionsTabIcon, e));
+  }
 
   // Close context menu on click outside or Escape
   document.addEventListener('mousedown', (e) => {
@@ -6224,13 +6512,20 @@ document.addEventListener('keydown', (e) => {
 // Meta-views: special sidebar views that aggregate across CLIs
 const META_VIEWS = {
   '_active': { label: 'Active', icon: '&#9679;', color: '#22c55e', title: 'All running sessions across every CLI' },
+  '_flagged': { label: 'Flagged', icon: '&#9873;', color: '#ef4444', title: 'Combined sessions from all flagged CLIs' },
   '_pinned': { label: 'Pinned', icon: '&#9733;', color: '#eab308', title: 'Pinned sessions from all CLIs' },
 };
 
 async function loadMetaView(viewId) {
-  // Gather sessions from ALL installed agents
+  // Gather sessions from the relevant agent set. The "_flagged" view aggregates
+  // only the user's flagged CLIs; the other meta-views span all installed agents.
   const allProjects = [];
-  const agentIds = Object.entries(installedAgents).filter(([, a]) => a.installed).map(([id]) => id);
+  let agentIds = Object.entries(installedAgents).filter(([, a]) => a.installed).map(([id]) => id);
+  if (viewId === '_flagged') {
+    agentIds = agentIds.filter(id => flaggedAgents.has(id));
+    // Always include claude if flagged even when not in installedAgents map
+    if (flaggedAgents.has('claude') && !agentIds.includes('claude')) agentIds.push('claude');
+  }
 
   const results = await Promise.all(agentIds.map(async (id) => {
     if (id === 'claude') {
@@ -6291,44 +6586,52 @@ async function loadMetaView(viewId) {
   startSessionFileWatchers(projects);
 }
 
-(async function initAgentSelector() {
-  try {
-    installedAgents = await window.api.detectAgents();
-  } catch { installedAgents = {}; }
+// Ordered list of selectable views (meta-views + per-CLI agents) — the order the
+// rotate arrows cycle through. Rebuilt whenever the selector is rebuilt.
+let orderedAgentViews = [];
 
+function setActiveAgentView(viewId) {
+  activeAgent = viewId;
+  localStorage.setItem('activeAgent', viewId);
+  showStarredOnly = false; showRunningOnly = false;
+  if (starToggle) starToggle.classList.remove('active');
+  if (runningToggle) runningToggle.classList.remove('active');
+  if (typeof rebuildAgentSelector === 'function') rebuildAgentSelector();
+  if (viewId.startsWith('_')) loadMetaView(viewId);
+  else loadProjectsForAgent();
+}
+
+// Rotate the active CLI to the previous/next view in the toolbar (arrow buttons).
+function rotateAgentView(dir) {
+  if (orderedAgentViews.length === 0) return;
+  let idx = orderedAgentViews.indexOf(activeAgent);
+  if (idx === -1) idx = 0;
+  idx = (idx + dir + orderedAgentViews.length) % orderedAgentViews.length;
+  setActiveAgentView(orderedAgentViews[idx]);
+}
+
+function rebuildAgentSelector() {
   const container = document.getElementById('agent-selector');
   if (!container) return;
 
   const agentsToShow = Object.entries(installedAgents).filter(([, a]) => a.installed);
-
-  // Always show — meta-views are useful even with only Claude
   container.style.display = '';
   container.innerHTML = '';
+  orderedAgentViews = [];
 
-  function setActive(viewId) {
-    activeAgent = viewId;
-    localStorage.setItem('activeAgent', viewId);
-    container.querySelectorAll('.agent-selector-btn').forEach(b =>
-      b.classList.toggle('active', b.dataset.agent === viewId)
-    );
-  }
-
-  // Meta-view buttons first
+  // Meta-view buttons first. The "_flagged" combined view is only shown once the
+  // user has flagged at least one CLI (otherwise it would always be empty).
   for (const [viewId, meta] of Object.entries(META_VIEWS)) {
+    if (viewId === '_flagged' && flaggedAgents.size === 0) continue;
     const btn = document.createElement('button');
     btn.className = 'agent-selector-btn meta-view-btn' + (viewId === activeAgent ? ' active' : '');
     btn.dataset.agent = viewId;
+    const extra = viewId === '_flagged' ? ` (${flaggedAgents.size})` : '';
     btn.title = meta.title;
-    btn.innerHTML = `<span class="agent-dot meta-dot" style="background:${meta.color}">${meta.icon}</span><span class="agent-selector-label">${meta.label}</span>`;
-    btn.addEventListener('click', () => {
-      if (viewId === activeAgent) return;
-      setActive(viewId);
-      // Clear filters when switching to meta view (they're built-in)
-      showStarredOnly = false; showRunningOnly = false;
-      starToggle.classList.remove('active'); runningToggle.classList.remove('active');
-      loadMetaView(viewId);
-    });
+    btn.innerHTML = `<span class="agent-dot meta-dot" style="background:${meta.color}">${meta.icon}</span><span class="agent-selector-label">${meta.label}${extra}</span>`;
+    btn.addEventListener('click', () => { if (viewId !== activeAgent) setActiveAgentView(viewId); });
     container.appendChild(btn);
+    orderedAgentViews.push(viewId);
   }
 
   // Separator
@@ -6336,23 +6639,55 @@ async function loadMetaView(viewId) {
   sep.className = 'agent-selector-sep';
   container.appendChild(sep);
 
-  // Per-CLI agent buttons
+  // Per-CLI agent buttons (flagged ones get a small flag marker)
   for (const [id, agent] of agentsToShow) {
     const btn = document.createElement('button');
-    btn.className = 'agent-selector-btn' + (id === activeAgent ? ' active' : '');
+    btn.className = 'agent-selector-btn' + (id === activeAgent ? ' active' : '') + (flaggedAgents.has(id) ? ' flagged' : '');
     btn.dataset.agent = id;
-    btn.title = agent.name;
-    btn.innerHTML = `<span class="agent-dot" style="background:${agent.color}"></span><span class="agent-selector-label">${agent.name.split(' ')[0]}</span>`;
-    btn.addEventListener('click', () => {
-      if (id === activeAgent) return;
-      setActive(id);
-      // Clear meta-view state
-      showStarredOnly = false; showRunningOnly = false;
-      starToggle.classList.remove('active'); runningToggle.classList.remove('active');
-      loadProjectsForAgent();
+    btn.title = agent.name + (agent.onPath === false ? ' (history only — not on PATH)' : '');
+    const flagMark = flaggedAgents.has(id) ? '<span class="agent-flag-mark">⚑</span>' : '';
+    btn.innerHTML = `<span class="agent-dot" style="background:${agent.color || AGENT_COLORS[id] || '#888'}"></span><span class="agent-selector-label">${agent.name.split(' ')[0]}</span>${flagMark}`;
+    btn.addEventListener('click', () => { if (id !== activeAgent) setActiveAgentView(id); });
+    // Right-click a CLI button to toggle its flag quickly
+    btn.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (flaggedAgents.has(id)) flaggedAgents.delete(id); else flaggedAgents.add(id);
+      saveFlaggedAgents();
+      rebuildAgentSelector();
+      if (activeAgent === '_flagged') loadMetaView('_flagged');
     });
     container.appendChild(btn);
+    orderedAgentViews.push(id);
   }
+
+  // Rotate arrows at the bottom of the toolbar — cycle to prev/next CLI view.
+  const rotateRow = document.createElement('div');
+  rotateRow.className = 'agent-rotate-row';
+  const prevBtn = document.createElement('button');
+  prevBtn.className = 'agent-rotate-btn';
+  prevBtn.title = 'Previous CLI (rotate toolbar)';
+  prevBtn.innerHTML = '&#9664;';
+  prevBtn.addEventListener('click', () => rotateAgentView(-1));
+  const label = document.createElement('span');
+  label.className = 'agent-rotate-label';
+  const curMeta = META_VIEWS[activeAgent];
+  label.textContent = curMeta ? curMeta.label : (AGENT_LABELS[activeAgent] || activeAgent);
+  const nextBtn = document.createElement('button');
+  nextBtn.className = 'agent-rotate-btn';
+  nextBtn.title = 'Next CLI (rotate toolbar)';
+  nextBtn.innerHTML = '&#9654;';
+  nextBtn.addEventListener('click', () => rotateAgentView(1));
+  rotateRow.appendChild(prevBtn);
+  rotateRow.appendChild(label);
+  rotateRow.appendChild(nextBtn);
+  container.appendChild(rotateRow);
+}
+
+(async function initAgentSelector() {
+  try {
+    installedAgents = await window.api.detectAgents();
+  } catch { installedAgents = {}; }
+  rebuildAgentSelector();
 })();
 
 // Start file watchers for recently active sessions (last 24h) that have JSONL files.

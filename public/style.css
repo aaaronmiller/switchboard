@@ -637,6 +637,84 @@ body { display: flex; flex-direction: column; }
   border-color: rgba(255,255,255,0.10);
 }
 
+/* Per-CLI color accent on the project card's left edge */
+.project-group.has-agent-color {
+  border-left: 3px solid var(--agent-color, transparent);
+}
+
+/* Project card metadata row: path · last-modified · git */
+.project-card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 2px 12px 8px;
+  font-size: 10.5px;
+  color: #777790;
+}
+.pcm-path {
+  font-family: var(--mono, monospace);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;          /* keep the meaningful tail of long paths visible */
+  text-align: left;
+  opacity: 0.8;
+  flex: 1 1 100%;
+}
+.pcm-modified { color: #8a8aa0; white-space: nowrap; }
+.pcm-git { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.pcm-branch, .pcm-branch-select {
+  font: inherit;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #b8b8d0;
+  border-radius: 4px;
+  padding: 1px 6px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.pcm-branch:hover { background: rgba(255,255,255,0.1); }
+.pcm-branch-icon { opacity: 0.7; }
+.pcm-badge {
+  font: inherit;
+  border: none;
+  border-radius: 4px;
+  padding: 1px 5px;
+  line-height: 1.4;
+  cursor: default;
+}
+.pcm-dirty { color: #fbbf24; background: transparent; padding: 0; }
+.pcm-ahead { color: #60a5fa; background: rgba(96,165,250,0.12); }
+.pcm-pull {
+  color: #f59e0b;
+  background: rgba(245,158,11,0.15);
+  cursor: pointer;
+  font-weight: 700;
+}
+.pcm-pull:hover { background: rgba(245,158,11,0.28); }
+.pcm-fetch { color: #777790; background: transparent; cursor: pointer; }
+.pcm-fetch:hover { color: #b8b8d0; }
+.pcm-fetch.spinning { animation: pcm-spin 0.8s linear infinite; display: inline-block; }
+@keyframes pcm-spin { to { transform: rotate(360deg); } }
+
+/* Card-model session pulldown (dormant sessions) */
+.session-pulldown-wrap { padding: 4px 10px 8px; }
+.session-pulldown {
+  width: 100%;
+  font: inherit;
+  font-size: 11px;
+  background: rgba(255,255,255,0.04);
+  color: #aaaac4;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.session-pulldown:hover { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.14); }
+#status-bar-activity.status-error { color: #f87171; }
+
 .project-header {
   padding: 10px 12px;
   font-size: 12px;
@@ -736,7 +814,9 @@ body { display: flex; flex-direction: column; }
   padding: 0 0 4px;
 }
 
-.project-header.collapsed + .project-sessions {
+/* General sibling (~) because the project-card-meta row now sits between the
+   header and the sessions list. Collapsing hides sessions but keeps card meta. */
+.project-header.collapsed ~ .project-sessions {
   display: none;
 }
 
@@ -996,6 +1076,13 @@ body { display: flex; flex-direction: column; }
   border-radius: 8px;
   transition: background 0.12s;
   position: relative;
+}
+
+/* Per-CLI color accent: a thin colored rail on the inside-left of the row, in the
+   agent's color. Distinct from the border-left (activity) and ::before (git) bars,
+   so all three signals can coexist. Most useful in combined/flagged/running views. */
+.session-item.has-agent-color .session-row {
+  box-shadow: inset 3px 0 0 var(--agent-color, transparent);
 }
 
 .session-item:hover .session-row {
@@ -5984,6 +6071,98 @@ button:focus:not(:focus-visible),
   color: #22c55e;
   font-size: 14px;
 }
+/* Context-menu row = clickable label (select view) + flag toggle */
+.agent-context-menu-item .ctx-item-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 0;
+}
+.agent-context-menu-item.active { color: #fff; }
+.ctx-flag-btn {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  color: #666680;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.ctx-flag-btn:hover { background: rgba(255,255,255,0.1); }
+.ctx-flag-btn.flagged { color: #ef4444; }
+.agent-context-menu-header {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #666680;
+  padding: 6px 14px 4px;
+}
+.agent-context-menu-sep {
+  height: 1px;
+  background: rgba(255,255,255,0.08);
+  margin: 4px 0;
+}
+/* Flag marker on per-CLI selector buttons */
+.agent-flag-mark { font-size: 9px; color: #ef4444; margin-left: 2px; }
+.agent-selector-btn.flagged { border-color: rgba(239,68,68,0.4); }
+/* Rotate-toolbar arrows (cycle through CLI views) */
+.agent-rotate-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+.agent-rotate-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 4px;
+  color: #888;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 2px 10px;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.agent-rotate-btn:hover { background: rgba(255,255,255,0.08); color: #ddd; }
+.agent-rotate-label {
+  font-size: 11px;
+  color: #888;
+  min-width: 70px;
+  text-align: center;
+}
+/* CLI Agents settings list */
+.cli-agents-list { display: flex; flex-direction: column; gap: 4px; }
+.cli-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cli-agent-row:hover { background: rgba(255,255,255,0.04); }
+.cli-agent-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.cli-agent-name { color: #d0d0e0; min-width: 90px; }
+.cli-agent-cmd { color: #777; font-size: 11px; }
+.cli-agent-status { margin-left: auto; font-size: 10px; padding: 2px 6px; border-radius: 4px; }
+.cli-agent-status.ok { color: #22c55e; background: rgba(34,197,94,0.12); }
+.cli-agent-status.partial { color: #eab308; background: rgba(234,179,8,0.12); }
+.cli-agent-status.missing { color: #888; background: rgba(255,255,255,0.05); }
 
 /* ========== Multi-Agent Sidebar ========== */
 .multi-agent-sidebar {

@@ -266,6 +266,17 @@
       </div>` : ''}
 
       ${!isProject ? `<div class="settings-section">
+        <div class="settings-section-title">CLI Agents</div>
+        <div class="settings-description" style="margin-bottom:8px;">
+          Switchboard mines each CLI's session history to show past work in the sidebar.
+          Flagged CLIs are combined in the sidebar's <strong>Flagged</strong> view, and the
+          <strong>Active</strong> view shows running sessions from every CLI. Right-click the
+          Claude logo (or a CLI button) to switch or flag CLIs.
+        </div>
+        <div id="sv-cli-agents-list" class="cli-agents-list">Detecting installed CLIs&hellip;</div>
+      </div>` : ''}
+
+      ${!isProject ? `<div class="settings-section">
         <div class="settings-section-title">Appearance</div>
 
         <div class="color-slider-field">
@@ -288,6 +299,48 @@
       </div>
     </div>
   `;
+
+    // Populate the CLI Agents list (global settings only) with live detection.
+    if (!isProject) {
+      const listEl = settingsViewerBody.querySelector('#sv-cli-agents-list');
+      if (listEl) {
+        (async () => {
+          let agents = {};
+          try { agents = await window.api.detectAgents(); } catch {}
+          const flagged = (() => {
+            try { return new Set(JSON.parse(localStorage.getItem('flaggedAgents') || '[]')); } catch { return new Set(); }
+          })();
+          const entries = Object.entries(agents);
+          if (entries.length === 0) { listEl.textContent = 'No CLI agents detected.'; return; }
+          listEl.innerHTML = '';
+          for (const [id, agent] of entries) {
+            const row = document.createElement('label');
+            row.className = 'cli-agent-row';
+            const onPath = agent.onPath !== false && agent.installed;
+            const status = onPath ? 'On PATH'
+              : (agent.installed ? 'History found' : 'Not found');
+            const statusClass = onPath ? 'ok' : (agent.installed ? 'partial' : 'missing');
+            row.innerHTML = `
+              <input type="checkbox" class="cli-agent-flag" data-agent="${id}" ${flagged.has(id) ? 'checked' : ''} title="Flag for combined view">
+              <span class="cli-agent-dot" style="background:${agent.color || '#888'}"></span>
+              <span class="cli-agent-name">${agent.name || id}</span>
+              <code class="cli-agent-cmd">${agent.cmd || id}</code>
+              <span class="cli-agent-status ${statusClass}">${status}</span>
+            `;
+            listEl.appendChild(row);
+          }
+          // Persist flag changes immediately to localStorage and notify the sidebar.
+          listEl.querySelectorAll('.cli-agent-flag').forEach(cb => {
+            cb.addEventListener('change', () => {
+              const set = (() => { try { return new Set(JSON.parse(localStorage.getItem('flaggedAgents') || '[]')); } catch { return new Set(); } })();
+              if (cb.checked) set.add(cb.dataset.agent); else set.delete(cb.dataset.agent);
+              localStorage.setItem('flaggedAgents', JSON.stringify([...set]));
+              if (typeof window._syncFlaggedAgents === 'function') window._syncFlaggedAgents();
+            });
+          });
+        })();
+      }
+    }
 
     // Use-global checkboxes toggle field disabled state
     settingsViewerBody.querySelectorAll('.use-global-cb').forEach(cb => {
