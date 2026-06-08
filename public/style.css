@@ -6169,6 +6169,72 @@ button:focus:not(:focus-visible),
   padding: 0 0 12px;
 }
 
+/* Multi-sidebar controls bar (layout switch + recency gate) */
+.multi-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+}
+.multi-layout-switch { display: inline-flex; gap: 2px; }
+.multi-layout-btn {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #b0b0c8;
+  border-radius: 6px;
+  padding: 3px 9px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+.multi-layout-btn:hover { background: rgba(255,255,255,0.08); }
+.multi-layout-btn.active {
+  background: rgba(217,119,87,0.22);
+  border-color: #d97757;
+  color: #fff;
+}
+.multi-recency {
+  font-size: 11px;
+  color: #888;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.multi-recency input {
+  width: 48px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #ddd;
+  border-radius: 5px;
+  padding: 2px 4px;
+  font-size: 11px;
+}
+
+/* Columns layout — side-by-side panes that tile across the sidebar, so on an
+   ultrawide monitor every CLI's sidebar can stay open at once. */
+.multi-agent-sidebar.columns {
+  display: flex;
+  flex-flow: row wrap;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 0 8px 12px;
+}
+.multi-agent-sidebar.columns .multi-controls {
+  flex: 0 0 100%;
+  width: 100%;
+}
+.multi-agent-sidebar.columns .multi-pinned-section,
+.multi-agent-sidebar.columns .agent-panel {
+  flex: 1 1 260px;
+  min-width: 240px;
+  max-width: 380px;
+  margin: 0;
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+}
+
 /* Agent panel (collapsible section for each CLI agent) */
 .agent-panel {
   margin: 6px 8px;
