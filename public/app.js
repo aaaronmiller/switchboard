@@ -3476,7 +3476,6 @@ initGridObservers();
 // Dialogs (resolveDefaultSessionOptions, forkSession, showNewSessionPopover,
 // showNewSessionDialog, showResumeSessionDialog, showAddProjectDialog, launchTerminalSession) → dialogs.js
 
-  info.appendChild(titleEl);
 async function openPlan(plan) {
   // Mark active in sidebar
   plansContent.querySelectorAll('.plan-item.active').forEach(el => el.classList.remove('active'));

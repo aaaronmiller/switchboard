@@ -1,0 +1,79 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>V4 · Auto-Columns</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_tokens.css">
+<style>
+  .stage{display:flex;flex-direction:column;height:100vh}
+  .topnote{padding:14px 20px;border-bottom:1px solid var(--line);color:var(--fg-1);display:flex;gap:18px;align-items:baseline}
+  .topnote h1{font-size:18px;color:var(--fg-0);margin:0}
+  .topnote .focus{color:var(--accent);font-weight:600;font-size:12px}
+  .topnote .callout{font-size:10px;background:#ffffff10;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--fg-2)}
+  .cols{flex:1;display:flex;gap:1px;background:var(--line);overflow-x:auto}
+  .col{flex:1 1 300px;min-width:280px;max-width:380px;background:var(--bg-1);display:flex;flex-direction:column}
+  .col-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);
+    position:sticky;top:0;background:linear-gradient(180deg,var(--bg-1),#15151eee);backdrop-filter:blur(6px)}
+  .col-head .glyph{width:20px;height:20px;border-radius:6px;display:grid;place-items:center;font-weight:800;font-size:10px;color:#0b0b10}
+  .col-head .nm{font-weight:700;flex:1}
+  .col-head .ct{font-size:var(--t-xs);color:var(--fg-2);font-family:var(--mono)}
+  .col-head .pin{color:var(--fg-2);cursor:pointer}
+  .col-list{flex:1;overflow:auto;padding:6px}
+  .proj-h{font-size:10px;color:var(--fg-2);font-family:var(--mono);padding:6px 6px 3px}
+  .col.meta .col-head{border-bottom-color:#22c55e44}
+  .toolbar{display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid var(--line);font-size:12px;color:var(--fg-1)}
+  .toolbar .layout{display:flex;gap:2px;margin-left:auto;background:var(--bg-2);border:1px solid var(--line);border-radius:var(--r-sm);padding:2px}
+  .toolbar .layout span{padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;color:var(--fg-2)}
+  .toolbar .layout span.on{background:var(--accent-soft);color:var(--accent)}
+</style></head>
+<body>
+<div class="stage">
+  <div class="topnote">
+    <h1>V4 — Auto-Columns</h1>
+    <span class="focus">Ultrawide-first: panes tile automatically; the “multiple sidebars at once” answer.</span>
+    <span class="callout">tests U6: auto vs manual columns</span>
+    <span class="callout">tests U1: Pinned demoted to Tier-2</span>
+  </div>
+  <div class="toolbar">
+    <span>Viewport ≥ 1900px → <b style="color:var(--ok)">columns auto-on</b></span>
+    <span style="color:var(--fg-2)">· focused pane = Claude · meta menu ▾ holds Pinned</span>
+    <div class="layout"><span>1</span><span>2</span><span class="on">Auto</span><span>All</span></div>
+  </div>
+  <div class="cols">
+    <!-- meta pane first: Active (cross-agent) -->
+    <div class="col meta">
+      <div class="col-head"><span style="color:var(--ok)">●</span><span class="nm">Active</span><span class="ct">3 running</span></div>
+      <div class="col-list">
+        <div class="sess" style="border-left-color:var(--ok)"><div class="row1"><span class="mono" style="width:16px;height:16px;flex:0 0 16px;font-size:9px;background:var(--a-claude)">C</span><span class="title">multi-sidebar redesign</span></div><div class="meta"><span>2m</span><span>switchboard</span></div></div>
+        <div class="sess" style="border-left-color:var(--ok)"><div class="row1"><span class="mono" style="width:16px;height:16px;flex:0 0 16px;font-size:9px;background:var(--a-codex)">Cx</span><span class="title">refactor IPC layer</span></div><div class="meta"><span>now</span><span>proxy</span></div></div>
+        <div class="sess" style="border-left-color:var(--ok)"><div class="row1"><span class="mono" style="width:16px;height:16px;flex:0 0 16px;font-size:9px;background:var(--a-antigravity)">Ag</span><span class="title">build pipeline debug</span></div><div class="meta"><span>1m</span><span>ante-preview</span></div></div>
+      </div>
+    </div>
+    <!-- agent panes, each with its own identity header -->
+    <div class="col">
+      <div class="col-head"><span class="glyph" style="background:var(--a-claude)">C</span><span class="nm">Claude</span><span class="ct">7</span><span class="pin" title="Pop out / pin pane">⊞</span></div>
+      <div class="col-list">
+        <div class="proj-h">~/code/switchboard</div>
+        <div class="sess" style="border-left-color:var(--ok)"><div class="row1"><span class="dot run"></span><span class="title">multi-sidebar redesign</span></div><div class="meta"><span>2m</span><span>41 msgs</span></div></div>
+        <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">fix session adapters</span></div><div class="meta"><span>3h</span><span>18 msgs</span></div></div>
+        <div class="proj-h">~/code/wiki-memory</div>
+        <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">recall ranking tweaks</span></div><div class="meta"><span>2d</span><span>33 msgs</span></div></div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="col-head"><span class="glyph" style="background:var(--a-codex)">Cx</span><span class="nm">Codex</span><span class="ct">11</span><span class="pin">⊞</span></div>
+      <div class="col-list">
+        <div class="proj-h">~/code/claude-code-proxy</div>
+        <div class="sess" style="border-left-color:var(--ok)"><div class="row1"><span class="dot run"></span><span class="title">refactor IPC layer</span></div><div class="meta"><span>now</span><span>22 msgs</span></div></div>
+        <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">add retry/backoff</span></div><div class="meta"><span>6h</span><span>14 msgs</span></div></div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="col-head"><span class="glyph" style="background:var(--a-qwen)">Q</span><span class="nm">Qwen</span><span class="ct">62</span><span class="pin">⊞</span></div>
+      <div class="col-list">
+        <div class="proj-h">~/code/agents</div>
+        <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">batch skill audit</span></div><div class="meta"><span>4h</span><span>71 msgs</span></div></div>
+        <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">sync targets refactor</span></div><div class="meta"><span>1d</span><span>40 msgs</span></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>

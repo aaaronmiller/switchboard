@@ -1,0 +1,112 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>V1 · Labeled Clarity</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_tokens.css">
+<style>
+  .stage{display:flex;gap:0;height:100vh}
+  .sidebar{width:312px;flex:0 0 312px;background:var(--bg-1);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;overflow:hidden}
+  .note{flex:1;padding:32px;color:var(--fg-1);max-width:560px}
+  .note h1{font-size:22px;color:var(--fg-0);margin:0 0 4px}
+  .note .focus{color:var(--accent);font-weight:600;font-size:13px;margin-bottom:18px}
+  .note li{margin:6px 0;line-height:1.5}
+  .callout{display:inline-block;font-size:10px;background:#ffffff10;border:1px solid var(--line);
+    border-radius:5px;padding:1px 6px;color:var(--fg-2);margin-left:6px}
+
+  /* ----- V1 chrome: everything labeled, discoverability-first ----- */
+  .sb-head{padding:12px 12px 8px;border-bottom:1px solid var(--line)}
+  .agent-primary{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:var(--r-md);
+    background:var(--bg-2);border:1px solid var(--line-strong);cursor:pointer}
+  .agent-primary .name{flex:1;font-weight:700;font-size:var(--t-lg)}
+  .agent-primary .caret{color:var(--fg-2)}
+  .meta-row{display:flex;gap:6px;margin-top:8px}
+  .meta-btn{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:6px;
+    border-radius:var(--r-sm);background:var(--bg-2);border:1px solid var(--line);
+    font-size:var(--t-sm);color:var(--fg-1);cursor:pointer}
+  .meta-btn .b{font-size:var(--t-xs);background:#ffffff14;border-radius:var(--r-pill);padding:0 6px;color:var(--fg-0)}
+  .meta-btn.active{border-color:var(--ok);color:#cdebd6}
+  .search{display:flex;align-items:center;gap:8px;margin-top:8px;padding:7px 10px;border-radius:var(--r-sm);
+    background:var(--bg-0);border:1px solid var(--line)}
+  .search input{all:unset;flex:1;color:var(--fg-1);font-size:var(--t-sm)}
+  .newbtn{display:flex;align-items:center;justify-content:center;gap:7px;margin-top:8px;padding:8px;
+    border-radius:var(--r-sm);background:var(--accent-soft);border:1px solid #d9775744;color:var(--accent);
+    font-weight:700;font-size:var(--t-sm);cursor:pointer}
+
+  /* dropdown shown OPEN to illustrate tier-2 */
+  .dropdown{margin:8px 12px 0;background:var(--bg-2);border:1px solid var(--line-strong);
+    border-radius:var(--r-md);overflow:hidden}
+  .dd-row{display:flex;align-items:center;gap:9px;padding:7px 11px;cursor:pointer;font-size:var(--t-md)}
+  .dd-row:hover{background:var(--bg-3)}
+  .dd-row .nm{flex:1}
+  .dd-row .ct{font-size:var(--t-xs);color:var(--fg-2);font-family:var(--mono)}
+  .dd-sep{height:1px;background:var(--line);margin:4px 0}
+  .dd-more{padding:6px 11px;font-size:var(--t-xs);color:var(--fg-2)}
+
+  .filter-state{display:flex;gap:6px;padding:8px 12px;border-bottom:1px solid var(--line);align-items:center}
+  .list{flex:1;overflow:auto;padding:6px 8px}
+  .proj-h{font-size:var(--t-xs);color:var(--fg-2);font-family:var(--mono);padding:8px 8px 4px;letter-spacing:.02em}
+</style></head>
+<body>
+<div class="stage">
+  <aside class="sidebar">
+    <div class="sb-head">
+      <div class="tier-label" style="margin-bottom:6px">▎Tier 1 · always visible</div>
+      <!-- ONE primary agent control (Axis A) -->
+      <div class="agent-primary">
+        <span class="mono" style="background:var(--a-claude)">C</span>
+        <span class="name">Claude</span>
+        <span class="caret">▾</span>
+      </div>
+      <!-- meta-views = separate axis (Axis B), labeled, shown only when non-empty -->
+      <div class="meta-row">
+        <div class="meta-btn active"><span class="dot run"></span>Active<span class="b">3</span></div>
+        <div class="meta-btn"><span style="color:var(--flag)">⚑</span>Flagged<span class="b">2</span></div>
+      </div>
+      <div class="search">🔍<input placeholder="Search sessions…"></div>
+      <div class="newbtn">＋ New session</div>
+    </div>
+
+    <!-- Tier 2 dropdown (shown open) : agents that are installed OR have sessions -->
+    <div class="dropdown">
+      <div class="dd-row"><span class="mono" style="background:var(--a-claude)">C</span><span class="nm">Claude</span><span class="ct">7 proj</span></div>
+      <div class="dd-row"><span class="mono" style="background:var(--a-codex)">Cx</span><span class="nm">Codex</span><span class="ct">11</span></div>
+      <div class="dd-row"><span class="mono" style="background:var(--a-qwen)">Q</span><span class="nm">Qwen</span><span class="ct">62</span></div>
+      <div class="dd-row"><span class="mono" style="background:var(--a-antigravity)">Ag</span><span class="nm">Antigravity</span><span class="ct">28</span></div>
+      <div class="dd-row"><span class="mono" style="background:var(--a-hermes)">H</span><span class="nm">Hermes</span><span class="ct">14</span></div>
+      <div class="dd-sep"></div>
+      <div class="dd-more">+ 3 hidden (uninstalled / stale) — show in settings</div>
+    </div>
+
+    <div class="filter-state">
+      <span class="tier-label">filter state</span>
+      <span class="chip">⏱ 7d <span class="x">✕</span></span>
+      <span class="chip">↓ Newest <span class="x">✕</span></span>
+    </div>
+
+    <div class="list">
+      <div class="proj-h">~/code/switchboard</div>
+      <div class="sess" style="border-left-color:var(--ok)"><div class="row1"><span class="dot run"></span><span class="title">multi-sidebar redesign</span></div><div class="meta"><span>2m ago</span><span>· 41 msgs</span><span>· ↑2</span></div></div>
+      <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">fix session adapters</span></div><div class="meta"><span>3h ago</span><span>· 18 msgs</span></div></div>
+      <div class="proj-h">~/code/ante-preview</div>
+      <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">initial scaffold + README</span></div><div class="meta"><span>1d ago</span><span>· 7 msgs</span></div></div>
+      <div class="proj-h">~/code/wiki-memory</div>
+      <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">recall ranking tweaks</span></div><div class="meta"><span>2d ago</span><span>· 33 msgs</span></div></div>
+    </div>
+  </aside>
+
+  <div class="note">
+    <h1>V1 — Labeled Clarity</h1>
+    <div class="focus">Concept focus: discoverability-first. Nothing important is icon-only; a first-time user can read every primary affordance.</div>
+    <ul>
+      <li><b>Axis separation:</b> one agent control (Axis A) + a distinct meta-view row (Axis B). They are never mixed — fixing the root cause of the old wrapping dot-row.</li>
+      <li><b>Labeled meta-views</b> with counts <span class="callout">tests U5: labeled vs icon-only</span></li>
+      <li><b>Visible “＋ New session”</b> as a Tier-1 action <span class="callout">tests U3: visible + vs menu-housed</span></li>
+      <li><b>Filter controls hidden, filter STATE shown</b> as removable chips — NN/g rule: defer the control, never the feedback.</li>
+      <li><b>“+N hidden”</b> line keeps vanished agents explained (Discoverability Critic's non-negotiable).</li>
+      <li>Comfortable density; brand monograms on a fixed 22px grid → perfect alignment.</li>
+    </ul>
+    <p style="color:var(--fg-2);font-size:12px">Best for: new/occasional users, smaller screens. Trade-off: widest vertical footprint of the six.</p>
+  </div>
+</div>
+</body></html>

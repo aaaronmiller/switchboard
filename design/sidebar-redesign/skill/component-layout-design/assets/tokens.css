@@ -1,0 +1,89 @@
+/* Switchboard sidebar redesign — shared design tokens
+   One source of truth for color, type, spacing so all 6 concepts stay consistent
+   where they should and differ only where the concept intends. */
+
+:root {
+  /* Surfaces (dark, matches Switchboard) */
+  --bg-0:#0e0e14;          /* app background */
+  --bg-1:#15151e;          /* sidebar surface */
+  --bg-2:#1c1c28;          /* raised card */
+  --bg-3:#24243340;        /* hover */
+  --line:#ffffff14;        /* hairline border */
+  --line-strong:#ffffff24;
+
+  /* Text */
+  --fg-0:#eef0f8;          /* primary text */
+  --fg-1:#aab; --fg-1:#a6a6bd;  /* secondary */
+  --fg-2:#6e6e85;          /* tertiary / meta */
+
+  /* Brand accent (Claude clay) */
+  --accent:#d97757;
+  --accent-soft:#d9775722;
+
+  /* Per-agent brand colors (real values from app.js AGENT_COLORS) */
+  --a-claude:#d97757; --a-codex:#4ade80; --a-qwen:#60a5fa;
+  --a-antigravity:#2dd4bf; --a-hermes:#fbbf24; --a-opencode:#f472b6;
+  --a-kilo:#facc15; --a-pi:#c084fc; --a-aider:#a78bfa; --a-cursor:#8b5cf6;
+
+  /* Status */
+  --ok:#22c55e; --warn:#eab308; --busy:#38bdf8; --err:#ef4444; --flag:#ef4444;
+
+  /* Type scale (1.2 minor third) */
+  --t-xs:10.5px; --t-sm:11.5px; --t-md:13px; --t-lg:15px; --t-xl:18px;
+  --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  --mono:'JetBrains Mono','SF Mono',ui-monospace,'Cascadia Code',monospace;
+
+  /* Spacing scale (4px base) */
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:20px; --s6:24px;
+
+  /* Radii / motion */
+  --r-sm:6px; --r-md:9px; --r-lg:13px; --r-pill:999px;
+  --ease:cubic-bezier(.4,0,.2,1);
+}
+
+* { box-sizing:border-box; }
+body {
+  margin:0; background:var(--bg-0); color:var(--fg-0);
+  font-family:var(--font); font-size:var(--t-md);
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ---- shared atoms reused across concepts ---- */
+
+/* Brand monogram — fixed-size, baseline-aligned (fixes the misalignment) */
+.mono {
+  width:22px; height:22px; flex:0 0 22px;
+  border-radius:7px; display:grid; place-items:center;
+  font-weight:800; font-size:11px; letter-spacing:-.02em;
+  color:#0b0b10; user-select:none;
+}
+
+/* Session card */
+.sess {
+  display:flex; flex-direction:column; gap:3px;
+  padding:8px 10px; border-radius:var(--r-md);
+  border-left:2px solid transparent; cursor:pointer;
+}
+.sess:hover { background:var(--bg-3); }
+.sess .row1 { display:flex; align-items:center; gap:7px; }
+.sess .title { font-size:var(--t-md); color:var(--fg-0); font-weight:560;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sess .proj { font-size:var(--t-xs); color:var(--fg-2); font-family:var(--mono); }
+.sess .meta { font-size:var(--t-xs); color:var(--fg-2); display:flex; gap:8px; }
+.dot { width:7px; height:7px; border-radius:50%; flex:0 0 7px; }
+.dot.run { background:var(--ok); box-shadow:0 0 0 3px #22c55e22; }
+.dot.idle{ background:#555; }
+
+/* Filter chip (always-visible STATE even when control is hidden) */
+.chip {
+  display:inline-flex; align-items:center; gap:5px;
+  padding:2px 7px 2px 8px; border-radius:var(--r-pill);
+  background:var(--accent-soft); color:var(--accent);
+  font-size:var(--t-xs); font-weight:600; border:1px solid #d9775733;
+}
+.chip .x { opacity:.7; cursor:pointer; }
+
+.tier-label {
+  font-size:9px; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--fg-2); font-weight:700;
+}

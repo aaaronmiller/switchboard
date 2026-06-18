@@ -1,0 +1,89 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>V5 · Brand Tiles</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_tokens.css">
+<style>
+  .stage{display:flex;height:100vh}
+  .sidebar{width:312px;flex:0 0 312px;background:var(--bg-1);border-right:1px solid var(--line);display:flex;flex-direction:column}
+  .note{flex:1;padding:32px;color:var(--fg-1);max-width:540px}
+  .note h1{font-size:22px;color:var(--fg-0);margin:0 0 4px}
+  .note .focus{color:var(--accent);font-weight:600;font-size:13px;margin-bottom:18px}
+  .note li{margin:6px 0;line-height:1.5}
+  .callout{display:inline-block;font-size:10px;background:#ffffff10;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--fg-2);margin-left:6px}
+
+  .head{padding:12px;border-bottom:1px solid var(--line)}
+  /* current agent as a prominent brand tile */
+  .brand-tile{display:flex;align-items:center;gap:11px;padding:11px;border-radius:var(--r-lg);
+    background:radial-gradient(120% 140% at 0% 0%, #d9775722, transparent 60%), var(--bg-2);
+    border:1px solid #d9775740}
+  .brand-tile .logo{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;
+    font-weight:800;font-size:15px;color:#0b0b10;box-shadow:0 4px 12px #0006}
+  .brand-tile .nm{font-weight:800;font-size:var(--t-xl);line-height:1}
+  .brand-tile .sub{font-size:var(--t-xs);color:var(--fg-2);margin-top:3px}
+  .brand-tile .caret{margin-left:auto;color:var(--fg-2)}
+
+  /* horizontal agent tile strip (scrollable) */
+  .strip{display:flex;gap:7px;margin-top:10px;overflow-x:auto;padding-bottom:4px}
+  .tile{flex:0 0 auto;width:46px;text-align:center;cursor:pointer}
+  .tile .logo{width:40px;height:40px;border-radius:11px;display:grid;place-items:center;font-weight:800;font-size:13px;color:#0b0b10;margin:0 auto;position:relative}
+  .tile.active .logo{outline:2px solid var(--fg-0);outline-offset:2px}
+  .tile .lab{font-size:9.5px;color:var(--fg-2);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tile .b{position:absolute;top:-3px;right:-3px;min-width:14px;height:14px;border-radius:7px;background:var(--err);color:#fff;font-size:8px;display:grid;place-items:center;font-weight:700}
+
+  .meta-strip{display:flex;gap:7px;margin-top:6px}
+  .meta-pill{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:6px;border-radius:var(--r-pill);
+    background:var(--bg-2);border:1px solid var(--line);font-size:var(--t-sm);color:var(--fg-1);cursor:pointer}
+  .ctrlrow{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line)}
+  .colbtn{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--fg-1);
+    background:var(--bg-2);border:1px solid var(--line);border-radius:var(--r-sm);padding:4px 9px;cursor:pointer}
+  .list{flex:1;overflow:auto;padding:6px 8px}
+  .proj-h{font-size:var(--t-xs);color:var(--fg-2);font-family:var(--mono);padding:8px 8px 4px}
+</style></head>
+<body>
+<div class="stage">
+  <aside class="sidebar">
+    <div class="head">
+      <div class="brand-tile">
+        <span class="logo" style="background:var(--a-claude)">✷</span>
+        <div><div class="nm">Claude</div><div class="sub">7 projects · 3 active</div></div>
+        <span class="caret">▾</span>
+      </div>
+      <!-- horizontal brand-tile strip = the agent picker, always visible but compact -->
+      <div class="strip">
+        <div class="tile active"><div class="logo" style="background:var(--a-claude)">✷</div><div class="lab">Claude</div></div>
+        <div class="tile"><div class="logo" style="background:var(--a-codex)">⌬</div><div class="lab">Codex</div></div>
+        <div class="tile"><div class="logo" style="background:var(--a-qwen)">◑</div><div class="lab">Qwen</div></div>
+        <div class="tile"><div class="logo" style="background:var(--a-antigravity)">◬<span class="b">3</span></div><div class="lab">Antigrav</div></div>
+        <div class="tile"><div class="logo" style="background:var(--a-hermes)">⬡</div><div class="lab">Hermes</div></div>
+        <div class="tile"><div class="logo" style="background:var(--a-opencode)">◇</div><div class="lab">OpenCode</div></div>
+      </div>
+      <div class="meta-strip">
+        <div class="meta-pill"><span class="dot run"></span>Active · 3</div>
+        <div class="meta-pill"><span style="color:var(--flag)">⚑</span>Flagged · 2</div>
+      </div>
+    </div>
+    <div class="ctrlrow">
+      <span class="chip">⏱ 7d <span class="x">✕</span></span>
+      <div class="colbtn" title="Open columns (manual)">⊞⊞ Columns</div>
+    </div>
+    <div class="list">
+      <div class="proj-h">~/code/switchboard</div>
+      <div class="sess" style="border-left-color:var(--ok)"><div class="row1"><span class="dot run"></span><span class="title">multi-sidebar redesign</span></div><div class="meta"><span>2m</span><span>41 msgs</span></div></div>
+      <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">fix session adapters</span></div><div class="meta"><span>3h</span><span>18 msgs</span></div></div>
+      <div class="proj-h">~/code/ante-preview</div>
+      <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">initial scaffold + README</span></div><div class="meta"><span>1d</span><span>7 msgs</span></div></div>
+    </div>
+  </aside>
+  <div class="note">
+    <h1>V5 — Brand Tiles</h1>
+    <div class="focus">Concept focus: identity-forward. Each agent reads as a branded “app tile,” so recognition is instant and the active agent feels like a place you’re standing in.</div>
+    <ul>
+      <li><b>Logo-tile marks</b> (larger rounded brand tiles) — the alternative to V3’s tiny glyphs <span class="callout">tests U2: which mark style reads best</span></li>
+      <li><b>Manual “⊞⊞ Columns” button</b> — user opts into multi-pane deliberately <span class="callout">tests U6: manual vs auto</span></li>
+      <li>Horizontal tile strip keeps every agent visible AND labeled without vertical stacking.</li>
+      <li>Current agent echoed as a hero brand tile (one loud element, strong sense of place).</li>
+    </ul>
+    <p style="color:var(--fg-2);font-size:12px">Best for: users who think in “apps/tools” and want strong visual identity. Trade-off: tiles cost more height than V3’s rail; strip scrolls past ~7 agents.</p>
+  </div>
+</div>
+</body></html>

@@ -1,0 +1,88 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>V6 · Compact Density</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_tokens.css">
+<style>
+  .stage{display:flex;height:100vh}
+  .sidebar{width:276px;flex:0 0 276px;background:var(--bg-1);border-right:1px solid var(--line);display:flex;flex-direction:column;font-size:12px}
+  .note{flex:1;padding:32px;color:var(--fg-1);max-width:540px}
+  .note h1{font-size:22px;color:var(--fg-0);margin:0 0 4px}
+  .note .focus{color:var(--accent);font-weight:600;font-size:13px;margin-bottom:18px}
+  .note li{margin:6px 0;line-height:1.5}
+  .callout{display:inline-block;font-size:10px;background:#ffffff10;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--fg-2);margin-left:6px}
+
+  .bar{display:flex;align-items:center;gap:6px;padding:6px 8px;border-bottom:1px solid var(--line)}
+  .agent-mini{display:flex;align-items:center;gap:6px;padding:3px 7px;border-radius:6px;background:var(--bg-2);border:1px solid var(--line-strong);cursor:pointer}
+  .agent-mini .mono{width:16px;height:16px;flex:0 0 16px;border-radius:5px;font-size:9px}
+  .agent-mini .nm{font-weight:700;font-size:12px}
+  .agent-mini .caret{color:var(--fg-2);font-size:10px}
+  .mini-ic{width:22px;height:22px;display:grid;place-items:center;border-radius:5px;color:var(--fg-2);cursor:pointer;font-size:12px}
+  .mini-ic:hover{background:var(--bg-3);color:var(--fg-0)}
+  .mini-ic.on{color:var(--ok)}
+  .countpill{font-size:9px;background:#ffffff14;border-radius:8px;padding:0 5px;color:var(--fg-1)}
+
+  /* dropdown (open) shows agents + the housed "New session" action (U3) */
+  .dd{position:absolute;left:8px;top:70px;width:200px;background:var(--bg-2);border:1px solid var(--line-strong);border-radius:9px;box-shadow:0 12px 30px #000a;overflow:hidden;z-index:5}
+  .dd .r{display:flex;align-items:center;gap:8px;padding:5px 9px;cursor:pointer;font-size:12px}
+  .dd .r:hover{background:var(--bg-3)}
+  .dd .r .ct{margin-left:auto;font-size:10px;color:var(--fg-2);font-family:var(--mono)}
+  .dd .sep{height:1px;background:var(--line);margin:3px 0}
+  .dd .act{color:var(--accent);font-weight:700}
+
+  .list{flex:1;overflow:auto;padding:2px 4px}
+  .ph{font-size:9.5px;color:var(--fg-2);font-family:var(--mono);padding:5px 6px 2px;display:flex;justify-content:space-between}
+  .row{display:flex;align-items:center;gap:6px;padding:3px 7px;border-radius:5px;cursor:pointer;border-left:2px solid transparent}
+  .row:hover{background:var(--bg-3)}
+  .row .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}
+  .row .tm{font-size:9.5px;color:var(--fg-2);font-family:var(--mono)}
+  .row.run{border-left-color:var(--ok)}
+</style></head>
+<body>
+<div class="stage">
+  <aside class="sidebar">
+    <div class="bar">
+      <div class="agent-mini"><span class="mono" style="background:var(--a-claude)">C</span><span class="nm">Claude</span><span class="caret">▾</span></div>
+      <div class="mini-ic on" title="Active (3)">●<span class="countpill">3</span></div>
+      <div class="mini-ic" title="Flagged (2)" style="color:var(--flag)">⚑</div>
+      <div style="flex:1"></div>
+      <div class="mini-ic" title="Search">🔍</div>
+      <div class="mini-ic" title="Sort / filter">⛃</div>
+    </div>
+    <!-- dropdown open: agent list + housed New-session action (no permanent + button) -->
+    <div class="dd">
+      <div class="r"><span class="mono" style="width:16px;height:16px;flex:0 0 16px;font-size:9px;background:var(--a-claude)">C</span>Claude<span class="ct">7</span></div>
+      <div class="r"><span class="mono" style="width:16px;height:16px;flex:0 0 16px;font-size:9px;background:var(--a-codex)">Cx</span>Codex<span class="ct">11</span></div>
+      <div class="r"><span class="mono" style="width:16px;height:16px;flex:0 0 16px;font-size:9px;background:var(--a-qwen)">Q</span>Qwen<span class="ct">62</span></div>
+      <div class="r"><span class="mono" style="width:16px;height:16px;flex:0 0 16px;font-size:9px;background:var(--a-antigravity)">Ag</span>Antigravity<span class="ct">28</span></div>
+      <div class="sep"></div>
+      <div class="r act">＋ New session…</div>
+      <div class="r" style="color:var(--fg-2)">⋯ Show 3 hidden</div>
+    </div>
+    <div style="padding:5px 8px;border-bottom:1px solid var(--line)"><span class="chip" style="font-size:9.5px;padding:1px 6px">⏱ 7d <span class="x">✕</span></span></div>
+    <div class="list">
+      <div class="ph"><span>~/code/switchboard</span><span>4</span></div>
+      <div class="row run"><span class="dot run"></span><span class="t">multi-sidebar redesign</span><span class="tm">2m</span></div>
+      <div class="row run"><span class="dot run"></span><span class="t">codereview: db schema</span><span class="tm">now</span></div>
+      <div class="row"><span class="dot idle"></span><span class="t">fix session adapters</span><span class="tm">3h</span></div>
+      <div class="row"><span class="dot idle"></span><span class="t">phase 4 reliability</span><span class="tm">5h</span></div>
+      <div class="ph"><span>~/code/claude-code-proxy</span><span>2</span></div>
+      <div class="row"><span class="dot idle"></span><span class="t">streaming token counts</span><span class="tm">5h</span></div>
+      <div class="row"><span class="dot idle"></span><span class="t">add retry/backoff</span><span class="tm">6h</span></div>
+      <div class="ph"><span>~/code/wiki-memory</span><span>3</span></div>
+      <div class="row"><span class="dot idle"></span><span class="t">recall ranking tweaks</span><span class="tm">2d</span></div>
+      <div class="row"><span class="dot idle"></span><span class="t">embeddings backfill</span><span class="tm">3d</span></div>
+    </div>
+  </aside>
+  <div class="note">
+    <h1>V6 — Compact Density</h1>
+    <div class="focus">Concept focus: maximum sessions per screen. A single tight toolbar; everything secondary collapses to icons; the body is a dense, scannable list.</div>
+    <ul>
+      <li><b>Compact density</b> — ~2× the sessions visible vs V1 <span class="callout">tests U4: compact vs comfortable</span></li>
+      <li><b>New-session housed in the agent dropdown</b>, no permanent “+” <span class="callout">tests U3: menu-housed vs visible +</span></li>
+      <li>Single-line toolbar: agent picker + Active/Flagged icons + search/sort — the whole spine in one 32px row.</li>
+      <li>Meta-views and filters are icon-only with count pills; state still shows as a chip.</li>
+    </ul>
+    <p style="color:var(--fg-2);font-size:12px">Best for: large session libraries, experienced users, laptops where vertical space is scarce. Trade-off: lowest discoverability — leans on tooltips + the dropdown.</p>
+  </div>
+</div>
+</body></html>
