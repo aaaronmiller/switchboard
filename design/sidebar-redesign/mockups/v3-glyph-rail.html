@@ -1,0 +1,86 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>V3 · Glyph Rail</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_tokens.css">
+<style>
+  .stage{display:flex;height:100vh}
+  .rail{width:48px;flex:0 0 48px;background:var(--bg-0);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px}
+  .rail .r-ic{position:relative;width:34px;height:34px;border-radius:9px;display:grid;place-items:center;
+    cursor:pointer;color:var(--fg-1)}
+  .rail .r-ic:hover{background:var(--bg-3)}
+  .rail .r-ic.active{background:var(--bg-2)}
+  .rail .r-ic.active::before{content:"";position:absolute;left:-8px;top:7px;bottom:7px;width:3px;border-radius:3px;background:var(--accent)}
+  .rail .glyph{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;font-weight:800;font-size:11px;color:#0b0b10}
+  .rail .badge{position:absolute;top:2px;right:2px;min-width:14px;height:14px;border-radius:7px;background:var(--err);
+    color:#fff;font-size:8.5px;display:grid;place-items:center;font-weight:700;padding:0 3px}
+  .rail .sep{width:24px;height:1px;background:var(--line);margin:4px 0}
+  .rail .meta-ic{color:var(--fg-1);font-size:15px}
+
+  .panel{width:268px;flex:0 0 268px;background:var(--bg-1);border-right:1px solid var(--line);display:flex;flex-direction:column}
+  .p-head{display:flex;align-items:center;gap:8px;padding:12px;border-bottom:1px solid var(--line)}
+  .p-head .glyph{width:22px;height:22px;border-radius:7px;display:grid;place-items:center;font-weight:800;font-size:11px;color:#0b0b10}
+  .p-head .ttl{font-weight:700;font-size:var(--t-lg);flex:1}
+  .p-head .ic{width:24px;height:24px;display:grid;place-items:center;border-radius:6px;color:var(--fg-2);cursor:pointer}
+  .p-head .ic:hover{background:var(--bg-3);color:var(--fg-0)}
+  .list{flex:1;overflow:auto;padding:6px 8px}
+  .proj-h{font-size:var(--t-xs);color:var(--fg-2);font-family:var(--mono);padding:8px 8px 4px}
+
+  .note{flex:1;padding:32px;color:var(--fg-1);max-width:540px}
+  .note h1{font-size:22px;color:var(--fg-0);margin:0 0 4px}
+  .note .focus{color:var(--accent);font-weight:600;font-size:13px;margin-bottom:18px}
+  .note li{margin:6px 0;line-height:1.5}
+  .callout{display:inline-block;font-size:10px;background:#ffffff10;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--fg-2);margin-left:6px}
+  .tip{position:absolute;left:52px;background:var(--bg-2);border:1px solid var(--line-strong);padding:3px 8px;border-radius:6px;font-size:11px;white-space:nowrap;box-shadow:0 6px 18px #0008}
+</style></head>
+<body>
+<div class="stage">
+  <!-- icon-only agent rail (Axis A) + meta-views (Axis B) below the divider -->
+  <nav class="rail">
+    <div class="r-ic active"><span class="glyph" style="background:var(--a-claude)">✷</span></div>
+    <div class="r-ic"><span class="glyph" style="background:var(--a-codex)">⌬</span></div>
+    <div class="r-ic"><span class="glyph" style="background:var(--a-qwen)">◑</span></div>
+    <div class="r-ic"><span class="glyph" style="background:var(--a-antigravity)">◬</span><span class="badge">3</span></div>
+    <div class="r-ic"><span class="glyph" style="background:var(--a-hermes)">⬡</span></div>
+    <div class="r-ic"><span class="glyph" style="background:var(--a-opencode)">◇</span></div>
+    <div class="sep"></div>
+    <div class="r-ic" title="Active"><span class="meta-ic" style="color:var(--ok)">●</span><span class="badge" style="background:var(--ok);color:#04210f">3</span></div>
+    <div class="r-ic" title="Flagged"><span class="meta-ic" style="color:var(--flag)">⚑</span><span class="badge">2</span></div>
+    <div style="flex:1"></div>
+    <div class="r-ic" title="More agents (+3 hidden)"><span class="meta-ic">⋯</span></div>
+  </nav>
+
+  <section class="panel">
+    <div class="p-head">
+      <span class="glyph" style="background:var(--a-claude)">✷</span>
+      <span class="ttl">Claude</span>
+      <span class="ic" title="Search">🔍</span>
+      <span class="ic" title="Sort / filter">⛃</span>
+      <span class="ic" title="New session">＋</span>
+    </div>
+    <div style="padding:8px 12px;border-bottom:1px solid var(--line)"><span class="chip">⏱ 7d <span class="x">✕</span></span></div>
+    <div class="list">
+      <div class="proj-h">~/code/switchboard</div>
+      <div class="sess" style="border-left-color:var(--ok)"><div class="row1"><span class="dot run"></span><span class="title">multi-sidebar redesign</span></div><div class="meta"><span>2m</span><span>41 msgs</span></div></div>
+      <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">fix session adapters</span></div><div class="meta"><span>3h</span><span>18 msgs</span></div></div>
+      <div class="proj-h">~/code/agents</div>
+      <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">skill: component-layout-design</span></div><div class="meta"><span>1d</span><span>26 msgs</span></div></div>
+      <div class="proj-h">~/code/wiki-memory</div>
+      <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">recall ranking tweaks</span></div><div class="meta"><span>2d</span><span>33 msgs</span></div></div>
+    </div>
+  </section>
+
+  <div class="note">
+    <h1>V3 — Glyph Rail</h1>
+    <div class="focus">Concept focus: maximum agent visibility at minimum width. Borrows VS Code's activity-bar: a persistent icon rail where every agent is one click, always on screen — no dropdown needed.</div>
+    <ul>
+      <li><b>Icon-only agent rail</b>, each a distinct <b>glyph</b> mark (not letters) to dodge letter-collisions <span class="callout">tests U2: glyph vs monogram vs logo-tile</span></li>
+      <li><b>Meta-views as icons</b> below a divider — recognition over recall <span class="callout">tests U5: icon-only vs labeled</span></li>
+      <li>Active agent gets the accent indicator bar (one loud element).</li>
+      <li>Hover tooltips + badges carry names/counts so icon-only stays learnable (mitigates the a11y risk of pure icons).</li>
+      <li>Per-pane identity built-in: the panel header repeats the agent's glyph + name.</li>
+    </ul>
+    <p style="color:var(--fg-2);font-size:12px">Best for: users who hop across many agents. Trade-off: glyph legibility must be validated (U2) — the reason V5 trials an alternative mark style.</p>
+  </div>
+</div>
+</body></html>

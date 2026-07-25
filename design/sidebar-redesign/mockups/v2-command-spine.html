@@ -1,0 +1,84 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>V2 · Command Spine</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_tokens.css">
+<style>
+  .stage{display:flex;height:100vh}
+  .sidebar{width:300px;flex:0 0 300px;background:var(--bg-1);border-right:1px solid var(--line);display:flex;flex-direction:column}
+  .note{flex:1;padding:32px;color:var(--fg-1);max-width:560px}
+  .note h1{font-size:22px;color:var(--fg-0);margin:0 0 4px}
+  .note .focus{color:var(--accent);font-weight:600;font-size:13px;margin-bottom:18px}
+  .note li{margin:6px 0;line-height:1.5}
+  kbd{font-family:var(--mono);font-size:10px;background:#ffffff14;border:1px solid var(--line-strong);
+    border-bottom-width:2px;border-radius:4px;padding:1px 5px;color:var(--fg-1)}
+  .callout{display:inline-block;font-size:10px;background:#ffffff10;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--fg-2);margin-left:6px}
+
+  .spine{padding:10px;border-bottom:1px solid var(--line)}
+  .agent-cmd{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:var(--r-md);
+    background:linear-gradient(180deg,#ffffff0c,#ffffff04);border:1px solid var(--line-strong)}
+  .agent-cmd .name{flex:1;font-weight:700}
+  .agent-cmd .rot{display:flex;gap:2px;color:var(--fg-2)}
+  .agent-cmd .rot span{padding:0 3px;cursor:pointer}
+  /* segmented meta with Pinned promoted to Tier 1 */
+  .seg{display:flex;margin-top:8px;background:var(--bg-0);border:1px solid var(--line);border-radius:var(--r-sm);overflow:hidden}
+  .seg div{flex:1;display:flex;align-items:center;justify-content:center;gap:5px;padding:6px 4px;font-size:var(--t-sm);color:var(--fg-1);cursor:pointer;border-right:1px solid var(--line)}
+  .seg div:last-child{border-right:0}
+  .seg div.on{background:var(--accent-soft);color:var(--accent)}
+  .seg .n{font-size:9.5px;opacity:.8}
+  .kbhint{display:flex;justify-content:space-between;margin-top:8px;font-size:10px;color:var(--fg-2)}
+
+  .list{flex:1;overflow:auto;padding:6px 8px}
+  .proj-h{font-size:var(--t-xs);color:var(--fg-2);font-family:var(--mono);padding:8px 8px 4px;display:flex;justify-content:space-between}
+  .filterbar{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);align-items:center}
+  .icbtn{width:26px;height:26px;display:grid;place-items:center;border-radius:var(--r-sm);background:var(--bg-2);border:1px solid var(--line);color:var(--fg-1);cursor:pointer;font-size:12px}
+</style></head>
+<body>
+<div class="stage">
+  <aside class="sidebar">
+    <div class="spine">
+      <div class="agent-cmd">
+        <span class="mono" style="background:var(--a-claude)">C</span>
+        <span class="name">Claude</span>
+        <span class="rot"><span>◀</span><span>▶</span></span>
+        <span class="caret" style="color:var(--fg-2)">▾</span>
+      </div>
+      <!-- Pinned promoted to Tier 1 alongside Active/Flagged -->
+      <div class="seg">
+        <div class="on"><span class="dot run"></span>Active<span class="n">3</span></div>
+        <div><span style="color:var(--flag)">⚑</span>Flag<span class="n">2</span></div>
+        <div><span style="color:var(--warn)">★</span>Pin<span class="n">5</span></div>
+      </div>
+      <div class="kbhint"><span>switch <kbd>[</kbd><kbd>]</kbd></span><span>jump <kbd>⌘1-9</kbd></span><span>search <kbd>⌘K</kbd></span></div>
+    </div>
+
+    <div class="filterbar">
+      <div class="icbtn" title="Sort">↓</div>
+      <div class="icbtn" title="Time range">⏱</div>
+      <div class="icbtn" title="Filter">⛃</div>
+      <span class="chip" style="margin-left:auto">⏱ 24h <span class="x">✕</span></span>
+    </div>
+
+    <div class="list">
+      <div class="proj-h"><span>~/code/switchboard</span><span>4</span></div>
+      <div class="sess" style="border-left-color:var(--ok)"><div class="row1"><span class="dot run"></span><span class="title">multi-sidebar redesign</span><span style="margin-left:auto;color:var(--warn)">★</span></div><div class="meta"><span>2m</span><span>41 msgs</span><span>$0.42</span></div></div>
+      <div class="sess" style="border-left-color:var(--ok)"><div class="row1"><span class="dot run"></span><span class="title">codereview: db schema</span></div><div class="meta"><span>now</span><span>9 msgs</span></div></div>
+      <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">fix session adapters</span></div><div class="meta"><span>3h</span><span>18 msgs</span></div></div>
+      <div class="proj-h"><span>~/code/claude-code-proxy</span><span>2</span></div>
+      <div class="sess"><div class="row1"><span class="dot idle"></span><span class="title">streaming token counts</span><span style="margin-left:auto;color:var(--warn)">★</span></div><div class="meta"><span>5h</span><span>52 msgs</span></div></div>
+    </div>
+  </aside>
+
+  <div class="note">
+    <h1>V2 — Command Spine</h1>
+    <div class="focus">Concept focus: the all-day power user. Density is comfortable but every action has a key; the chrome is a launchpad, not a wall.</div>
+    <ul>
+      <li><b>Pinned promoted to Tier 1</b> as a 3-segment control (Active/Flag/Pin) <span class="callout">tests U1: Pinned Tier-1 vs Tier-2</span></li>
+      <li><b>Comfortable density</b> with cost/token meta on cards <span class="callout">tests U4: comfortable vs compact</span></li>
+      <li><b>Inline rotate arrows</b> ◀▶ on the agent control + <kbd>[</kbd><kbd>]</kbd> — switch agents without opening the menu.</li>
+      <li><b>Filter controls = icon buttons</b> (sort/time/filter), state shown as a chip. Hidden control, visible state.</li>
+      <li>Keyboard legend always present — teaches the shortcuts that make it fast.</li>
+    </ul>
+    <p style="color:var(--fg-2);font-size:12px">Best for: heavy daily users who triage running + starred work constantly. Trade-off: the 3-segment meta is busier than V1's two buttons.</p>
+  </div>
+</div>
+</body></html>

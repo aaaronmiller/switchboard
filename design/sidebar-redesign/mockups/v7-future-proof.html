@@ -1,0 +1,127 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>V7 · Future-Proof (extended features)</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_tokens.css">
+<style>
+  .stage{display:flex;height:100vh}
+  .sidebar{width:320px;flex:0 0 320px;background:var(--bg-1);border-right:1px solid var(--line);display:flex;flex-direction:column}
+  .note{flex:1;padding:30px;color:var(--fg-1);max-width:560px;overflow:auto}
+  .note h1{font-size:22px;color:var(--fg-0);margin:0 0 4px}
+  .note .focus{color:var(--accent);font-weight:600;font-size:13px;margin-bottom:14px}
+  .note li{margin:5px 0;line-height:1.45;font-size:13px}
+  .note code{font-family:var(--mono);font-size:11px;background:#ffffff10;padding:1px 5px;border-radius:4px}
+
+  .head{padding:10px;border-bottom:1px solid var(--line)}
+  .agent-primary{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:var(--r-md);background:var(--bg-2);border:1px solid var(--line-strong);cursor:pointer}
+  .agent-primary .name{flex:1;font-weight:700;font-size:var(--t-lg)}
+  .spark{display:flex;gap:1px;align-items:flex-end;height:14px}
+  .spark i{width:2px;background:var(--busy);border-radius:1px}
+  .meta-row{display:flex;gap:6px;margin-top:8px}
+  .mv{display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:var(--r-pill);background:var(--bg-2);border:1px solid var(--line);font-size:var(--t-sm);color:var(--fg-1);cursor:pointer}
+  .mv.alert{border-color:#ef444466;color:#ffb4b4;background:#ef44441a}
+  .mv .b{font-size:9.5px;background:#ffffff1a;border-radius:8px;padding:0 5px}
+  .mv.alert .b{background:var(--err);color:#fff}
+  .search{display:flex;align-items:center;gap:7px;margin-top:8px;padding:6px 9px;border-radius:var(--r-sm);background:var(--bg-0);border:1px solid var(--line)}
+  .search input{all:unset;flex:1;color:var(--fg-1);font-size:var(--t-sm)}
+  .scope{display:flex;font-size:9.5px;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+  .scope span{padding:1px 6px;color:var(--fg-2);cursor:pointer}
+  .scope span.on{background:var(--accent-soft);color:var(--accent)}
+  .kbd{font-family:var(--mono);font-size:9.5px;background:#ffffff12;border:1px solid var(--line-strong);border-radius:4px;padding:0 4px;color:var(--fg-2)}
+
+  .modes{display:flex;gap:2px;padding:6px 10px;border-bottom:1px solid var(--line)}
+  .modes span{font-size:11px;color:var(--fg-2);padding:3px 9px;border-radius:6px;cursor:pointer}
+  .modes span.on{background:var(--bg-2);color:var(--fg-0);font-weight:600}
+  .ctrlrow{display:flex;align-items:center;gap:6px;padding:7px 10px;border-bottom:1px solid var(--line)}
+  .density{margin-left:auto;display:flex;font-size:9.5px;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+  .density span{padding:1px 6px;color:var(--fg-2);cursor:pointer}
+  .density span.on{background:var(--accent-soft);color:var(--accent)}
+
+  .list{flex:1;overflow:auto;padding:6px 8px}
+  .ph{font-size:var(--t-xs);color:var(--fg-2);font-family:var(--mono);padding:8px 8px 4px;display:flex;gap:8px;align-items:center}
+  .git{font-family:var(--mono);font-size:9.5px;display:inline-flex;gap:6px}
+  .git .ahead{color:var(--busy)} .git .dirty{color:#c084fc} .git .clean{color:var(--ok)}
+  .card{padding:8px 10px;border-radius:var(--r-md);border-left:2px solid transparent;cursor:pointer}
+  .card:hover{background:var(--bg-3)}
+  .card .r1{display:flex;align-items:center;gap:7px}
+  .card .t{font-size:var(--t-md);font-weight:560;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card .r2{display:flex;align-items:center;gap:8px;margin-top:3px;font-size:var(--t-xs);color:var(--fg-2);flex-wrap:wrap}
+  .tag{font-size:9px;border:1px solid var(--line-strong);border-radius:var(--r-pill);padding:0 6px;color:var(--fg-1)}
+  .cost{font-family:var(--mono);color:#9fe3b6}
+  .needs{color:var(--warn)}
+  .empty{margin:10px;padding:16px;border:1px dashed var(--line-strong);border-radius:var(--r-md);text-align:center;color:var(--fg-2);font-size:12px}
+  .empty b{color:var(--fg-1)} .empty .cta{display:inline-block;margin-top:8px;color:var(--accent);border:1px solid #d9775744;border-radius:6px;padding:4px 10px;font-size:11px}
+</style></head>
+<body>
+<div class="stage">
+  <aside class="sidebar">
+    <div class="head">
+      <div class="agent-primary">
+        <span class="mono" style="background:var(--a-claude)">C</span>
+        <span class="name">Claude</span>
+        <span class="spark"><i style="height:4px"></i><i style="height:9px"></i><i style="height:6px"></i><i style="height:13px"></i><i style="height:7px"></i><i style="height:11px"></i></span>
+        <span class="caret" style="color:var(--fg-2)">▾</span>
+      </div>
+      <div class="meta-row">
+        <div class="mv alert" title="Errored / rate-limited / awaiting input">⚠ Needs you <span class="b">2</span></div>
+        <div class="mv"><span class="dot run"></span>Active <span class="b">3</span></div>
+        <div class="mv"><span style="color:var(--flag)">⚑</span><span class="b">2</span></div>
+      </div>
+      <div class="search">
+        🔍<input placeholder="Search sessions…">
+        <span class="scope"><span class="on">content</span><span>titles</span></span>
+        <span class="kbd">⌘K</span>
+      </div>
+    </div>
+
+    <div class="modes">
+      <span class="on">Sessions</span><span>Plans</span><span>Scheduled</span><span>Board</span><span>Stats</span>
+    </div>
+    <div class="ctrlrow">
+      <span class="chip">⏱ 7d <span class="x">✕</span></span>
+      <span class="chip" style="background:#60a5fa1f;color:#9cc6ff;border-color:#60a5fa44">#refactor <span class="x">✕</span></span>
+      <div class="density" title="Density"><span>Cozy</span><span class="on">Compact</span></div>
+    </div>
+
+    <div class="list">
+      <div class="ph"><span>~/code/switchboard</span><span class="git"><span class="ahead">↑2</span><span class="dirty">●dirty</span></span></div>
+      <div class="card" style="border-left-color:var(--ok)">
+        <div class="r1"><span class="dot run"></span><span class="t">multi-sidebar redesign</span><span class="tag">#refactor</span></div>
+        <div class="r2"><span>2m</span><span class="spark" style="height:10px"><i style="height:3px"></i><i style="height:7px"></i><i style="height:10px"></i><i style="height:5px"></i></span><span class="cost">12.4k · $0.42</span></div>
+      </div>
+      <div class="card" style="border-left-color:var(--err)">
+        <div class="r1"><span class="dot" style="background:var(--err)"></span><span class="t">fix session adapters</span></div>
+        <div class="r2"><span class="needs">⚠ rate-limited — resume?</span><span>·</span><span class="cost">8.1k · $0.28</span></div>
+      </div>
+      <div class="ph"><span>~/code/claude-code-proxy</span><span class="git"><span class="clean">✓ current</span></span></div>
+      <div class="card">
+        <div class="r1"><span class="dot idle"></span><span class="t">streaming token counts</span><span class="tag">★ pinned</span></div>
+        <div class="r2"><span>5h</span><span>52 msgs</span><span class="cost">31k · $1.05</span></div>
+      </div>
+      <!-- empty-state demonstration (NN/g 3 rules) -->
+      <div class="ph">~/code/ante-preview</div>
+      <div class="empty">
+        <b>No Codex sessions in 90 days here.</b><br>
+        Flag the agent to watch it, or start one.
+        <div class="cta">＋ Start Codex session</div>
+      </div>
+    </div>
+  </aside>
+
+  <div class="note">
+    <h1>V7 — Future-Proof (extended)</h1>
+    <div class="focus">Concept focus: prove the tier model absorbs Switchboard's full ambition — cost, git, attention, search, tags, schedules — without re-cluttering. Everything new obeys “defer the control, never the state.”</div>
+    <ul>
+      <li><b>⚠ Needs-you triage</b> (errored/rate-limited/awaiting input) — red, Tier-1 only when N&gt;0. <code>RESEARCH F,O,L</code></li>
+      <li><b>Content search</b> (not just titles) — the gap no AI chat sidebar fills. <code>RESEARCH L</code></li>
+      <li><b>Git cluster</b> per project (<span class="git"><span class="ahead">↑2</span> <span class="dirty">dirty</span></span>) + review-diff/PR on demand. <code>Conductor, JetBrains</code></li>
+      <li><b>Token + cost</b> chips & per-agent burn; budget alerts in settings. <code>RESEARCH D</code></li>
+      <li><b>Tags &amp; saved views</b> (<span class="tag">#refactor</span>) as custom meta-views; rename/archive/pin via right-click. <code>top user requests</code></li>
+      <li><b>Mode tabs</b>: Sessions · Plans · Scheduled (next-run + live log) · Board (kanban) · Stats (heatmap). <code>Vibe Kanban, Cronicle</code></li>
+      <li><b>Density toggle</b> (Cozy default / Compact) — settles U4 per Cloudscape. <code>D2</code></li>
+      <li><b>Per-pane empty state</b>: explains why empty + a primary action (NN/g 3 rules). <code>D1</code></li>
+      <li><b>⌘K palette</b> entry — invisible until summoned; CLI-efficiency + GUI discoverability.</li>
+    </ul>
+    <p style="color:var(--fg-2);font-size:12px">Spine still ≤7 active marks; one loud element (active agent). Added power lives in Tier 2/3 and conditional Tier-1 badges — density-gated so a laptop user can hide cost/sparklines.</p>
+  </div>
+</div>
+</body></html>

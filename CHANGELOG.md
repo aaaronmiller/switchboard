@@ -2,6 +2,13 @@
 
 All notable changes to Switchboard are documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Multi-sidebar columns layout** — The "all agents" sidebar can now lay each CLI's panel out as side-by-side, tiling **columns** (not just a vertical stack), so on an ultrawide monitor every agent's sidebar can stay open at once. A controls bar at the top of the multi-agent view switches between stacked (☰) and columns (⊞⊞) layouts; the choice persists in localStorage.
+- **Recency gating for agent panes** — A "active within N days" control (default **90**) hides CLIs whose most-recent session is older than the cutoff, so only installed agents with genuinely recent activity get a pane. Persists in localStorage and re-filters live.
+- **Remembered per-agent collapse** — Expanding/collapsing an agent's panel in the multi-sidebar is now remembered per-agent across restarts (explicit choice overrides the default "collapse if stale > 3d" heuristic).
+
 ## [0.0.29] - 2026-04-24
 
 ### Added

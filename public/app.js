@@ -195,6 +195,23 @@ let sortedOrder = []; // [{ projectPath, itemIds: [itemId, ...] }, ...] — sing
 let activeTab = 'sessions';
 let activeAgent = localStorage.getItem('activeAgent') || 'claude'; // which CLI agent's sessions to show
 let multiAgentMode = localStorage.getItem('multiAgentMode') === '1'; // show all agents stacked
+// Multi-sidebar layout: 'stack' (vertical panels) or 'columns' (side-by-side panes,
+// ideal for ultrawide monitors where you want every CLI's sidebar open at once).
+let multiSidebarLayout = localStorage.getItem('multiSidebarLayout') || 'stack';
+// Auto-show a CLI's pane only if it has a session within this many days (default 90).
+let agentRecencyDays = parseInt(localStorage.getItem('agentRecencyDays') || '90', 10);
+// Per-agent collapse state in multi-sidebar, remembered across restarts.
+// Map of agentId → 'collapsed' | 'expanded'. Absence means "use stale heuristic".
+let multiAgentCollapseState = (() => {
+  try { return JSON.parse(localStorage.getItem('multiAgentCollapseState') || '{}'); } catch { return {}; }
+})();
+function saveMultiAgentCollapseState() {
+  localStorage.setItem('multiAgentCollapseState', JSON.stringify(multiAgentCollapseState));
+}
+// Re-load + re-render the multi-agent sidebar (used after layout/recency changes).
+function refreshMultiSidebar() {
+  loadAllAgentsData().then(agentData => { renderMultiSidebar(agentData); renderDefaultStatus(); });
+}
 let cachedAgentProjects = new Map(); // agentId → projects[] cache
 let installedAgents = {}; // populated on init
 // Flagged agents: a user-curated set of CLIs whose sessions are shown together
@@ -3459,7 +3476,6 @@ initGridObservers();
 // Dialogs (resolveDefaultSessionOptions, forkSession, showNewSessionPopover,
 // showNewSessionDialog, showResumeSessionDialog, showAddProjectDialog, launchTerminalSession) → dialogs.js
 
-  info.appendChild(titleEl);
 async function openPlan(plan) {
   // Mark active in sidebar
   plansContent.querySelectorAll('.plan-item.active').forEach(el => el.classList.remove('active'));
@@ -6772,7 +6788,22 @@ async function loadAllAgentsData() {
 //   2. Per-agent collapsible panels below
 function renderMultiSidebar(agentData) {
   const container = document.createElement('div');
-  container.className = 'multi-agent-sidebar';
+  container.className = 'multi-agent-sidebar' + (multiSidebarLayout === 'columns' ? ' columns' : '');
+
+  // --- Controls bar: layout switch (stack / side-by-side columns) + recency gate ---
+  const controls = document.createElement('div');
+  controls.className = 'multi-controls';
+  controls.innerHTML = `
+    <div class="multi-layout-switch" role="group" aria-label="Sidebar layout">
+      <button class="multi-layout-btn ${multiSidebarLayout === 'stack' ? 'active' : ''}" data-layout="stack" title="Stacked (vertical)">&#9776;</button>
+      <button class="multi-layout-btn ${multiSidebarLayout === 'columns' ? 'active' : ''}" data-layout="columns" title="Side-by-side columns (ultrawide)">&#9707;&#9707;</button>
+    </div>
+    <label class="multi-recency" title="Only auto-show CLIs with a session this recent">active within
+      <input type="number" id="multi-recency-input" min="1" max="3650" value="${agentRecencyDays}"> days
+    </label>`;
+  container.appendChild(controls);
+
+  const recencyCutoff = agentRecencyDays > 0 ? Date.now() - agentRecencyDays * 86400000 : 0;
 
   // --- Step 1: Pinned section at top ---
   const pinnedSection = document.createElement('div');
@@ -6815,6 +6846,13 @@ function renderMultiSidebar(agentData) {
 
     if (totalSessions === 0) continue; // skip agents with no data
 
+    // Recency gate: hide CLIs whose most-recent session is older than the cutoff.
+    const lastMod = projects.reduce((latest, p) => {
+      const last = p.sessions[0]?.modified;
+      return last && (!latest || new Date(last) > new Date(latest)) ? last : latest;
+    }, null);
+    if (recencyCutoff && lastMod && new Date(lastMod).getTime() < recencyCutoff) continue;
+
     const panel = document.createElement('div');
     panel.className = 'agent-panel';
     panel.id = 'agent-panel-' + agentId;
@@ -6832,13 +6870,6 @@ function renderMultiSidebar(agentData) {
     const body = document.createElement('div');
     body.className = 'agent-panel-body';
 
-    // Collapsed by default if > 3 days since last activity
-    const lastActivity = projects.reduce((latest, p) => {
-      const last = p.sessions[0]?.modified;
-      return last && (!latest || last > latest) ? last : latest;
-    }, null);
-    const isStale = lastActivity && (Date.now() - new Date(lastActivity)) > 3 * 86400000;
-
     panel.appendChild(header);
     panel.appendChild(body);
     container.appendChild(panel);
@@ -6846,10 +6877,12 @@ function renderMultiSidebar(agentData) {
     // Build project groups into the agent panel body
     buildAgentProjectsInto(projects, body, agentId);
 
-    // Collapse if stale
-    if (isStale) {
-      panel.classList.add('collapsed');
-    }
+    // Collapse state: honor the user's remembered choice; otherwise default-collapse
+    // anything stale (> 3 days since last activity).
+    const isStale = lastMod && (Date.now() - new Date(lastMod)) > 3 * 86400000;
+    const explicit = multiAgentCollapseState[agentId];
+    const shouldCollapse = explicit ? explicit === 'collapsed' : !!isStale;
+    if (shouldCollapse) panel.classList.add('collapsed');
   }
 
   // --- Populate pinned section ---
@@ -6859,15 +6892,43 @@ function renderMultiSidebar(agentData) {
   sidebarContent.innerHTML = '';
   sidebarContent.appendChild(container);
 
-  // Bind collapse/expand toggles
+  // Bind collapse/expand toggles (remembering per-agent choice across restarts)
   container.querySelectorAll('.agent-panel-header').forEach(hdr => {
     hdr.addEventListener('click', (e) => {
       if (e.target.closest('.agent-panel-header')) {
-        hdr.parentElement.classList.toggle('collapsed');
-        saveExpandedSlugs(); // reuse same storage
+        const panel = hdr.parentElement;
+        const collapsed = panel.classList.toggle('collapsed');
+        const agentId = (panel.id || '').replace('agent-panel-', '');
+        if (agentId) {
+          multiAgentCollapseState[agentId] = collapsed ? 'collapsed' : 'expanded';
+          saveMultiAgentCollapseState();
+        }
       }
     });
   });
+
+  // Bind controls bar: layout switch + recency gate
+  controls.querySelectorAll('.multi-layout-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const layout = btn.dataset.layout;
+      if (layout === multiSidebarLayout) return;
+      multiSidebarLayout = layout;
+      localStorage.setItem('multiSidebarLayout', layout);
+      container.classList.toggle('columns', layout === 'columns');
+      controls.querySelectorAll('.multi-layout-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.layout === layout));
+    });
+  });
+  const recencyInput = controls.querySelector('#multi-recency-input');
+  if (recencyInput) {
+    recencyInput.addEventListener('change', () => {
+      const v = Math.max(1, Math.min(3650, parseInt(recencyInput.value) || 90));
+      agentRecencyDays = v;
+      recencyInput.value = v;
+      localStorage.setItem('agentRecencyDays', String(v));
+      refreshMultiSidebar(); // re-filter which CLI panes are shown
+    });
+  }
 
   rebindMultiSidebarEvents();
 }
