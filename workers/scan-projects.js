@@ -97,8 +97,6 @@ function readFolderFromFilesystem(folder) {
         inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, model: lastModel,
         loopCount, lastLoopAt, lastLoopTool, lastLoopReason,
       });
-      const s = readSessionFile(path.join(folderPath, file), folder, projectPath);
->>>>>>> upstream/main
     }
   } catch {}
 
