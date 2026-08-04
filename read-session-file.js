@@ -14,8 +14,18 @@ function readSessionFile(filePath, folder, projectPath) {
     let slug = null;
     let customTitle = null;
     let aiTitle = null;
+    // Real conversation time bounds. Resuming a session appends untimestamped
+    // bookkeeping records (last-prompt, mode, ai-title, …) which bump the file's
+    // mtime without any actual activity, so mtime can't be the displayed time.
+    let firstTimestamp = null;
+    let lastTimestamp = null;
     for (const line of lines) {
       const entry = JSON.parse(line);
+      if (entry.timestamp) {
+        // ISO-8601 UTC strings — lexicographic comparison is chronological
+        if (!firstTimestamp || entry.timestamp < firstTimestamp) firstTimestamp = entry.timestamp;
+        if (!lastTimestamp || entry.timestamp > lastTimestamp) lastTimestamp = entry.timestamp;
+      }
       if (entry.slug && !slug) slug = entry.slug;
       if (entry.type === 'custom-title' && entry.customTitle) {
         customTitle = entry.customTitle;
@@ -47,8 +57,12 @@ function readSessionFile(filePath, folder, projectPath) {
     return {
       sessionId, folder, projectPath,
       summary, firstPrompt: summary,
-      created: stat.birthtime.toISOString(),
-      modified: stat.mtime.toISOString(),
+      // created/modified are display+sort values from message timestamps;
+      // fileMtime is the cache-invalidation key (compared against stat.mtime
+      // in refreshFolder). Old transcripts without timestamps fall back to stat.
+      created: firstTimestamp || stat.birthtime.toISOString(),
+      modified: lastTimestamp || stat.mtime.toISOString(),
+      fileMtime: stat.mtime.toISOString(),
       messageCount, textContent, slug, customTitle, aiTitle,
     };
   } catch {

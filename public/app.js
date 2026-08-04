@@ -262,11 +262,6 @@ let searchMatchProjectPaths = null; // Set<string> of project paths matched by n
 const attentionSessions = new Set(); // sessions needing user action (OSC 9)
 const responseReadySessions = new Set(); // Claude finished, user hasn't looked (terminal state)
 const sessionBusyState = new Map(); // sessionId → boolean (currently active)
-const errorSessions = new Set(); // sessions that errored out / API issues / non-zero exit
-const lastActivityTime = new Map(); // sessionId → Date of last terminal output
-
-// Noise patterns — these don't count as activity
-const activityNoiseRe = /file-history-snapshot|^\s*$/;
 
 // Central activity dispatcher
 function setActivity(sessionId, active) {
@@ -300,22 +295,6 @@ function setActivity(sessionId, active) {
   if (!responseReadySessions.has(sessionId)) {
     const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
     if (item) item.classList.toggle('cli-busy', active);
-  }
-}
-
-// Terminal output activity — updates lastActivityTime only, busy state driven by backend
-// Patterns that indicate API errors, rate limits, auth failures, or crashes
-const errorPatterns = /overloaded|rate.limit|exceeded|api.error|unauthorized|authentication.failed|invalid.api.key|quota|529|503|502|500.*error|credit|billing|internal.server.error/i;
-
-function trackActivity(sessionId, data) {
-  if (activityNoiseRe.test(data)) return;
-  lastActivityTime.set(sessionId, new Date());
-
-  // Detect API/auth errors in terminal output
-  if (errorPatterns.test(data)) {
-    errorSessions.add(sessionId);
-    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-    if (item) item.classList.add('session-error');
   }
 }
 
@@ -377,10 +356,6 @@ window.api.onTerminalData((sessionId, data) => {
       scheduleFlush(sessionId, buf);
     }
   }
-  // Update last activity time (noise-filtered)
-  trackActivity(sessionId, data);
-  // Feed terminal output to scheduler (wait-for-output, condition checks)
-  if (typeof schedulerOnTerminalData === 'function') schedulerOnTerminalData(sessionId, data);
 });
 
 window.api.onSessionDetected((tempId, realId) => {
@@ -450,30 +425,30 @@ window.api.onProcessExited((sessionId, exitCode) => {
   const session = sessionMap.get(sessionId);
   if (entry) {
     entry.closed = true;
+    // Write a visible exit banner so the user can see when the process ended
+    // and read any error output it printed (claude / devbox / shell stderr).
+    // Without this, a fast-failing pre-launch command would tear down the
+    // terminal before the user could read the error.
+    try {
+      const colour = exitCode === 0 ? '\x1b[2m' : '\x1b[33m';
+      entry.terminal.write(
+        `\r\n${colour}── session exited (code ${exitCode}) ──\x1b[0m\r\n`
+      );
+    } catch {}
   }
 
-  // Mark as errored if non-zero exit (crash, API failure, etc.)
-  if (exitCode !== 0 && exitCode != null) {
-    errorSessions.add(sessionId);
-    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-    if (item) item.classList.add('session-error');
-  }
-
-  // Clean up terminal UI on exit (uses destroySession to handle grid cards too)
-  if (entry) {
-    destroySession(sessionId);
-  }
-  if (gridViewActive) {
-    gridViewerCount.textContent = gridCards.size + ' session' + (gridCards.size !== 1 ? 's' : '');
-  } else if (activeSessionId === sessionId) {
-    setActiveSession(null);
-    terminalHeader.style.display = 'none';
-    hideConversationViewer();
-    placeholder.style.display = '';
-  }
-
-  // Plain terminal sessions: remove from sidebar entirely (ephemeral)
+  // Plain terminal sessions are ephemeral — destroy immediately and remove from
+  // the sidebar. Claude sessions stay mounted (see below) so the user can read
+  // the exit reason.
   if (session?.type === 'terminal') {
+    if (entry) destroySession(sessionId);
+    if (gridViewActive) {
+      gridViewerCount.textContent = gridCards.size + ' session' + (gridCards.size !== 1 ? 's' : '');
+    } else if (activeSessionId === sessionId) {
+      setActiveSession(null);
+      terminalHeader.style.display = 'none';
+      placeholder.style.display = '';
+    }
     pendingSessions.delete(sessionId);
     for (const projList of [cachedProjects, cachedAllProjects]) {
       for (const proj of projList) {
@@ -486,17 +461,16 @@ window.api.onProcessExited((sessionId, exitCode) => {
     return;
   }
 
-  // Clean up no-op pending sessions (never created a .jsonl)
-  if (pendingSessions.has(sessionId)) {
-    pendingSessions.delete(sessionId);
-    // Remove from cached project data
-    for (const projList of [cachedProjects, cachedAllProjects]) {
-      for (const proj of projList) {
-        proj.sessions = proj.sessions.filter(s => s.sessionId !== sessionId);
-      }
-    }
-    sessionMap.delete(sessionId);
-    refreshSidebar();
+  // Claude sessions: keep the terminal mounted with the exit banner visible so
+  // the user can read what happened. Cleanup is deferred — openSession destroys
+  // the closed entry when the user re-clicks the session (existing behavior).
+  // If the session was pending (no .jsonl was written), leave the sidebar
+  // entry in place too so the user has somewhere to relaunch from; it'll be
+  // tidied up by the regular pending-reconciliation pass once it's clear no
+  // real session file is coming.
+
+  if (gridViewActive) {
+    gridViewerCount.textContent = gridCards.size + ' session' + (gridCards.size !== 1 ? 's' : '');
   }
 
   pollActiveSessions();
@@ -1262,7 +1236,7 @@ searchInput.addEventListener('input', () => {
         if (searchTitlesOnly) {
           const lowerQ = query.toLowerCase();
           for (const p of cachedAllProjects) {
-            const shortName = p.projectPath.split('/').filter(Boolean).slice(-2).join('/');
+            const shortName = shortProjectPath(p.projectPath);
             if (shortName.toLowerCase().includes(lowerQ)) {
               if (!searchMatchProjectPaths) searchMatchProjectPaths = new Set();
               searchMatchProjectPaths.add(p.projectPath);
@@ -1335,6 +1309,22 @@ terminalDetachBtn.addEventListener('click', async () => {
 });
 
 // --- Poll for active PTY sessions ---
+// Adaptive cadence: poll fast (3s) only while PTYs are running; when idle, back
+// off to 30s. Every renderer path that starts a session (launchNewSession,
+// openSession, launchTerminalSession, onSessionDetected/Forked) calls
+// pollActiveSessions() explicitly, which re-arms the fast cadence immediately.
+// The 30s idle floor still catches sessions started outside the renderer
+// (scheduler-spawned PTYs, other windows) within at most 30s.
+const POLL_FAST_MS = 3000;
+const POLL_IDLE_MS = 30000;
+let pollTimer = null;
+
+function scheduleActiveSessionsPoll() {
+  if (pollTimer) clearTimeout(pollTimer);
+  const delay = activePtyIds.size > 0 ? POLL_FAST_MS : POLL_IDLE_MS;
+  pollTimer = setTimeout(pollActiveSessions, delay);
+}
+
 async function pollActiveSessions() {
   try {
     const sessions = await window.api.getActiveSessions();
@@ -1348,6 +1338,7 @@ async function pollActiveSessions() {
       loadMetaView('_active');
     }
   } catch {}
+  scheduleActiveSessionsPoll();
 }
 
 function updateRunningIndicators() {
@@ -1405,18 +1396,18 @@ function updatePtyTitle() {
   terminalHeaderPtyTitle.style.display = title ? '' : 'none';
 }
 
-setInterval(pollActiveSessions, 3000);
+scheduleActiveSessionsPoll();
 
 // Refresh sidebar timeago labels every 30s so "just now" ticks forward
 setInterval(() => {
-  for (const [sessionId, time] of lastActivityTime) {
+  for (const [sessionId, session] of sessionMap) {
+    if (!session.modified) continue;
     const item = document.getElementById('si-' + sessionId);
     if (!item) continue;
-    const meta = item.querySelector('.session-meta');
-    if (!meta) continue;
-    const session = sessionMap.get(sessionId);
-    const msgSuffix = session?.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '';
-    meta.textContent = formatDate(time) + msgSuffix;
+    const timeEl = item.querySelector('.session-time');
+    if (!timeEl) continue;
+    const msgSuffix = session.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '';
+    timeEl.textContent = formatDate(new Date(session.modified)) + msgSuffix;
   }
 }, 30000);
 
@@ -7288,6 +7279,71 @@ const updaterHandler = (type, data) => {
   }
 };
 window.api.onUpdaterEvent(updaterHandler);
+
+// --- Quota gauges in status bar ---
+// One bar per limit window the usage API reports — a 5-hour session window, a
+// weekly all-models window, and a weekly window per model. Which one bites
+// first varies, and the 5-hour is usually the emptiest while resetting within
+// the day, so showing a single window would read as "plenty left" while a
+// weekly one is the one actually running out. Rows come from the API
+// self-describing, so a newly launched model gets a bar without a code change.
+const quotaGaugeEl = document.getElementById('status-bar-quota');
+
+// Full labels ("Week (all models)") are too long for a status bar; the tooltip
+// carries them in full.
+function shortQuotaLabel(row) {
+  if (row.kind === 'session') return '5h';
+  if (row.kind === 'weekly_all') return 'Week';
+  return row.model || 'Week';
+}
+
+function buildQuotaBar(row) {
+  const wrap = document.createElement('span');
+  wrap.className = 'quota-item';
+
+  const label = document.createElement('span');
+  label.className = 'quota-label';
+  label.textContent = shortQuotaLabel(row);
+  wrap.appendChild(label);
+
+  const track = document.createElement('span');
+  track.className = 'quota-track';
+  const fill = document.createElement('span');
+  const pct = row.percent;
+  fill.className = 'quota-fill' + (pct >= 80 ? ' quota-high' : pct >= 60 ? ' quota-mid' : '');
+  fill.style.width = Math.min(Math.max(pct, 1), 100) + '%';
+  track.appendChild(fill);
+  wrap.appendChild(track);
+
+  const pctEl = document.createElement('span');
+  pctEl.className = 'quota-pct';
+  pctEl.textContent = pct + '%';
+  wrap.appendChild(pctEl);
+
+  wrap.title = `${row.label}: ${pct}%` + (row.reset ? ` \u2014 resets ${row.reset}` : '');
+  return wrap;
+}
+
+async function refreshQuotaGauge() {
+  try {
+    const usage = await window.api.getUsage();
+    // Prefer the API's self-describing rows; fall back to the flat 5-hour keys.
+    const rows = Array.isArray(usage?.limits) && usage.limits.length
+      ? usage.limits
+      : (usage?.session !== undefined
+        ? [{ kind: 'session', label: 'Current session', percent: usage.session, reset: usage.sessionReset }]
+        : []);
+    if (!rows.length) { quotaGaugeEl.style.display = 'none'; return; }
+
+    quotaGaugeEl.replaceChildren(...rows.map(buildQuotaBar));
+    quotaGaugeEl.style.display = '';
+  } catch {}
+}
+refreshQuotaGauge();
+setInterval(refreshQuotaGauge, 5 * 60 * 1000);
+quotaGaugeEl.addEventListener('click', () => {
+  document.querySelector('.sidebar-tab[data-tab="stats"]')?.click();
+});
 
 // --- Initialize file panel (MCP bridge UI) ---
 if (typeof initFilePanel === 'function') initFilePanel();
