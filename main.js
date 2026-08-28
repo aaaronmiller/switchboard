@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, screen, shell } = require('electron');
 const { Worker } = require('worker_threads');
 const path = require('path');
 const fs = require('fs');
@@ -8,6 +8,15 @@ const log = require('electron-log');
 // getFolderIndexMtimeMs moved to session-cache.js
 const { startMcpServer, shutdownMcpServer, shutdownAll: shutdownAllMcp, resolvePendingDiff, rekeyMcpServer, cleanStaleLockFiles } = require('./mcp-bridge');
 const { fetchAndTransformUsage } = require('./claude-auth');
+
+// SWITCHBOARD_DATA_DIR isolates a dev/test instance from the installed app:
+// db.js puts switchboard.db under it, and pointing userData there gives the
+// instance its own single-instance lock (requestSingleInstanceLock keys on
+// userData), so both can run side by side.
+if (process.env.SWITCHBOARD_DATA_DIR) {
+  app.setPath('userData', path.resolve(process.env.SWITCHBOARD_DATA_DIR, 'electron'));
+}
+
 log.transports.file.level = app.isPackaged ? 'info' : 'debug';
 log.transports.console.level = app.isPackaged ? 'info' : 'debug';
 
@@ -75,7 +84,7 @@ const cleanPtyEnv = Object.fromEntries(
 );
 
 // Shell profiles → shell-profiles.js
-const { discoverShellProfiles, getShellProfiles, resolveShell, isWindows, isWslShell, windowsToWslPath, shellArgs } = require('./shell-profiles');
+const { discoverShellProfiles, getShellProfiles, resolveShell, isWindows, isWslShell, windowsToWslPath, shellArgs, quoteArgvForShell } = require('./shell-profiles');
 const { startScheduler } = require('./schedule-runner');
 const { encodeProjectPath } = require('./encode-project-path');
 const gitUtils = require('./git-utils');
@@ -83,11 +92,6 @@ const gitUtils = require('./git-utils');
 // --- Git status cache — avoids repeated `git status` calls across the same project ---
 const gitStatusCache = new Map(); // projectPath -> { data, timestamp }
 const GIT_CACHE_TTL = 60_000; // 60 seconds
-
-// Agent history scan cache — avoids full filesystem walks on every IPC call
-const agentScanCache = new Map(); // agentId -> { sessions, timestamp }
-const AGENT_SCAN_CACHE_TTL = 30_000; // 30 seconds
-const AGENT_SCAN_CACHE_MAX = 50; // cap total entries
 
 // --- Auto-updater (only in packaged builds) ---
 let autoUpdater = null;
@@ -410,9 +414,8 @@ sessionCache.init({
     setFolderMeta, getAllFolderMeta, getAllMeta, getAllCached, getSetting, getMeta, setName,
   },
 });
-const { readSessionFile, readFolderFromFilesystem, refreshFolder, populateCacheFromFilesystem,
+const { readSessionFile, readFolderFromFilesystem, refreshFolder, reconcileCacheFromFilesystem,
         buildProjectsFromCache, notifyRendererProjectsChanged, sendStatus, populateCacheViaWorker } = sessionCache;
-
 
 // --- IPC: browse-folder ---
 ipcMain.handle('browse-folder', async () => {
@@ -491,6 +494,14 @@ ipcMain.handle('remove-project', (_event, projectPath) => {
 ipcMain.handle('open-external', (_event, url) => {
   log.info('[open-external IPC]', url);
   if (/^https?:\/\//i.test(url)) return shell.openExternal(url);
+});
+
+// --- IPC: clipboard write ---
+// The renderer's navigator.clipboard.writeText is gated on focus/user-activation and
+// is flaky-to-dead on Linux/Wayland (Ozone). The main-process clipboard has no such
+// strings attached, so all terminal copies go through here.
+ipcMain.handle('clipboard-write-text', (_event, text) => {
+  if (typeof text === 'string') clipboard.writeText(text);
 });
 
 // --- IPC: MCP bridge ---
@@ -653,6 +664,10 @@ ipcMain.handle('get-projects', (_event, showArchived) => {
       return [];
     }
 
+    // Pick up folders changed while the app was closed, or never indexed by an
+    // older build, so sessions/worktrees don't silently go missing. Stat-gated,
+    // so it's cheap when nothing has changed.
+    reconcileCacheFromFilesystem();
     return buildProjectsFromCache(showArchived);
   } catch (err) {
     console.error('Error listing projects:', err);
@@ -905,8 +920,10 @@ ipcMain.handle('get-memories', () => {
         if (projectPath && hiddenProjects.has(projectPath)) continue;
 
         // Use same 2-deep short path as Sessions tab (e.g. "dev/MyClaude")
+        // Splits on both separators — `cwd` is backslash-separated on Windows,
+        // where splitting on '/' alone left the whole path as one segment.
         const shortName = projectPath
-          ? projectPath.split('/').filter(Boolean).slice(-2).join('/')
+          ? projectPath.split(/[\\/]/).filter(Boolean).slice(-2).join('/')
           : folderToShortPath(folder);
         const files = [];
         const seenPaths = new Set();
@@ -1685,48 +1702,58 @@ safeSendToSession(sessionId, 'terminal-data', '\x1b[?1049h');
         }
       }, 300);
     } else {
-      // Build claude command with session options
-      let claudeCmd;
+      // Build claude command, using array to prevent accidental shell injection
+      const claudeArgs = [];
       if (sessionOptions?.forkFrom) {
-        claudeCmd = `claude --resume "${sessionOptions.forkFrom}" --fork-session`;
+        claudeArgs.push('--resume', String(sessionOptions.forkFrom), '--fork-session');
       } else if (isNew) {
-        claudeCmd = `claude --session-id "${sessionId}"`;
+        claudeArgs.push('--session-id', String(sessionId));
       } else {
-        claudeCmd = `claude --resume "${sessionId}"`;
+        claudeArgs.push('--resume', String(sessionId));
       }
 
       if (sessionOptions) {
         if (sessionOptions.dangerouslySkipPermissions) {
-          claudeCmd += ' --dangerously-skip-permissions';
+          claudeArgs.push('--dangerously-skip-permissions');
         } else if (sessionOptions.permissionMode) {
-          claudeCmd += ` --permission-mode "${sessionOptions.permissionMode}"`;
+          claudeArgs.push('--permission-mode', String(sessionOptions.permissionMode));
         }
-        if (sessionOptions.worktree) {
-          claudeCmd += ' --worktree';
+        // --worktree only applies when STARTING a session — it creates a fresh
+        // isolated git worktree. Resuming (isNew === false) must reuse the
+        // session's existing directory, so ignore the worktree option on resume
+        // regardless of which call site supplied it (sidebar click, schedule
+        // creator, fork, …). Otherwise a resume tries to spin up a new worktree
+        // and fails to attach.
+        if (isNew && sessionOptions.worktree) {
+          claudeArgs.push('--worktree');
           if (sessionOptions.worktreeName) {
-            claudeCmd += ` "${sessionOptions.worktreeName}"`;
+            claudeArgs.push(String(sessionOptions.worktreeName));
           }
         }
         if (sessionOptions.chrome) {
-          claudeCmd += ' --chrome';
+          claudeArgs.push('--chrome');
         }
         if (sessionOptions.addDirs) {
-          const dirs = sessionOptions.addDirs.split(',').map(d => d.trim()).filter(Boolean);
+          const dirs = String(sessionOptions.addDirs).split(',').map(d => d.trim()).filter(Boolean);
           for (const dir of dirs) {
-            claudeCmd += ` --add-dir "${dir}"`;
+            claudeArgs.push('--add-dir', dir);
           }
         }
       }
 
       if (sessionOptions?.appendSystemPrompt) {
-        // Write to a temp file and use shell substitution to avoid quoting issues
-        const tmpPrompt = path.join(os.tmpdir(), `switchboard-prompt-${sessionId}.md`);
-        fs.writeFileSync(tmpPrompt, sessionOptions.appendSystemPrompt);
-        claudeCmd += ` --append-system-prompt "$(cat '${tmpPrompt}')"`;
+        claudeArgs.push('--append-system-prompt', String(sessionOptions.appendSystemPrompt));
       }
 
+      let claudeCmd = 'claude ' + quoteArgvForShell(shell, claudeArgs);
+
+      // preLaunchCmd is raw shell by design (e.g. "aws-vault exec profile --") — block newlines only
       if (sessionOptions?.preLaunchCmd) {
-        claudeCmd = sessionOptions.preLaunchCmd + ' ' + claudeCmd;
+        const pre = String(sessionOptions.preLaunchCmd);
+        if (/[\r\n]/.test(pre)) {
+          return { ok: false, error: 'preLaunchCmd must not contain newlines' };
+        }
+        claudeCmd = pre + ' ' + claudeCmd;
       }
 
       // Start MCP server for this session so Claude CLI sends diffs/file opens to Switchboard
@@ -2017,60 +2044,80 @@ ipcMain.handle('updater-install', () => {
 });
 
 // --- App lifecycle ---
-app.whenReady().then(() => {
-  buildMenu();
-  createWindow();
-  startProjectsWatcher();
-  scheduleIpc.ensureScheduleCreatorCommand();
-
-  // Shared runCommand for both cron scheduler and manual "run now"
-  const { spawn: cpSpawn } = require('child_process');
-  function runScheduleCommand(cmd, cwd, name, onDone) {
-    const globalSettings = getSetting('global') || {};
-    const profileId = globalSettings.shellProfile || SETTING_DEFAULTS.shellProfile;
-    const profile = resolveShell(profileId);
-    const shell = profile.path;
-    const args = shellArgs(shell, cmd, profile.args || []);
-
-    log.info(`[schedule] Running: ${shell} ${args.join(' ')}`);
-    const child = cpSpawn(shell, args, {
-      cwd,
-      stdio: ['ignore', 'ignore', 'pipe'],
-      env: { ...cleanPtyEnv, FORCE_COLOR: '0' },
-    });
-
-    let stderr = '';
-    child.stderr.on('data', (data) => { stderr += data.toString(); });
-
-    child.on('exit', (code) => {
-      if (stderr.trim()) log.error(`[schedule] ${name} stderr:\n${stderr.trim()}`);
-      log.info(`[schedule] ${name} finished (exit ${code})`);
-      if (onDone) onDone();
-    });
-
-    child.on('error', (err) => {
-      log.error(`[schedule] ${name} error:`, err.message);
-      if (onDone) onDone();
-    });
-  }
-
-  scheduleIpc.init(log, runScheduleCommand);
-  startScheduler(log, runScheduleCommand);
-
-  // Re-index search if FTS table was recreated (e.g. tokenizer config change)
-  if (searchFtsRecreated) populateCacheViaWorker();
-
-  // Check for updates after launch
-  if (autoUpdater) {
-    setTimeout(() => autoUpdater.checkForUpdates().catch(e => log.error('[updater] check failed:', e?.message || String(e))), 5000);
-    // Re-check every 4 hours for long-running sessions
-    setInterval(() => autoUpdater.checkForUpdates().catch(e => log.error('[updater] check failed:', e?.message || String(e))), 4 * 60 * 60 * 1000);
-  }
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+// Prevent a second Electron instance from killing active PTY sessions.
+// This happens when the user replaces the AppImage while Switchboard is running:
+// the OS spawns the new binary, which would otherwise initialise a second process
+// and leave the first one's node-pty sessions orphaned or killed.
+// requestSingleInstanceLock ensures only one instance runs at a time. The second
+// launch quits immediately; the first brings its window to the front.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  // Focus the existing window when a second launch is attempted.
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
   });
-});
+
+  app.whenReady().then(() => {
+    buildMenu();
+    createWindow();
+    startProjectsWatcher();
+    scheduleIpc.ensureScheduleCreatorCommand();
+
+    // Shared runCommand for cron scheduler and "run now" — takes argv, not a shell string
+    const { spawn: cpSpawn } = require('child_process');
+    function runScheduleCommand(claudeArgv, cwd, name, onDone) {
+      const globalSettings = getSetting('global') || {};
+      const profileId = globalSettings.shellProfile || SETTING_DEFAULTS.shellProfile;
+      const profile = resolveShell(profileId);
+      const shell = profile.path;
+      const cmd = 'claude ' + quoteArgvForShell(shell, claudeArgv);
+      const args = shellArgs(shell, cmd, profile.args || []);
+
+      log.info(`[schedule] Running: ${shell} ${args.join(' ')}`);
+      const child = cpSpawn(shell, args, {
+        cwd,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: { ...cleanPtyEnv, FORCE_COLOR: '0' },
+      });
+
+      let stderr = '';
+      child.stderr.on('data', (data) => { stderr += data.toString(); });
+
+      child.on('exit', (code) => {
+        if (stderr.trim()) log.error(`[schedule] ${name} stderr:\n${stderr.trim()}`);
+        log.info(`[schedule] ${name} finished (exit ${code})`);
+        if (onDone) onDone();
+      });
+
+      child.on('error', (err) => {
+        log.error(`[schedule] ${name} error:`, err.message);
+        if (onDone) onDone();
+      });
+    }
+
+    scheduleIpc.init(log, runScheduleCommand);
+    startScheduler(log, runScheduleCommand);
+
+    // Re-index search if FTS table was recreated (e.g. tokenizer config change)
+    if (searchFtsRecreated) populateCacheViaWorker();
+
+    // Check for updates after launch
+    if (autoUpdater) {
+      setTimeout(() => autoUpdater.checkForUpdates().catch(e => log.error('[updater] check failed:', e?.message || String(e))), 5000);
+      // Re-check every 4 hours for long-running sessions
+      setInterval(() => autoUpdater.checkForUpdates().catch(e => log.error('[updater] check failed:', e?.message || String(e))), 4 * 60 * 60 * 1000);
+    }
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  }); // end app.whenReady
+} // end gotSingleInstanceLock else-branch
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

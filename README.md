@@ -121,7 +121,20 @@ Monitor all sessions in the background with status indicators.
 | **macOS** | [.dmg](https://github.com/aaaronmiller/switchboard/releases/latest) (Apple Silicon + Intel) |
 | **Windows** | [.exe installer](https://github.com/aaaronmiller/switchboard/releases/latest) (x64 + arm64) |
 
-### Linux Installation
+- **macOS**: `.dmg` (Apple Silicon & Intel)
+- **Windows**: `.exe` installer
+- **Linux**: `.AppImage`, `.deb`, or `.pacman` (Arch/Manjaro)
+
+## Prerequisites
+
+- **Node.js** 20+
+- **npm** 10+
+- Platform build tools for native modules:
+  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+  - **Linux**: `build-essential`, `python3` (`sudo apt install build-essential python3`)
+  - **Windows**: Visual Studio Build Tools or `npm install -g windows-build-tools`
+
+## Development Setup
 
 ```bash
 # Download latest AppImage
@@ -173,12 +186,31 @@ npm run build
 # Platform-specific
 npm run build:mac     # DMG + zip (arm64 + x64)
 npm run build:win     # NSIS installer (x64 + arm64)
-npm run build:linux   # AppImage + deb (x64 + arm64)
+npm run build:linux   # AppImage + deb + pacman (x64 + arm64)
 ```
 
 Output goes to `dist/`.
 
-### Project Structure
+### Building on Arch / Manjaro
+
+The `deb` and `pacman` targets are built via the `fpm` binary bundled by
+electron-builder, which links against `libcrypt.so.1`. Arch ships `libxcrypt`
+without that legacy ABI, so install the compat shim once:
+
+```bash
+sudo pacman -S libxcrypt-compat
+```
+
+`AppImage` builds without it.
+
+The pacman package is published as **`switchboard-doctly`** rather than
+`switchboard` because the Arch `extra` repo already ships a package named
+`switchboard` (elementary OS's Pantheon Control Center). Renaming avoids the
+file-conflict that would block installation alongside it. The app itself is
+still called Switchboard everywhere users see it — only the package identity
+changes. Uninstall later with `sudo pacman -R switchboard-doctly`.
+
+## Releasing
 
 ```
 .

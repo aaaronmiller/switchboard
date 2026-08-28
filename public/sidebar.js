@@ -1,13 +1,14 @@
 // --- Sidebar rendering ---
 // Depends on globals: sidebarContent, openSessions, activeSessionId, activePtyIds,
-// pendingSessions, sessionMap, lastActivityTime, sortedOrder, searchMatchIds,
+// pendingSessions, sessionMap, sortedOrder, searchMatchIds,
 // searchMatchProjectPaths, showStarredOnly, showRunningOnly, showTodayOnly,
 // visibleSessionCount, sessionMaxAgeDays, attentionSessions, responseReadySessions,
 // sessionBusyState, cachedProjects, cachedAllProjects, gridCards, gridViewActive (app.js)
 // Depends on: cleanDisplayName, formatDate, escapeHtml (utils.js), ICONS (icons.js),
 // showSession (terminal-manager.js), confirmAndStopSession, pollActiveSessions,
 // showNewSessionPopover, openSettingsViewer, showResumeSessionDialog,
-// showJsonlViewer, forkSession, openSession, loadProjects (app.js/dialogs.js)
+// showJsonlViewer, forkSession, openSession, loadProjects, markUnread,
+// clearUnread, refreshSidebar (app.js/dialogs.js)
 
 function slugId(slug) {
   return 'slug-' + slug.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -24,13 +25,10 @@ function buildSlugGroup(slug, sessions) {
   group.className = expanded ? 'slug-group' : 'slug-group collapsed';
   group.id = id;
 
-  const mostRecent = sessions.reduce((a, b) => {
-    const aTime = lastActivityTime.get(a.sessionId) || new Date(a.modified);
-    const bTime = lastActivityTime.get(b.sessionId) || new Date(b.modified);
-    return bTime > aTime ? b : a;
-  });
+  const mostRecent = sessions.reduce((a, b) =>
+    new Date(b.modified) > new Date(a.modified) ? b : a);
   const displayName = cleanDisplayName(mostRecent.name || mostRecent.aiTitle || mostRecent.summary || slug);
-  const mostRecentTime = lastActivityTime.get(mostRecent.sessionId) || new Date(mostRecent.modified);
+  const mostRecentTime = new Date(mostRecent.modified);
   const timeStr = formatDate(mostRecentTime);
 
   const header = document.createElement('div');
@@ -284,7 +282,7 @@ function renderProjects(projects, resort) {
     const header = document.createElement('div');
     header.className = 'project-header';
     header.id = 'ph-' + fId;
-    const shortName = project.projectPath.split('/').filter(Boolean).slice(-2).join('/');
+    const shortName = shortProjectPath(project.projectPath);
     header.innerHTML = `<span class="arrow">&#9660;</span> <span class="project-name">${shortName}</span>`;
 
     const scheduleBtn = document.createElement('button');
@@ -460,7 +458,7 @@ function rebindSidebarEvents(projects) {
         e.stopPropagation();
         const sessions = project.sessions.filter(s => !s.archived);
         if (sessions.length === 0) return;
-        const shortName = project.projectPath.split('/').filter(Boolean).slice(-2).join('/');
+        const shortName = shortProjectPath(project.projectPath);
         if (!confirm(`Archive all ${sessions.length} session${sessions.length > 1 ? 's' : ''} in ${shortName}?`)) return;
         for (const s of sessions) {
           if (activePtyIds.has(s.sessionId)) {
@@ -583,6 +581,19 @@ function rebindSidebarEvents(projects) {
       };
     }
 
+    const unreadBtn = item.querySelector('.session-unread-btn');
+    if (unreadBtn) {
+      unreadBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (responseReadySessions.has(session.sessionId)) {
+          clearUnread(session.sessionId);
+        } else {
+          markUnread(session.sessionId);
+        }
+        refreshSidebar();
+      };
+    }
+
     const launchConfigBtn = item.querySelector('.session-launch-config-btn');
     if (launchConfigBtn) {
       launchConfigBtn.onclick = (e) => {
@@ -652,7 +663,7 @@ function buildSessionItem(session) {
   if (sessionBusyState.get(session.sessionId)) item.classList.add('cli-busy');
   item.dataset.sessionId = session.sessionId;
 
-  const modified = lastActivityTime.get(session.sessionId) || new Date(session.modified);
+  const modified = new Date(session.modified);
   const timeStr = formatDate(modified);
   const displayName = cleanDisplayName(session.name || session.aiTitle || session.summary);
 
@@ -678,13 +689,19 @@ function buildSessionItem(session) {
   summaryEl.className = 'session-summary';
   summaryEl.textContent = displayName;
 
-  const idEl = document.createElement('div');
-  idEl.className = 'session-id';
-  idEl.textContent = session.sessionId;
-
+  // Compact meta line: time + msgs on the left, first UUID segment on the right
+  // (replaces the full-width session-id line). The 30s label ticker in app.js
+  // updates .session-time only, so it must stay its own span.
   const metaEl = document.createElement('div');
   metaEl.className = 'session-meta';
-  metaEl.textContent = timeStr + (session.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '');
+  const timeEl = document.createElement('span');
+  timeEl.className = 'session-time';
+  timeEl.textContent = timeStr + (session.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '');
+  const shortIdEl = document.createElement('span');
+  shortIdEl.className = 'session-short-id';
+  shortIdEl.title = session.sessionId;
+  shortIdEl.textContent = session.sessionId.split('-')[0];
+  metaEl.append(timeEl, shortIdEl);
 
   if (session.type === 'terminal') {
     const badge = document.createElement('span');
@@ -693,7 +710,6 @@ function buildSessionItem(session) {
     summaryEl.prepend(badge);
   }
   info.appendChild(summaryEl);
-  info.appendChild(idEl);
   info.appendChild(metaEl);
 
   // Action buttons container
@@ -725,7 +741,14 @@ function buildSessionItem(session) {
   launchConfigBtn.title = 'Resume with config';
   launchConfigBtn.innerHTML = ICONS.launchConfig(14);
 
+  const isUnread = responseReadySessions.has(session.sessionId);
+  const unreadBtn = document.createElement('button');
+  unreadBtn.className = 'session-unread-btn';
+  unreadBtn.title = isUnread ? 'Mark as read' : 'Mark as unread';
+  unreadBtn.innerHTML = isUnread ? ICONS.markRead(14) : ICONS.markUnread(14);
+
   actions.appendChild(stopBtn);
+  actions.appendChild(unreadBtn);
   if (session.type !== 'terminal') {
     actions.appendChild(forkBtn);
     actions.appendChild(jsonlBtn);

@@ -225,7 +225,6 @@ body { display: flex; flex-direction: column; }
 }
 
 #status-bar-activity {
-  margin-left: auto;
   white-space: nowrap;
   color: #8088ff;
 }
@@ -239,6 +238,52 @@ body { display: flex; flex-direction: column; }
   color: #888;
   font-style: italic;
 }
+
+#status-bar-quota {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  opacity: 0.95;
+  flex-shrink: 0;
+  margin-left: auto;
+  transition: opacity 0.15s;
+}
+/* One bar per limit window; count varies with what the usage API reports. */
+.quota-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.quota-label {
+  color: #b4b8d0;
+  white-space: nowrap;
+}
+#status-bar-quota:hover { opacity: 1; }
+.quota-track {
+  width: 34px;
+  height: 4px;
+  background: rgba(255,255,255,0.12);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.quota-fill {
+  display: block;
+  height: 100%;
+  background: #3ecf5a;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+.quota-fill.quota-mid { background: #e8a030; }
+.quota-fill.quota-high { background: #e05070; }
+.quota-pct {
+  color: #b4b8d0;
+  white-space: nowrap;
+}
+
+
 
 /* ========== SIDEBAR ========== */
 #sidebar {
@@ -1287,20 +1332,18 @@ body { display: flex; flex-direction: column; }
   margin-top: 3px;
 }
 
-.session-project-label {
-  font-size: 10px;
-  color: #666680;
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
-  letter-spacing: -0.01em;
+/* Sidebar session items: time on the left, short session id on the right */
+.session-item .session-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.dark .session-project-label,
-[data-theme="dark"] .session-project-label {
+.session-short-id {
+  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
   color: #5a5a72;
+  flex-shrink: 0;
 }
 
 /* ---- Session action buttons ---- */
@@ -1327,6 +1370,7 @@ body { display: flex; flex-direction: column; }
 .session-launch-config-btn,
 .session-fork-btn,
 .session-jsonl-btn,
+.session-unread-btn,
 .session-archive-btn {
   cursor: pointer;
   background: none;
@@ -1353,6 +1397,14 @@ body { display: flex; flex-direction: column; }
   color: #5a7a6a;
 }
 
+.session-unread-btn {
+  color: #4a7f96;
+}
+
+.session-item.response-ready .session-unread-btn {
+  color: #4fc3f7;
+}
+
 .session-archive-btn {
   color: #6068b0;
 }
@@ -1370,6 +1422,11 @@ body { display: flex; flex-direction: column; }
 .session-fork-btn:hover {
   color: #3ecf5a;
   background: rgba(62,207,90,0.1);
+}
+
+.session-unread-btn:hover {
+  color: #4fc3f7;
+  background: rgba(79,195,247,0.1);
 }
 
 .session-archive-btn:hover {

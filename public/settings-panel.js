@@ -31,7 +31,7 @@
     const globalSettings = isProject ? ((await window.api.getSetting('global')) || {}) : {};
 
     const shortName = isProject
-      ? projectPath.split('/').filter(Boolean).slice(-2).join('/')
+      ? shortProjectPath(projectPath)
       : 'Global';
 
     // Color customization values (from localStorage, UI-only prefs)
@@ -99,11 +99,10 @@
           </div>
           <div class="settings-field-control">
             <select class="settings-select" id="sv-perm-mode" ${fieldDisabled('permissionMode')}>
-              <option value="">Default (none)</option>
-              <option value="acceptEdits" ${permModeValue === 'acceptEdits' ? 'selected' : ''}>Accept Edits</option>
-              <option value="plan" ${permModeValue === 'plan' ? 'selected' : ''}>Plan Mode</option>
-              <option value="dontAsk" ${permModeValue === 'dontAsk' ? 'selected' : ''}>Don't Ask</option>
-              <option value="bypassPermissions" ${permModeValue === 'bypassPermissions' ? 'selected' : ''}>Bypass</option>
+              ${PERMISSION_MODES.map(m => m.value === null
+                ? '<option value="">Default (none)</option>'
+                : `<option value="${m.value}" ${permModeValue === m.value ? 'selected' : ''}>${escapeHtml(m.label)}</option>`
+              ).join('')}
             </select>
           </div>
         </div>
