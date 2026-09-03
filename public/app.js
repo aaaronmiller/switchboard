@@ -262,11 +262,6 @@ let searchMatchProjectPaths = null; // Set<string> of project paths matched by n
 const attentionSessions = new Set(); // sessions needing user action (OSC 9)
 const responseReadySessions = new Set(); // Claude finished, user hasn't looked (terminal state)
 const sessionBusyState = new Map(); // sessionId → boolean (currently active)
-const errorSessions = new Set(); // sessions that errored out / API issues / non-zero exit
-const lastActivityTime = new Map(); // sessionId → Date of last terminal output
-
-// Noise patterns — these don't count as activity
-const activityNoiseRe = /file-history-snapshot|^\s*$/;
 
 // Central activity dispatcher
 function setActivity(sessionId, active) {
@@ -303,27 +298,25 @@ function setActivity(sessionId, active) {
   }
 }
 
-// Terminal output activity — updates lastActivityTime only, busy state driven by backend
-// Patterns that indicate API errors, rate limits, auth failures, or crashes
-const errorPatterns = /overloaded|rate.limit|exceeded|api.error|unauthorized|authentication.failed|invalid.api.key|quota|529|503|502|500.*error|credit|billing|internal.server.error/i;
-
-function trackActivity(sessionId, data) {
-  if (activityNoiseRe.test(data)) return;
-  lastActivityTime.set(sessionId, new Date());
-
-  // Detect API/auth errors in terminal output
-  if (errorPatterns.test(data)) {
-    errorSessions.add(sessionId);
-    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-    if (item) item.classList.add('session-error');
-  }
-}
-
 function clearUnread(sessionId) {
   responseReadySessions.delete(sessionId);
   const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
   if (item) {
     item.classList.remove('response-ready');
+  }
+}
+
+// User-initiated: put a session back into the response-ready state, as if
+// Claude had just finished a turn the user hasn't looked at yet. Mirrors the
+// busy→idle transition in setActivity so the sidebar re-renders consistently.
+function markUnread(sessionId) {
+  if (responseReadySessions.has(sessionId)) return;
+  responseReadySessions.add(sessionId);
+  sessionBusyState.set(sessionId, false);
+  const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
+  if (item) {
+    item.classList.remove('cli-busy');
+    item.classList.add('response-ready');
   }
 }
 
@@ -377,10 +370,6 @@ window.api.onTerminalData((sessionId, data) => {
       scheduleFlush(sessionId, buf);
     }
   }
-  // Update last activity time (noise-filtered)
-  trackActivity(sessionId, data);
-  // Feed terminal output to scheduler (wait-for-output, condition checks)
-  if (typeof schedulerOnTerminalData === 'function') schedulerOnTerminalData(sessionId, data);
 });
 
 window.api.onSessionDetected((tempId, realId) => {
@@ -394,8 +383,22 @@ window.api.onSessionDetected((tempId, realId) => {
   openSessions.delete(tempId);
   openSessions.set(realId, entry);
 
+  // Re-key file panel state for the new session ID
+  if (typeof rekeyFilePanelState === 'function') rekeyFilePanelState(tempId, realId);
+
+  // Re-key the pending entry so the sidebar row survives until the DB has real
+  // data. Without this the temp id keeps being re-injected by loadProjects and
+  // the session appears twice.
+  const pendingEntry = pendingSessions.get(tempId);
+  pendingSessions.delete(tempId);
+  if (pendingEntry) {
+    pendingEntry.sessionId = realId;
+    pendingSessions.set(realId, pendingEntry);
+  }
+  sessionMap.delete(tempId);
+  sessionMap.set(realId, entry.session);
+
   terminalHeaderId.textContent = realId;
-  terminalHeaderName.textContent = 'New session';
 
   // Refresh sidebar to show the new session, then select it
   loadProjects().then(() => {
@@ -445,24 +448,40 @@ window.api.onSessionForked((oldId, newId) => {
   pollActiveSessions();
 });
 
-window.api.onProcessExited((sessionId, exitCode) => {
+window.api.onProcessExited((sessionId, exitCode, signal, userStopped) => {
   const entry = openSessions.get(sessionId);
   const session = sessionMap.get(sessionId);
-  if (entry) {
-    entry.closed = true;
+  if (entry) entry.closed = true;
+
+  const intentional = wasIntentionalExit({ exitCode, signal, userStopped });
+
+  // A Claude session that died stays mounted behind an exit banner so the user
+  // can read the error it printed (claude / devbox / shell stderr) — without
+  // this, a fast-failing pre-launch command tears the terminal down before the
+  // error is readable. Cleanup is deferred to openSession, which destroys the
+  // closed entry when the user re-clicks the session. The sidebar row stays
+  // put too, so there's somewhere to relaunch from.
+  if (session?.type !== 'terminal' && !intentional) {
+    if (entry) {
+      try {
+        const reason = signal ? `signal ${signal}` : `code ${exitCode}`;
+        entry.terminal.write(`\r\n\x1b[33m── session exited (${reason}) ──\x1b[0m\r\n`);
+      } catch {}
+    }
+    // A pending session that died never wrote a .jsonl, so loadProjects keeps
+    // re-injecting it. Mark it dead so it stops sorting as a running session.
+    const pending = pendingSessions.get(sessionId);
+    if (pending) pending.exited = true;
+    if (gridViewActive) {
+      gridViewerCount.textContent = gridCards.size + ' session' + (gridCards.size !== 1 ? 's' : '');
+    }
+    pollActiveSessions();
+    return;
   }
 
-  // Mark as errored if non-zero exit (crash, API failure, etc.)
-  if (exitCode !== 0 && exitCode != null) {
-    errorSessions.add(sessionId);
-    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-    if (item) item.classList.add('session-error');
-  }
-
-  // Clean up terminal UI on exit (uses destroySession to handle grid cards too)
-  if (entry) {
-    destroySession(sessionId);
-  }
+  // Everything else — plain terminals (always ephemeral) and Claude sessions
+  // the user ended themselves — goes away.
+  if (entry) destroySession(sessionId);
   if (gridViewActive) {
     gridViewerCount.textContent = gridCards.size + ' session' + (gridCards.size !== 1 ? 's' : '');
   } else if (activeSessionId === sessionId) {
@@ -472,8 +491,10 @@ window.api.onProcessExited((sessionId, exitCode) => {
     placeholder.style.display = '';
   }
 
-  // Plain terminal sessions: remove from sidebar entirely (ephemeral)
-  if (session?.type === 'terminal') {
+  // Drop the sidebar row for sessions with nothing to reopen: plain terminals,
+  // and Claude sessions still pending (no .jsonl was ever written). A session
+  // that produced real data keeps its row and reloads from the DB.
+  if (session?.type === 'terminal' || pendingSessions.has(sessionId)) {
     pendingSessions.delete(sessionId);
     for (const projList of [cachedProjects, cachedAllProjects]) {
       for (const proj of projList) {
@@ -482,40 +503,26 @@ window.api.onProcessExited((sessionId, exitCode) => {
     }
     sessionMap.delete(sessionId);
     refreshSidebar();
-    pollActiveSessions();
-    return;
-  }
-
-  // Clean up no-op pending sessions (never created a .jsonl)
-  if (pendingSessions.has(sessionId)) {
-    pendingSessions.delete(sessionId);
-    // Remove from cached project data
-    for (const projList of [cachedProjects, cachedAllProjects]) {
-      for (const proj of projList) {
-        proj.sessions = proj.sessions.filter(s => s.sessionId !== sessionId);
-      }
-    }
-    sessionMap.delete(sessionId);
-    refreshSidebar();
+    // The pending marker can outlive the .jsonl by a beat (reconciliation only
+    // runs in loadProjects), so re-sync: a session that did write real data
+    // gets its row back from the DB rather than vanishing until the next watch.
+    if (session?.type !== 'terminal') loadProjects();
   }
 
   pollActiveSessions();
 });
 
 // --- Terminal notifications (iTerm2 OSC 9 — "needs attention") ---
-window.api.onTerminalNotification((sessionId, message) => {
-  // Only mark as needing attention for "attention" messages, not "waiting for input"
-  // Matches all four CLI notification types:
-  // 1. "Claude Code needs your attention"         → attention
-  // 2. "Claude Code needs your approval for the plan" → approval, needs your
-  // 3. "Claude needs your permission to use {tool}"   → permission, needs your
-  // 4. "Claude Code wants to enter plan mode"         → wants to enter
-  if (/attention|approval|permission|needs your|wants to enter/i.test(message) && sessionId !== activeSessionId) {
+window.api.onTerminalNotification((sessionId, message, kind) => {
+  // `kind` is classified by the session's harness in main, since the wording is
+  // per-CLI: Claude says "needs your permission to use {tool}", codex says
+  // "Approval requested: <command>".
+  if (kind === 'attention' && sessionId !== activeSessionId) {
     attentionSessions.add(sessionId);
     const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
     if (item) item.classList.add('needs-attention');
-  } else if (/waiting for your input/i.test(message)) {
-    // "Claude is waiting for your input" — delayed idle notification, mark response-ready
+  } else if (kind === 'idle') {
+    // The turn finished — mark the session as having a response to read.
     setActivity(sessionId, false);
   }
 
@@ -1262,7 +1269,7 @@ searchInput.addEventListener('input', () => {
         if (searchTitlesOnly) {
           const lowerQ = query.toLowerCase();
           for (const p of cachedAllProjects) {
-            const shortName = p.projectPath.split('/').filter(Boolean).slice(-2).join('/');
+            const shortName = shortProjectPath(p.projectPath);
             if (shortName.toLowerCase().includes(lowerQ)) {
               if (!searchMatchProjectPaths) searchMatchProjectPaths = new Set();
               searchMatchProjectPaths.add(p.projectPath);
@@ -1290,6 +1297,37 @@ searchInput.addEventListener('input', () => {
 });
 
 // --- Stop session helper ---
+/**
+ * A row for a session that never produced a transcript, and is not running.
+ *
+ * These exist so a session that died on launch can be relaunched or read, but
+ * nothing on disk backs them — so nothing else can ever clear them, and without
+ * a way out they sit in the sidebar for good.
+ */
+function isDismissibleSession(sessionId) {
+  return pendingSessions.has(sessionId) && !activePtyIds.has(sessionId);
+}
+
+/** Drop such a row. Purely renderer state, so it cannot come back. */
+function dismissSession(sessionId) {
+  pendingSessions.delete(sessionId);
+  sessionMap.delete(sessionId);
+  for (const projList of [cachedProjects, cachedAllProjects]) {
+    for (const proj of projList) {
+      proj.sessions = proj.sessions.filter(s => s.sessionId !== sessionId);
+    }
+  }
+  if (openSessions.has(sessionId)) destroySession(sessionId);
+  if (activeSessionId === sessionId) {
+    setActiveSession(null);
+    terminalHeader.style.display = 'none';
+    placeholder.style.display = '';
+  }
+  attentionSessions.delete(sessionId);
+  responseReadySessions.delete(sessionId);
+  refreshSidebar();
+}
+
 async function confirmAndStopSession(sessionId) {
   if (!confirm('Stop this session?')) return;
   await window.api.stopSession(sessionId);
@@ -1335,6 +1373,22 @@ terminalDetachBtn.addEventListener('click', async () => {
 });
 
 // --- Poll for active PTY sessions ---
+// Adaptive cadence: poll fast (3s) only while PTYs are running; when idle, back
+// off to 30s. Every renderer path that starts a session (launchNewSession,
+// openSession, launchTerminalSession, onSessionDetected/Forked) calls
+// pollActiveSessions() explicitly, which re-arms the fast cadence immediately.
+// The 30s idle floor still catches sessions started outside the renderer
+// (scheduler-spawned PTYs, other windows) within at most 30s.
+const POLL_FAST_MS = 3000;
+const POLL_IDLE_MS = 30000;
+let pollTimer = null;
+
+function scheduleActiveSessionsPoll() {
+  if (pollTimer) clearTimeout(pollTimer);
+  const delay = activePtyIds.size > 0 ? POLL_FAST_MS : POLL_IDLE_MS;
+  pollTimer = setTimeout(pollActiveSessions, delay);
+}
+
 async function pollActiveSessions() {
   try {
     const sessions = await window.api.getActiveSessions();
@@ -1348,6 +1402,7 @@ async function pollActiveSessions() {
       loadMetaView('_active');
     }
   } catch {}
+  scheduleActiveSessionsPoll();
 }
 
 function updateRunningIndicators() {
@@ -1405,18 +1460,18 @@ function updatePtyTitle() {
   terminalHeaderPtyTitle.style.display = title ? '' : 'none';
 }
 
-setInterval(pollActiveSessions, 3000);
+scheduleActiveSessionsPoll();
 
 // Refresh sidebar timeago labels every 30s so "just now" ticks forward
 setInterval(() => {
-  for (const [sessionId, time] of lastActivityTime) {
+  for (const [sessionId, session] of sessionMap) {
+    if (!session.modified) continue;
     const item = document.getElementById('si-' + sessionId);
     if (!item) continue;
-    const meta = item.querySelector('.session-meta');
-    if (!meta) continue;
-    const session = sessionMap.get(sessionId);
-    const msgSuffix = session?.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '';
-    meta.textContent = formatDate(time) + msgSuffix;
+    const timeEl = item.querySelector('.session-time');
+    if (!timeEl) continue;
+    const msgSuffix = session.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '';
+    timeEl.textContent = formatDate(new Date(session.modified)) + msgSuffix;
   }
 }, 30000);
 
@@ -1508,1043 +1563,19 @@ function folderId(projectPath) {
   return 'project-' + projectPath.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
-function buildSlugGroup(slug, sessions) {
-  const group = document.createElement('div');
-  const id = slugId(slug);
-  const expanded = getExpandedSlugs().has(id);
-  group.className = expanded ? 'slug-group' : 'slug-group collapsed';
-  group.id = id;
-
-  const mostRecent = sessions.reduce((a, b) => {
-    const aTime = lastActivityTime.get(a.sessionId) || new Date(a.modified);
-    const bTime = lastActivityTime.get(b.sessionId) || new Date(b.modified);
-    return bTime > aTime ? b : a;
-  });
-  const displayName = cleanDisplayName(mostRecent.name || mostRecent.summary || slug);
-  const mostRecentTime = lastActivityTime.get(mostRecent.sessionId) || new Date(mostRecent.modified);
-  const timeStr = formatDate(mostRecentTime);
-
-  const header = document.createElement('div');
-  header.className = 'slug-group-header';
-
-  const row = document.createElement('div');
-  row.className = 'slug-group-row';
-
-  const expand = document.createElement('span');
-  expand.className = 'slug-group-expand';
-  expand.innerHTML = '<span class="arrow">&#9654;</span>';
-
-  const info = document.createElement('div');
-  info.className = 'slug-group-info';
-
-  const nameEl = document.createElement('div');
-  nameEl.className = 'slug-group-name';
-  nameEl.textContent = displayName;
-
-  const hasRunning = sessions.some(s => activePtyIds.has(s.sessionId));
-
-  const meta = document.createElement('div');
-  meta.className = 'slug-group-meta';
-  meta.innerHTML = `<span class="slug-group-dot${hasRunning ? ' running' : ''}"></span><span class="slug-group-count">${sessions.length} sessions</span> ${escapeHtml(timeStr)}`;
-
-  const archiveSlugBtn = document.createElement('button');
-  archiveSlugBtn.className = 'slug-group-archive-btn';
-  archiveSlugBtn.title = 'Archive all sessions in group';
-  archiveSlugBtn.innerHTML = ICONS.archive(14);
-
-  info.appendChild(nameEl);
-  info.appendChild(meta);
-  row.appendChild(expand);
-  row.appendChild(info);
-  row.appendChild(archiveSlugBtn);
-  header.appendChild(row);
-
-  const sessionsContainer = document.createElement('div');
-  sessionsContainer.className = 'slug-group-sessions';
-
-  const promoted = [];
-  const rest = [];
-  for (const session of sessions) {
-    if (activePtyIds.has(session.sessionId)) {
-      promoted.push(session);
-    } else {
-      rest.push(session);
-    }
-  }
-
-  if (promoted.length > 0) {
-    group.classList.add('has-promoted');
-    for (const session of promoted) {
-      sessionsContainer.appendChild(buildSessionItem(session));
-    }
-    if (rest.length > 0) {
-      const moreBtn = document.createElement('div');
-      moreBtn.className = 'slug-group-more';
-      moreBtn.id = 'sgm-' + id;
-      moreBtn.textContent = `+ ${rest.length} more`;
-
-      const olderDiv = document.createElement('div');
-      olderDiv.className = 'slug-group-older';
-      olderDiv.id = 'sgo-' + id;
-      for (const session of rest) {
-        olderDiv.appendChild(buildSessionItem(session));
-      }
-
-      sessionsContainer.appendChild(moreBtn);
-      sessionsContainer.appendChild(olderDiv);
-    }
-  } else {
-    for (const session of sessions) {
-      sessionsContainer.appendChild(buildSessionItem(session));
-    }
-  }
-
-  group.appendChild(header);
-  group.appendChild(sessionsContainer);
-  return group;
-}
-
-function renderProjects(projects, resort) {
-  const newSidebar = document.createElement('div');
-
-  // Sort project groups using sortedOrder as source of truth
-  if (!resort && sortedOrder.length > 0) {
-    const orderIndex = new Map(sortedOrder.map((e, i) => [e.projectPath, i]));
-    projects = [...projects].sort((a, b) => {
-      const aPos = orderIndex.get(a.projectPath);
-      const bPos = orderIndex.get(b.projectPath);
-      if (aPos !== undefined && bPos !== undefined) return aPos - bPos;
-      if (aPos === undefined && bPos !== undefined) return -1;
-      if (aPos !== undefined && bPos === undefined) return 1;
-      return 0;
-    });
-  }
-  // projects are now in the correct order (data order for resort, preserved order otherwise)
-
-  const newSortedOrder = [];
-
-  for (const project of projects) {
-    // === STEP 1: Filter ===
-    let filtered = project.sessions;
-    if (showStarredOnly) {
-      filtered = filtered.filter(s => s.starred);
-    }
-    if (showRunningOnly) {
-      filtered = filtered.filter(s => activePtyIds.has(s.sessionId));
-    }
-    if (showTodayOnly) {
-      const now = new Date();
-      const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      filtered = filtered.filter(s => {
-        if (!s.modified) return false;
-        const d = new Date(s.modified);
-        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` === todayStr;
-      });
-    }
-    // Time range filter (applies to all views including pinned/active)
-    if (activeTimeFilter > 0) {
-      filtered = filterSessionsByDate(filtered, activeTimeFilter);
-    }
-
-    // === STEP 1.5: User-selected sort (applies after filters, before priority grouping) ===
-    filtered = sortSessions(filtered, activeSortMode);
-
-    const anyFilterActive = showStarredOnly || showRunningOnly || showTodayOnly || activeTimeFilter > 0 || searchMatchIds !== null;
-    if (filtered.length === 0 && !project._projectMatchedOnly && (project.sessions.length > 0 || anyFilterActive)) continue;
-    const fId = folderId(project.projectPath);
-
-    // === STEP 2: Priority sort ===
-    // Priority: pinned+running > running > pinned > rest (within each tier, use user sort mode)
-    filtered = [...filtered].sort((a, b) => {
-      const aRunning = activePtyIds.has(a.sessionId) || pendingSessions.has(a.sessionId);
-      const bRunning = activePtyIds.has(b.sessionId) || pendingSessions.has(b.sessionId);
-      const aPri = (a.starred && aRunning ? 3 : aRunning ? 2 : a.starred ? 1 : 0);
-      const bPri = (b.starred && bRunning ? 3 : bRunning ? 2 : b.starred ? 1 : 0);
-      if (aPri !== bPri) return bPri - aPri;
-      // Within same priority tier, use user-selected sort
-      switch (activeSortMode) {
-        case 'date-desc':
-          return new Date(b.endTime || b.startTime || 0) - new Date(a.endTime || a.startTime || 0);
-        case 'date-asc':
-          return new Date(a.startTime || a.endTime || 0) - new Date(b.startTime || b.endTime || 0);
-        case 'size-desc':
-          return (b.size || 0) - (a.size || 0);
-        case 'size-asc':
-          return (a.size || 0) - (b.size || 0);
-        case 'msgs-desc':
-          return (b.messageCount || b.turnCount || 0) - (a.messageCount || a.turnCount || 0);
-        case 'project':
-          return (a.projectPath || '').localeCompare(b.projectPath || '');
-        case 'git': {
-          const gitOrder = { ahead: 0, current: 1, behind: 2, dirty: 3, unknown: 4 };
-          return (gitOrder[a.gitStatus || 'unknown'] ?? 4) - (gitOrder[b.gitStatus || 'unknown'] ?? 4);
-        }
-        default:
-          return new Date(b.modified) - new Date(a.modified);
-      }
-    });
-
-    // === STEP 3: Slug grouping ===
-    const slugMap = new Map(); // slug → sessions[]
-    const ungrouped = [];
-    for (const session of filtered) {
-      if (session.slug) {
-        if (!slugMap.has(session.slug)) slugMap.set(session.slug, []);
-        slugMap.get(session.slug).push(session);
-      } else {
-        ungrouped.push(session);
-      }
-    }
-
-    // Build render items (slug group = 1 item)
-    const allItems = [];
-    for (const session of ungrouped) {
-      const isRunning = activePtyIds.has(session.sessionId) || pendingSessions.has(session.sessionId);
-      allItems.push({
-        sortTime: new Date(session.modified).getTime(),
-        pinned: !!session.starred, running: isRunning,
-        element: buildSessionItem(session),
-        session, isSlug: false,
-      });
-    }
-    for (const [slug, sessions] of slugMap) {
-      const mostRecentTime = Math.max(...sessions.map(s => new Date(s.modified).getTime()));
-      const hasRunning = sessions.some(s => activePtyIds.has(s.sessionId) || pendingSessions.has(s.sessionId));
-      const hasPinned = sessions.some(s => s.starred);
-      const element = sessions.length === 1 ? buildSessionItem(sessions[0]) : buildSlugGroup(slug, sessions);
-      allItems.push({
-        session: sessions.length === 1 ? sessions[0] : null,
-        isSlug: sessions.length > 1,
-        sortTime: mostRecentTime,
-        pinned: hasPinned, running: hasRunning,
-        element,
-      });
-    }
-
-    // === STEP 4: Sort render items ===
-    const prevEntry = sortedOrder.find(e => e.projectPath === project.projectPath);
-    if (resort || !prevEntry) {
-      // Full sort by priority + modified time
-      allItems.sort((a, b) => {
-        const aPri = (a.pinned && a.running ? 3 : a.running ? 2 : a.pinned ? 1 : 0);
-        const bPri = (b.pinned && b.running ? 3 : b.running ? 2 : b.pinned ? 1 : 0);
-        if (aPri !== bPri) return bPri - aPri;
-        return b.sortTime - a.sortTime;
-      });
-    } else {
-      // Preserve last-sorted order; new items go to top
-      const orderIndex = new Map(prevEntry.itemIds.map((id, i) => [id, i]));
-      allItems.sort((a, b) => {
-        const aPos = orderIndex.get(a.element.id);
-        const bPos = orderIndex.get(b.element.id);
-        if (aPos !== undefined && bPos !== undefined) return aPos - bPos;
-        if (aPos === undefined && bPos !== undefined) return -1;
-        if (aPos !== undefined && bPos === undefined) return 1;
-        return b.sortTime - a.sortTime;
-      });
-    }
-    // Save current order for this project
-    newSortedOrder.push({ projectPath: project.projectPath, itemIds: allItems.map(item => item.element.id) });
-
-    // === STEP 5: Split items for display ===
-    // Two modes:
-    //  • Flat (search / star / running / today): show every matching item, as before.
-    //  • Card model (default project view): show running + pinned + slug-groups
-    //    EXPANDED, and collapse the remaining dormant sessions into a per-project
-    //    pulldown — so each project reads as a single card unless work is running.
-    const flatMode = searchMatchIds !== null || showStarredOnly || showRunningOnly || showTodayOnly;
-    let visible = [];
-    let older = [];
-    let dormant = []; // card-model pulldown contents
-    if (flatMode) {
-      visible = allItems;
-    } else {
-      for (const item of allItems) {
-        if (item.running || item.pinned || item.isSlug) visible.push(item);
-        else dormant.push(item);
-      }
-      // A lone dormant session with nothing expanded renders inline (no pulldown).
-      if (visible.length === 0 && dormant.length === 1) {
-        visible = dormant;
-        dormant = [];
-      }
-    }
-
-    // === STEP 6: Build DOM ===
-    const group = document.createElement('div');
-    group.className = 'project-group';
-    group.id = fId;
-
-    // Per-CLI color accent for the card. In a per-CLI view use that CLI's color;
-    // otherwise color by the agent that owns the project's newest session.
-    const cardAgent = (activeAgent && !activeAgent.startsWith('_'))
-      ? activeAgent
-      : (filtered[0]?.agent || sessionAgentMap.get(filtered[0]?.sessionId) || 'claude');
-    const cardAgentColor = AGENT_COLORS[cardAgent];
-    if (cardAgentColor) {
-      group.classList.add('has-agent-color');
-      group.dataset.agent = cardAgent;
-      group.style.setProperty('--agent-color', cardAgentColor);
-    }
-
-    const header = document.createElement('div');
-    header.className = 'project-header';
-    header.id = 'ph-' + fId;
-    const shortName = project.projectPath.split('/').filter(Boolean).slice(-2).join('/');
-    header.innerHTML = `<span class="arrow">&#9660;</span> <span class="project-name">${shortName}</span>`;
-
-    const settingsBtn = document.createElement('button');
-    settingsBtn.className = 'project-settings-btn';
-    settingsBtn.title = 'Project settings';
-    settingsBtn.innerHTML = ICONS.gear(16);
-    header.appendChild(settingsBtn);
-
-    const archiveGroupBtn = document.createElement('button');
-    archiveGroupBtn.className = 'project-archive-btn';
-    archiveGroupBtn.title = 'Archive all sessions';
-    archiveGroupBtn.innerHTML = ICONS.archive(18);
-    header.appendChild(archiveGroupBtn);
-
-    const newBtn = document.createElement('button');
-    newBtn.className = 'project-new-btn';
-    newBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="2" x2="6" y2="10"/><line x1="2" y1="6" x2="10" y2="6"/></svg>';
-    newBtn.title = 'New session';
-    header.appendChild(newBtn);
-
-    // Project card metadata row (path · last-modified · git branch/status).
-    // Rendered with placeholders here; filled asynchronously after morphdom by
-    // enrichProjectCards(). Sits between header and sessions so it stays visible
-    // even when the group is collapsed.
-    const metaRow = document.createElement('div');
-    metaRow.className = 'project-card-meta';
-    metaRow.id = 'pcm-' + fId;
-    metaRow.dataset.projectPath = project.projectPath;
-    metaRow.innerHTML = `
-      <span class="pcm-path" title="${escapeHtml(project.projectPath)}">${escapeHtml(project.projectPath)}</span>
-      <span class="pcm-modified" title="Most recently modified file in project"></span>
-      <span class="pcm-git"></span>`;
-
-    const sessionsList = document.createElement('div');
-    sessionsList.className = 'project-sessions';
-    sessionsList.id = 'sessions-' + fId;
-
-    for (const item of visible) {
-      sessionsList.appendChild(item.element);
-    }
-
-    // Card-model pulldown for dormant (non-running, non-pinned) sessions.
-    if (dormant.length > 0) {
-      const wrap = document.createElement('div');
-      wrap.className = 'session-pulldown-wrap';
-      const select = document.createElement('select');
-      select.className = 'session-pulldown';
-      select.id = 'pull-' + fId;
-      const ph = document.createElement('option');
-      ph.value = '';
-      ph.textContent = `${dormant.length} session${dormant.length > 1 ? 's' : ''} — open…`;
-      select.appendChild(ph);
-      for (const it of dormant) {
-        if (!it.session) continue;
-        const opt = document.createElement('option');
-        opt.value = it.session.sessionId;
-        const d = formatDate(new Date(it.session.modified));
-        const name = cleanDisplayName(it.session.name || it.session.summary) || 'session';
-        opt.textContent = `${d} · ${name}`.slice(0, 80);
-        select.appendChild(opt);
-      }
-      wrap.appendChild(select);
-      sessionsList.appendChild(wrap);
-    }
-
-    if (older.length > 0) {
-      const moreBtn = document.createElement('div');
-      moreBtn.className = 'sessions-more-toggle';
-      moreBtn.id = 'older-' + fId;
-      moreBtn.textContent = `+ ${older.length} older`;
-      const olderList = document.createElement('div');
-      olderList.className = 'sessions-older';
-      olderList.id = 'older-list-' + fId;
-      olderList.style.display = 'none';
-      for (const item of older) {
-        olderList.appendChild(item.element);
-      }
-      sessionsList.appendChild(moreBtn);
-      sessionsList.appendChild(olderList);
-    }
-
-    // Auto-collapse if most recent session is older than 5 days, or project matched with no sessions
-    if (project._projectMatchedOnly) {
-      header.classList.add('collapsed');
-    } else if (searchMatchIds === null && !showStarredOnly && !showRunningOnly) {
-      const mostRecent = filtered[0]?.modified;
-      if (mostRecent && (Date.now() - new Date(mostRecent)) > sessionMaxAgeDays * 86400000) {
-        header.classList.add('collapsed');
-      }
-    }
-
-    group.appendChild(header);
-    group.appendChild(metaRow);
-    group.appendChild(sessionsList);
-    newSidebar.appendChild(group);
-  }
-
-  // Re-apply active state
-  if (activeSessionId) {
-    const activeItem = newSidebar.querySelector(`[data-session-id="${activeSessionId}"]`);
-    if (activeItem) activeItem.classList.add('active');
-  }
-
-  morphdom(sidebarContent, newSidebar, {
-    childrenOnly: true,
-    onBeforeElUpdated(fromEl, toEl) {
-      // Skip updating session items that have an active rename input
-      if (fromEl.classList.contains('session-item') && fromEl.querySelector('.session-rename-input')) {
-        return false;
-      }
-      if (fromEl.classList.contains('project-header')) {
-        if (fromEl.classList.contains('collapsed')) {
-          toEl.classList.add('collapsed');
-        } else {
-          toEl.classList.remove('collapsed');
-        }
-      }
-      if (fromEl.classList.contains('slug-group')) {
-        if (fromEl.classList.contains('collapsed')) {
-          toEl.classList.add('collapsed');
-        } else {
-          toEl.classList.remove('collapsed');
-        }
-      }
-      if (fromEl.classList.contains('sessions-older') && fromEl.style.display !== 'none') {
-        toEl.style.display = '';
-      }
-      if (fromEl.classList.contains('sessions-more-toggle') && fromEl.classList.contains('expanded')) {
-        toEl.classList.add('expanded');
-        toEl.textContent = '- hide older';
-      }
-      if (fromEl.classList.contains('slug-group-older') && fromEl.style.display !== 'none') {
-        toEl.style.display = '';
-      }
-      if (fromEl.classList.contains('slug-group-more') && fromEl.classList.contains('expanded')) {
-        toEl.classList.add('expanded');
-      }
-      return true;
-    },
-    getNodeKey(node) {
-      return node.id || undefined;
-    }
-  });
-
-  // Save the full sorted order (project order + item order) as source of truth
-  sortedOrder = newSortedOrder;
-
-  rebindSidebarEvents(projects);
-
-  // Restore terminal focus after morphdom DOM updates, but not if the user is
-  // interacting with an input/textarea (search box, rename input, dialogs, etc.)
-  const ae = document.activeElement;
-  const isUserTyping = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable || ae.closest('.modal-overlay'));
-  if (activeSessionId && openSessions.has(activeSessionId) && !isUserTyping) {
-    openSessions.get(activeSessionId).terminal.focus();
-  }
-}
-
-// Frontend cache for project card metadata (backend already caches; this avoids
-// redundant IPC on every morphdom refresh).
-const _projectMetaCache = new Map(); // projectPath -> { data, ts }
-const PROJECT_META_FE_TTL = 30_000;
-
-// Lightweight transient status for card git actions (reuses the status bar).
-function cardStatus(text, type) {
-  try {
-    if (!statusBarActivity) return;
-    statusBarActivity.textContent = text;
-    statusBarActivity.className = type === 'error' ? 'status-error' : (type === 'done' ? 'status-done' : '');
-    setTimeout(() => {
-      if (statusBarActivity.textContent === text) {
-        statusBarActivity.textContent = '';
-        statusBarActivity.className = '';
-      }
-    }, 3000);
-  } catch {}
-}
-
-function _renderCardGit(gitEl, projectPath, git) {
-  gitEl.innerHTML = '';
-  if (!git || !git.branch) return;
-  // Branch chip — click to switch branch (lazy-loads branch list).
-  const branchChip = document.createElement('button');
-  branchChip.className = 'pcm-branch';
-  branchChip.title = 'Switch branch';
-  branchChip.innerHTML = `<span class="pcm-branch-icon">&#9095;</span> ${escapeHtml(git.branch)}`;
-  branchChip.onclick = async (e) => {
-    e.stopPropagation();
-    const res = await window.api.gitListBranches(projectPath);
-    if (!res.ok || !res.branches?.length) return;
-    const sel = document.createElement('select');
-    sel.className = 'pcm-branch-select';
-    for (const b of res.branches) {
-      const opt = document.createElement('option');
-      opt.value = b; opt.textContent = b;
-      if (b === res.current) opt.selected = true;
-      sel.appendChild(opt);
-    }
-    sel.onclick = (ev) => ev.stopPropagation();
-    sel.onchange = async () => {
-      const target = sel.value;
-      const out = await window.api.gitCheckoutBranch(projectPath, target, {});
-      if (out.ok) {
-        cardStatus(`Switched to ${target}`, 'done');
-        _projectMetaCache.delete(projectPath);
-        refreshSidebar({ resort: false });
-      } else if (out.dirty) {
-        cardStatus(`Can't switch: uncommitted changes in ${projectPath.split('/').pop()}`, 'error');
-        _renderCardGit(gitEl, projectPath, git); // restore chip
-      } else {
-        cardStatus(out.error || 'Checkout failed', 'error');
-        _renderCardGit(gitEl, projectPath, git);
-      }
-    };
-    branchChip.replaceWith(sel);
-    sel.focus();
-  };
-  gitEl.appendChild(branchChip);
-
-  if (git.dirty) {
-    const b = document.createElement('span');
-    b.className = 'pcm-badge pcm-dirty'; b.title = 'Uncommitted changes'; b.textContent = '●';
-    gitEl.appendChild(b);
-  }
-  if (git.ahead > 0) {
-    const b = document.createElement('span');
-    b.className = 'pcm-badge pcm-ahead'; b.title = `${git.ahead} commit(s) ahead of upstream`; b.textContent = `↑${git.ahead}`;
-    gitEl.appendChild(b);
-  }
-  if (git.behind > 0) {
-    // The cloud-ahead signifier: a "pull" affordance that runs git pull --ff-only.
-    const pull = document.createElement('button');
-    pull.className = 'pcm-badge pcm-pull';
-    pull.title = `${git.behind} commit(s) on the remote not in your folder — click to pull (fast-forward)`;
-    pull.textContent = `⇩${git.behind}`;
-    pull.onclick = async (e) => {
-      e.stopPropagation();
-      pull.disabled = true;
-      const out = await window.api.gitPull(projectPath);
-      if (out.ok) {
-        cardStatus('Pulled latest changes', 'done');
-        _projectMetaCache.delete(projectPath);
-        refreshSidebar({ resort: false });
-      } else {
-        cardStatus(out.error || 'Pull failed', 'error');
-        pull.disabled = false;
-      }
-    };
-    gitEl.appendChild(pull);
-  }
-  // Manual "check remote" (throttled fetch) so the pull signifier is accurate.
-  const fetchBtn = document.createElement('button');
-  fetchBtn.className = 'pcm-badge pcm-fetch'; fetchBtn.title = 'Check remote for new commits';
-  fetchBtn.textContent = '⟳';
-  fetchBtn.onclick = async (e) => {
-    e.stopPropagation();
-    fetchBtn.disabled = true; fetchBtn.classList.add('spinning');
-    const out = await window.api.gitFetchRemote(projectPath, {});
-    fetchBtn.classList.remove('spinning'); fetchBtn.disabled = false;
-    if (out.git) { _renderCardGit(gitEl, projectPath, out.git); }
-  };
-  gitEl.appendChild(fetchBtn);
-}
-
-async function enrichProjectCards(projects) {
-  for (const project of projects) {
-    const fId = folderId(project.projectPath);
-    const metaEl = document.getElementById('pcm-' + fId);
-    if (!metaEl) continue;
-    const modEl = metaEl.querySelector('.pcm-modified');
-    const gitEl = metaEl.querySelector('.pcm-git');
-
-    const cached = _projectMetaCache.get(project.projectPath);
-    const fresh = cached && (Date.now() - cached.ts) < PROJECT_META_FE_TTL;
-    const apply = (data) => {
-      if (!data) return;
-      if (modEl && data.lastModifiedMs) {
-        modEl.textContent = '🕓 ' + formatDate(new Date(data.lastModifiedMs));
-      }
-      if (gitEl) _renderCardGit(gitEl, project.projectPath, data.git);
-    };
-    if (fresh) { apply(cached.data); continue; }
-
-    try {
-      const data = await window.api.getProjectMeta(project.projectPath);
-      if (data && data.ok) {
-        _projectMetaCache.set(project.projectPath, { data, ts: Date.now() });
-        // Element may have been replaced by a later morphdom pass — re-query.
-        const stillThere = document.getElementById('pcm-' + fId);
-        if (stillThere) apply(data);
-      }
-    } catch {}
-  }
-}
-
-function rebindSidebarEvents(projects) {
-  for (const project of projects) {
-    const fId = folderId(project.projectPath);
-    const header = document.getElementById('ph-' + fId);
-    if (!header) continue;
-    const newBtn = header.querySelector('.project-new-btn');
-    if (newBtn) {
-      newBtn.onclick = (e) => { e.stopPropagation(); showNewSessionPopover(project, newBtn); };
-    }
-    const settingsBtn = header.querySelector('.project-settings-btn');
-    if (settingsBtn) {
-      settingsBtn.onclick = (e) => { e.stopPropagation(); openSettingsViewer('project', project.projectPath); };
-    }
-    const archiveGroupBtn = header.querySelector('.project-archive-btn');
-    if (archiveGroupBtn) {
-      archiveGroupBtn.onclick = async (e) => {
-        e.stopPropagation();
-        const sessions = project.sessions.filter(s => !s.archived);
-        if (sessions.length === 0) return;
-        const shortName = project.projectPath.split('/').filter(Boolean).slice(-2).join('/');
-        if (!confirm(`Archive all ${sessions.length} session${sessions.length > 1 ? 's' : ''} in ${shortName}?`)) return;
-        for (const s of sessions) {
-          if (activePtyIds.has(s.sessionId)) {
-            await window.api.stopSession(s.sessionId);
-          }
-          await window.api.archiveSession(s.sessionId, 1);
-          s.archived = 1;
-        }
-        pollActiveSessions();
-        loadProjects();
-      };
-    }
-    header.onclick = (e) => {
-      if (e.target.closest('.project-new-btn') || e.target.closest('.project-archive-btn') || e.target.closest('.project-settings-btn')) return;
-      header.classList.toggle('collapsed');
-    };
-  }
-
-  sidebarContent.querySelectorAll('.slug-group-header').forEach(header => {
-    const archiveBtn = header.querySelector('.slug-group-archive-btn');
-    if (archiveBtn) {
-      archiveBtn.onclick = async (e) => {
-        e.stopPropagation();
-        const group = header.parentElement;
-        const sessionItems = group.querySelectorAll('.session-item');
-        for (const item of sessionItems) {
-          const sid = item.dataset.sessionId;
-          const session = sessionMap.get(sid);
-          if (!session || session.archived) continue;
-          if (activePtyIds.has(sid)) await window.api.stopSession(sid);
-          await window.api.archiveSession(sid, 1);
-          session.archived = 1;
-        }
-        pollActiveSessions();
-        loadProjects();
-      };
-    }
-    header.onclick = (e) => {
-      if (e.target.closest('.slug-group-archive-btn')) return;
-      header.parentElement.classList.toggle('collapsed');
-      saveExpandedSlugs();
-    };
-  });
-
-  sidebarContent.querySelectorAll('.slug-group-more').forEach(moreBtn => {
-    moreBtn.onclick = () => {
-      const group = moreBtn.closest('.slug-group');
-      if (group) {
-        group.classList.remove('collapsed');
-        saveExpandedSlugs();
-      }
-    };
-  });
-
-  // Card-model session pulldown — open the chosen dormant session.
-  sidebarContent.querySelectorAll('.session-pulldown').forEach(sel => {
-    sel.onclick = (e) => e.stopPropagation();
-    sel.onchange = () => {
-      const s = sessionMap.get(sel.value);
-      if (s) openSession(s);
-      sel.value = '';
-    };
-  });
-
-  // Fill project cards with last-modified + git metadata (async, cached).
-  enrichProjectCards(projects);
-
-  sidebarContent.querySelectorAll('.sessions-more-toggle').forEach(moreBtn => {
-    const olderList = moreBtn.nextElementSibling;
-    if (!olderList || !olderList.classList.contains('sessions-older')) return;
-    const count = olderList.children.length;
-    moreBtn.onclick = () => {
-      const showing = olderList.style.display !== 'none';
-      olderList.style.display = showing ? 'none' : '';
-      moreBtn.classList.toggle('expanded', !showing);
-      moreBtn.textContent = showing ? `+ ${count} older` : '- hide older';
-    };
-  });
-
-  sidebarContent.querySelectorAll('.session-item').forEach(item => {
-    const sessionId = item.dataset.sessionId;
-    const session = sessionMap.get(sessionId);
-    if (!session) return;
-
-    item.onclick = () => openSession(session);
-
-    const pin = item.querySelector('.session-pin');
-    if (pin) {
-      pin.onclick = async (e) => {
-        e.stopPropagation();
-        const { starred } = await window.api.toggleStar(session.sessionId);
-        session.starred = starred;
-        refreshSidebar({ resort: true });
-      };
-    }
-
-    const summaryEl = item.querySelector('.session-summary');
-    if (summaryEl) {
-      summaryEl.ondblclick = (e) => { e.stopPropagation(); startRename(summaryEl, session); };
-    }
-
-    const stopBtn = item.querySelector('.session-stop-btn');
-    if (stopBtn) {
-      stopBtn.onclick = (e) => {
-        e.stopPropagation();
-        confirmAndStopSession(session.sessionId);
-      };
-    }
-
-    const launchConfigBtn = item.querySelector('.session-launch-config-btn');
-    if (launchConfigBtn) {
-      launchConfigBtn.onclick = (e) => {
-        e.stopPropagation();
-        showResumeSessionDialog(session);
-      };
-    }
-
-    const forkBtn = item.querySelector('.session-fork-btn');
-    if (forkBtn) {
-      forkBtn.onclick = async (e) => {
-        e.stopPropagation();
-        // Find the project for this session
-        const project = [...cachedAllProjects, ...cachedProjects].find(p =>
-          p.sessions.some(s => s.sessionId === session.sessionId)
-        );
-        if (project) {
-          forkSession(session, project);
-        }
-      };
-    }
-
-    const jsonlBtn = item.querySelector('.session-jsonl-btn');
-    if (jsonlBtn) {
-      jsonlBtn.onclick = (e) => {
-        e.stopPropagation();
-        showJsonlViewer(session);
-      };
-    }
-
-    const archiveBtn = item.querySelector('.session-archive-btn');
-    if (archiveBtn) {
-      archiveBtn.onclick = async (e) => {
-        e.stopPropagation();
-        const newVal = session.archived ? 0 : 1;
-        if (newVal && activePtyIds.has(session.sessionId)) {
-          await window.api.stopSession(session.sessionId);
-          pollActiveSessions();
-        }
-        await window.api.archiveSession(session.sessionId, newVal);
-        session.archived = newVal;
-        loadProjects();
-      };
-    }
-  });
-
-  // Auto-expand slug group if it contains the active session
-  if (activeSessionId) {
-    const activeItem = sidebarContent.querySelector(`[data-session-id="${activeSessionId}"]`);
-    const collapsedGroup = activeItem?.closest('.slug-group.collapsed');
-    if (collapsedGroup) {
-      collapsedGroup.classList.remove('collapsed');
-      saveExpandedSlugs();
-    }
-  }
-}
-
-// Refresh loop badge on an existing session card without full rebuild
-function refreshSessionCard(sessionId) {
-  const card = document.querySelector(`[data-session-id="${sessionId}"]`);
-  if (!card) return;
-  const summaryEl = card.querySelector('.session-summary');
-  if (!summaryEl) return;
-  // Remove existing loop badge
-  const existing = summaryEl.querySelector('.loop-badge');
-  if (existing) existing.remove();
-  // Add updated badge
-  const lp = loopCache[sessionId];
-  if (lp && lp.loopCount > 0) {
-    const loopBadge = document.createElement('span');
-    loopBadge.className = 'loop-badge';
-    loopBadge.title = `Loop detected ${lp.loopCount}x${lp.lastLoopTool ? ' with ' + lp.lastLoopTool : ''}${lp.lastLoopReason ? ': ' + lp.lastLoopReason : ''}`;
-    loopBadge.textContent = '\u21BB' + lp.loopCount;
-    summaryEl.appendChild(loopBadge);
-  }
-}
-
-// F5.6: Determine activity color class from session timestamp
-function getActivityClass(session) {
-  const ts = session.endTime || session.modified;
-  if (!ts) return 'activity-stale';
-  const age = Date.now() - new Date(ts).getTime();
-  if (age < 5 * 60 * 1000) return 'activity-recent';       // < 5 min
-  if (age < 60 * 60 * 1000) return 'activity-recent-hour'; // < 1 hour
-  return 'activity-stale';
-}
-
-function buildSessionItem(session) {
-  const item = document.createElement('div');
-  item.className = 'session-item';
-  item.id = 'si-' + session.sessionId;
-  if (session.type === 'terminal') item.classList.add('is-terminal');
-  if (session.archived) item.classList.add('archived-item');
-  if (activePtyIds.has(session.sessionId)) item.classList.add('has-running-pty');
-  if (attentionSessions.has(session.sessionId)) item.classList.add('needs-attention');
-  if (errorSessions.has(session.sessionId)) item.classList.add('session-error');
-  if (responseReadySessions.has(session.sessionId)) item.classList.add('response-ready');
-  if (sessionBusyState.get(session.sessionId)) item.classList.add('cli-busy');
-
-  // F5.6: Activity color class
-  const activityClass = getActivityClass(session);
-  item.classList.add(activityClass);
-
-  // F5.6: Git status color class
-  const gitClass = session.gitStatus ? `git-${session.gitStatus}` : 'git-unknown';
-  item.classList.add(gitClass);
-
-  // Per-CLI color accent: tint the card's left edge with the agent's color so
-  // sessions from different CLIs are visually distinguishable (esp. in combined
-  // / flagged / running views that mix multiple agents).
-  const cardAgent = session.agent || sessionAgentMap.get(session.sessionId) || 'claude';
-  const cardAgentColor = AGENT_COLORS[cardAgent];
-  if (cardAgentColor) {
-    item.classList.add('has-agent-color');
-    item.dataset.agent = cardAgent;
-    item.style.setProperty('--agent-color', cardAgentColor);
-  }
-
-  item.dataset.sessionId = session.sessionId;
-
-  const modified = lastActivityTime.get(session.sessionId) || new Date(session.modified);
-  const timeStr = formatDate(modified);
-  const displayName = cleanDisplayName(session.name || session.summary);
-
-  const row = document.createElement('div');
-  row.className = 'session-row';
-
-  // Pin
-  const pin = document.createElement('span');
-  pin.className = 'session-pin' + (session.starred ? ' pinned' : '');
-  pin.innerHTML = session.starred
-    ? '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707c-.28-.28-.576-.49-.888-.656L10.073 9.333l-.07 3.181a.5.5 0 0 1-.853.354l-3.535-3.536-4.243 4.243a.5.5 0 1 1-.707-.707l4.243-4.243L1.372 5.11a.5.5 0 0 1 .354-.854l3.18-.07L8.37 .722A3.37 3.37 0 0 1 9.12.074a.5.5 0 0 1 .708.002l-.707.707z"/></svg>'
-    : '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707c-.28-.28-.576-.49-.888-.656L10.073 9.333l-.07 3.181a.5.5 0 0 1-.853.354l-3.535-3.536-4.243 4.243a.5.5 0 1 1-.707-.707l4.243-4.243L1.372 5.11a.5.5 0 0 1 .354-.854l3.18-.07L8.37 .722A3.37 3.37 0 0 1 9.12.074a.5.5 0 0 1 .708.002l-.707.707z"/></svg>';
-
-  // Running status dot
-  const dot = document.createElement('span');
-  dot.className = 'session-status-dot' + (activePtyIds.has(session.sessionId) ? ' running' : '');
-
-  // Info block
-  const info = document.createElement('div');
-  info.className = 'session-info';
-
-  const summaryEl = document.createElement('div');
-  summaryEl.className = 'session-summary';
-  summaryEl.textContent = displayName;
-
-  // F5.6: LIVE badge for recently active sessions (<5 min)
-  if (activityClass === 'activity-recent') {
-    const liveBadge = document.createElement('span');
-    liveBadge.className = 'session-live-badge';
-    liveBadge.textContent = 'LIVE';
-    summaryEl.appendChild(liveBadge);
-  }
-
-  const idEl = document.createElement('div');
-  idEl.className = 'session-id';
-  idEl.textContent = session.sessionId;
-
-  const metaEl = document.createElement('div');
-  metaEl.className = 'session-meta';
-  let metaText = timeStr + (session.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '');
-  const tok = tokenCache[session.sessionId];
-  if (tok) {
-    const totalTok = (tok.inputTokens || 0) + (tok.outputTokens || 0);
-    if (totalTok > 0) metaText += ' \u00b7 ' + formatTokenCount(totalTok);
-    const cost = formatCentsCost(tok.costCents);
-    if (cost) metaText += ' \u00b7 ' + cost;
-  }
-  metaEl.textContent = metaText;
-
-  if (session.type === 'terminal') {
-    const badge = document.createElement('span');
-    badge.className = 'terminal-badge';
-    badge.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>';
-    summaryEl.prepend(badge);
-  }
-
-  if (session.type === 'headless') {
-    item.classList.add('is-headless');
-    const badge = document.createElement('span');
-    badge.className = 'headless-badge';
-    badge.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>';
-    summaryEl.prepend(badge);
-  }
-
-  // Agent badge — use session.agent (from IPC for non-Claude) or sessionAgentMap
-  const agentId = session.agent || sessionAgentMap.get(session.sessionId);
-  if (agentId && agentId !== 'claude') {
-    const agentBadge = document.createElement('span');
-    agentBadge.className = 'agent-badge';
-    agentBadge.style.color = AGENT_COLORS[agentId] || '#8888a0';
-    agentBadge.style.borderColor = AGENT_COLORS[agentId] || '#8888a0';
-    agentBadge.textContent = AGENT_LABELS[agentId] || agentId;
-    summaryEl.appendChild(agentBadge);
-  }
-
-  // Project/folder label — show truncated path below summary
-  if (session.projectPath) {
-    const projectLabel = document.createElement('div');
-    projectLabel.className = 'session-project-label';
-    const segments = session.projectPath.split('/').filter(Boolean);
-    const truncated = segments.length > 3
-      ? '\u2026/' + segments.slice(-3).join('/')
-      : session.projectPath;
-    projectLabel.textContent = truncated;
-    info.appendChild(projectLabel);
-  }
-
-  // Loop badge — orange warning indicator when Claude detected a repeat loop
-  const lp = loopCache[session.sessionId];
-  if (lp && lp.loopCount > 0) {
-    const loopBadge = document.createElement('span');
-    loopBadge.className = 'loop-badge';
-    loopBadge.title = `Loop detected ${lp.loopCount}x${lp.lastLoopTool ? ' with ' + lp.lastLoopTool : ''}${lp.lastLoopReason ? ': ' + lp.lastLoopReason : ''}`;
-    loopBadge.textContent = '\u21BB' + lp.loopCount;
-    summaryEl.appendChild(loopBadge);
-  }
-  info.appendChild(summaryEl);
-  info.appendChild(idEl);
-  info.appendChild(metaEl);
-
-  // Activity sparkline row — shown for ANY session with tool activity (headless, PTY, or file-watched)
-  {
-    const sparkline = document.createElement('div');
-    sparkline.className = 'headless-sparkline';
-    sparkline.id = 'sparkline-' + session.sessionId;
-    const state = headlessState.get(session.sessionId);
-    if (state) {
-      updateHeadlessSparkline(session.sessionId, state);
-    }
-    info.appendChild(sparkline);
-  }
-
-  // Action buttons container
-  const actions = document.createElement('div');
-  actions.className = 'session-actions';
-
-  const stopBtn = document.createElement('button');
-  stopBtn.className = 'session-stop-btn';
-  stopBtn.title = 'Stop session';
-  stopBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="2" width="8" height="8" rx="1"/></svg>';
-
-  const archiveBtn = document.createElement('button');
-  archiveBtn.className = 'session-archive-btn';
-  archiveBtn.title = session.archived ? 'Unarchive' : 'Archive';
-  archiveBtn.innerHTML = ICONS.archive(16);
-
-  const forkBtn = document.createElement('button');
-  forkBtn.className = 'session-fork-btn';
-  forkBtn.title = 'Fork session';
-  forkBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 3h-5v5"/><path d="M21 3l-7.536 7.536a5 5 0 0 0-1.464 3.534v6.93"/><path d="M3 3l7.536 7.536a5 5 0 0 1 1.464 3.534v.93"/></svg>';
-
-  const jsonlBtn = document.createElement('button');
-  jsonlBtn.className = 'session-jsonl-btn';
-  jsonlBtn.title = 'View messages';
-  jsonlBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>';
-
-  const launchConfigBtn = document.createElement('button');
-  launchConfigBtn.className = 'session-launch-config-btn';
-  launchConfigBtn.title = 'Resume with config';
-  launchConfigBtn.innerHTML = ICONS.launchConfig(14);
-
-  actions.appendChild(stopBtn);
-  if (session.type !== 'terminal') {
-    actions.appendChild(forkBtn);
-    actions.appendChild(jsonlBtn);
-    actions.appendChild(archiveBtn);
-    actions.appendChild(launchConfigBtn);
-  }
-
-  row.appendChild(pin);
-  row.appendChild(dot);
-  row.appendChild(info);
-  row.appendChild(actions);
-  item.appendChild(row);
-
-  return item;
-}
-
-function startRename(summaryEl, session) {
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'session-rename-input';
-  input.value = session.name || session.summary;
-
-  summaryEl.replaceWith(input);
-  input.focus();
-  input.select();
-
-  const save = async () => {
-    const newName = input.value.trim();
-    const nameToSave = (newName && newName !== session.summary) ? newName : null;
-    await window.api.renameSession(session.sessionId, nameToSave);
-    session.name = nameToSave;
-
-    const newSummary = document.createElement('div');
-    newSummary.className = 'session-summary';
-    newSummary.textContent = nameToSave || session.summary;
-    newSummary.addEventListener('dblclick', (e) => {
-      e.stopPropagation();
-      startRename(newSummary, session);
-    });
-    input.replaceWith(newSummary);
-  };
-
-  input.addEventListener('blur', save);
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') input.blur();
-    if (e.key === 'Escape') {
-      input.removeEventListener('blur', save);
-      const restored = document.createElement('div');
-      restored.className = 'session-summary';
-      restored.textContent = session.name || session.summary;
-      restored.addEventListener('dblclick', (ev) => {
-        ev.stopPropagation();
-        startRename(restored, session);
-      });
-      input.replaceWith(restored);
-    }
-  });
-}
-
-async function launchNewSession(project, sessionOptions, initialPrompt) {
+async function launchNewSession(project, sessionOptions) {
+  // A temporary id. Claude is told to use it (--session-id); codex cannot be,
+  // so main watches for its transcript and sends session-detected with the real
+  // one, which re-keys everything below.
   const sessionId = crypto.randomUUID();
   const projectPath = project.projectPath;
+  const runtime = sessionOptions?.runtime || 'claude';
   const session = {
     sessionId,
     summary: 'New session',
     firstPrompt: '',
     projectPath,
+    runtime,
     name: null,
     starred: 0,
     archived: 0,
@@ -2913,395 +1944,10 @@ async function openSession(session, customOptions) {
   if (loadingEl) loadingEl.style.display = 'flex';
 
   // Open terminal in main process
-  const resumeOptions = await resolveDefaultSessionOptions({ projectPath });
-  try {
-    const result = await window.api.openTerminal(sessionId, projectPath, false, resumeOptions);
-    if (!result.ok) {
-      entry.terminal.write(`\r\nError: ${result.error}\r\n`);
-      entry.closed = true;
-      return;
-    }
-    if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
-  } finally {
-    if (loadingEl) loadingEl.style.display = 'none';
-  }
-
-  showSession(sessionId);
-  pollActiveSessions();
-}
-
-// ============================================================
-// CONVERSATION VIEWER
-// Shows historical sessions without spawning a terminal.
-// ============================================================
-
-const cvPanel = document.getElementById('conversation-viewer');
-const cvMessages = document.getElementById('cv-messages');
-const cvSessionName = document.getElementById('cv-session-name');
-const cvSessionMeta = document.getElementById('cv-session-meta');
-const cvExportMdBtn = document.getElementById('cv-export-md-btn');
-const cvCopyBtn = document.getElementById('cv-copy-btn');
-const cvResumeBtn = document.getElementById('cv-resume-btn');
-const cvSaveTemplateBtn = document.getElementById('cv-save-template-btn');
-
-let cvCurrentSession = null;
-let cvCurrentMessages = [];
-
-function hideConversationViewer() {
-  cvPanel.style.display = 'none';
-  cvCurrentSession = null;
-  cvCurrentMessages = [];
-}
-
-async function showConversationViewer(session) {
-  // Update sidebar active state
-  document.querySelectorAll('.session-item.active').forEach(el => el.classList.remove('active'));
-  const item = document.querySelector(`[data-session-id="${session.sessionId}"]`);
-  if (item) item.classList.add('active');
-  setActiveSession(session.sessionId);
-
-  // Hide terminal/placeholder, show viewer
-  placeholder.style.display = 'none';
-  terminalHeader.style.display = 'none';
-  hidePlanViewer();
-  for (const entry of openSessions.values()) entry.element.classList.remove('visible');
-  cvPanel.style.display = 'flex';
-
-  cvCurrentSession = session;
-  cvSessionName.textContent = cleanDisplayName(session.name || session.sessionId);
-  cvSessionMeta.textContent = '';
-  cvMessages.innerHTML = '<div class="cv-loading">Loading conversation…</div>';
-
-  const agentId = session.agent || sessionAgentMap.get(session.sessionId) || 'claude';
-  const result = await window.api.readSessionConversation(session.sessionId, session.file || null, agentId);
-
-  if (result.error) {
-    cvMessages.innerHTML = `<div class="cv-error">Could not load conversation: ${escapeHtml(result.error)}</div>`;
-    return;
-  }
-
-  cvCurrentMessages = result.messages || [];
-  renderConversationMessages(cvCurrentMessages, agentId);
-
-  // Meta: message counts + token/cost from cache
-  const userCount = cvCurrentMessages.filter(m => m.role === 'user').length;
-  const toolCount = cvCurrentMessages.reduce((n, m) => n + (m.tools?.length || 0), 0);
-  const parts = [`${userCount} turns`];
-  if (toolCount > 0) parts.push(`${toolCount} tool calls`);
-  const tok = tokenCache[session.sessionId];
-  if (tok) {
-    const totalTok = (tok.inputTokens || 0) + (tok.outputTokens || 0);
-    if (totalTok > 0) parts.push(formatTokenCount(totalTok) + ' tokens');
-    if (tok.costCents > 0) parts.push(formatCentsCost(tok.costCents));
-    if (tok.model) parts.push(tok.model.replace('claude-', '').replace(/-\d{8}$/, ''));
-  }
-  cvSessionMeta.textContent = parts.join(' · ');
-
-  // Update header for main area
-  updateTerminalHeader();
-}
-
-function renderConversationMessages(messages, agentId) {
-  if (messages.length === 0) {
-    cvMessages.innerHTML = '<div class="cv-empty">No messages found in this session.</div>';
-    return;
-  }
-
-  const frag = document.createDocumentFragment();
-
-  for (const msg of messages) {
-    const el = buildMessageEl(msg);
-    if (el) frag.appendChild(el);
-  }
-
-  cvMessages.innerHTML = '';
-  cvMessages.appendChild(frag);
-}
-
-function buildMessageEl(msg) {
-  if (msg.role === 'summary') {
-    const el = document.createElement('div');
-    el.className = 'cv-summary';
-    el.innerHTML = `<span class="cv-summary-label">⟳ Compacted</span><span class="cv-summary-text">${escapeHtml(msg.text)}</span>`;
-    return el;
-  }
-
-  if (msg.role === 'system') {
-    const el = document.createElement('div');
-    el.className = 'cv-system';
-    el.textContent = msg.text;
-    return el;
-  }
-
-  const el = document.createElement('div');
-  el.className = `cv-message cv-${msg.role}`;
-
-  // Header
-  const header = document.createElement('div');
-  header.className = 'cv-msg-header';
-  const roleLabel = document.createElement('span');
-  roleLabel.className = 'cv-msg-role';
-  roleLabel.textContent = msg.role === 'user' ? 'You' : 'Assistant';
-  header.appendChild(roleLabel);
-
-  if (msg.ts) {
-    const timeEl = document.createElement('span');
-    timeEl.className = 'cv-msg-time';
-    try { timeEl.textContent = new Date(msg.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch {}
-    header.appendChild(timeEl);
-  }
-  if (msg.model) {
-    const modelEl = document.createElement('span');
-    modelEl.className = 'cv-msg-model';
-    modelEl.textContent = msg.model.replace('claude-', '').replace(/-\d{8}$/, '');
-    header.appendChild(modelEl);
-  }
-  el.appendChild(header);
-
-  // Text body
-  if (msg.text) {
-    const body = document.createElement('div');
-    body.className = 'cv-msg-body';
-    body.innerHTML = renderMarkdownLite(msg.text);
-    el.appendChild(body);
-  }
-
-  // Tool calls
-  if (msg.tools && msg.tools.length > 0) {
-    const toolsEl = document.createElement('div');
-    toolsEl.className = 'cv-tools';
-    for (const tool of msg.tools) {
-      toolsEl.appendChild(buildToolCallEl(tool));
-    }
-    el.appendChild(toolsEl);
-  }
-
-  // Token usage badge
-  if (msg.usage) {
-    const usage = document.createElement('div');
-    usage.className = 'cv-usage';
-    usage.textContent = `↑${msg.usage.input_tokens?.toLocaleString() || 0} ↓${msg.usage.output_tokens?.toLocaleString() || 0} tokens`;
-    el.appendChild(usage);
-  }
-
-  return el;
-}
-
-function buildToolCallEl(tool) {
-  const el = document.createElement('details');
-  el.className = 'cv-tool';
-
-  const summary = document.createElement('summary');
-  summary.className = 'cv-tool-summary';
-
-  const nameEl = document.createElement('span');
-  nameEl.className = 'cv-tool-name';
-  nameEl.textContent = tool.name;
-
-  // Quick preview of first input key
-  const inputKeys = tool.input ? Object.keys(tool.input) : [];
-  if (inputKeys.length > 0) {
-    const preview = document.createElement('span');
-    preview.className = 'cv-tool-preview';
-    const val = tool.input[inputKeys[0]];
-    const previewText = typeof val === 'string' ? val.slice(0, 60) : JSON.stringify(val).slice(0, 60);
-    preview.textContent = previewText + (previewText.length >= 60 ? '…' : '');
-    summary.appendChild(nameEl);
-    summary.appendChild(preview);
-  } else {
-    summary.appendChild(nameEl);
-  }
-
-  if (tool.result?.isError) {
-    const errBadge = document.createElement('span');
-    errBadge.className = 'cv-tool-err-badge';
-    errBadge.textContent = 'error';
-    summary.appendChild(errBadge);
-  }
-
-  el.appendChild(summary);
-
-  // Input
-  if (inputKeys.length > 0) {
-    const inputEl = document.createElement('div');
-    inputEl.className = 'cv-tool-input';
-    inputEl.innerHTML = `<pre>${escapeHtml(JSON.stringify(tool.input, null, 2))}</pre>`;
-    el.appendChild(inputEl);
-  }
-
-  // Result
-  if (tool.result) {
-    const resultEl = document.createElement('div');
-    resultEl.className = `cv-tool-result${tool.result.isError ? ' cv-tool-result-error' : ''}`;
-    const resultText = tool.result.text || '';
-    // Truncate very long results
-    const display = resultText.length > 2000 ? resultText.slice(0, 2000) + `\n… (${resultText.length - 2000} chars truncated)` : resultText;
-    resultEl.innerHTML = `<pre>${escapeHtml(display)}</pre>`;
-    el.appendChild(resultEl);
-  }
-
-  return el;
-}
-
-// Lightweight markdown renderer — handles code blocks, bold, italic, inline code, headers
-function renderMarkdownLite(text) {
-  if (!text) return '';
-  let html = escapeHtml(text);
-
-  // Fenced code blocks (```lang\n...\n```)
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
-    `<pre class="cv-code-block${lang ? ' lang-' + lang : ''}">${code}</pre>`
-  );
-
-  // Inline code
-  html = html.replace(/`([^`\n]+)`/g, '<code class="cv-inline-code">$1</code>');
-
-  // Headers
-  html = html.replace(/^### (.+)$/gm, '<h3 class="cv-h3">$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2 class="cv-h2">$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1 class="cv-h1">$1</h1>');
-
-  // Bold / italic
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-
-  // Paragraphs (double newline → paragraph break)
-  html = html.replace(/\n\n+/g, '</p><p>');
-  html = '<p>' + html + '</p>';
-
-  // Single newlines → <br> inside paragraphs
-  html = html.replace(/\n/g, '<br>');
-
-  return html;
-}
-
-// Export conversation as Markdown
-function conversationToMarkdown(messages, sessionName) {
-  const lines = [`# ${sessionName || 'Conversation'}\n`];
-  for (const msg of messages) {
-    if (msg.role === 'summary') {
-      lines.push(`---\n> **[Compacted]** ${msg.text}\n---\n`);
-      continue;
-    }
-    if (msg.role === 'system') {
-      lines.push(`> *System: ${msg.text}*\n`);
-      continue;
-    }
-    const label = msg.role === 'user' ? '## You' : '## Assistant';
-    lines.push(label);
-    if (msg.text) lines.push(msg.text);
-    if (msg.tools && msg.tools.length > 0) {
-      for (const tool of msg.tools) {
-        lines.push(`\n**Tool: \`${tool.name}\`**`);
-        if (Object.keys(tool.input || {}).length > 0) {
-          lines.push('```json\n' + JSON.stringify(tool.input, null, 2) + '\n```');
-        }
-        if (tool.result?.text) {
-          lines.push('**Result:**');
-          lines.push('```\n' + tool.result.text.slice(0, 1000) + '\n```');
-        }
-      }
-    }
-    lines.push('');
-  }
-  return lines.join('\n');
-}
-
-// Wire up export/copy/resume buttons
-const cvExportBtn = document.getElementById('cv-export-btn');
-const cvExportMenu = document.getElementById('cv-export-menu');
-const cvExportDropdown = document.getElementById('cv-export-dropdown');
-
-// Toggle export menu
-cvExportBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  cvExportMenu.style.display = cvExportMenu.style.display === 'none' ? 'flex' : 'none';
-});
-
-// Export format handlers
-cvExportMenu.querySelectorAll('button[data-format]').forEach(btn => {
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const format = btn.dataset.format;
-    exportConversation(format);
-    cvExportMenu.style.display = 'none';
-  });
-});
-
-// Close export menu on outside click
-document.addEventListener('click', () => { cvExportMenu.style.display = 'none'; });
-
-function exportConversation(format) {
-  if (!cvCurrentMessages.length) return;
-  const sessionName = cvCurrentSession?.name || cvCurrentSession?.sessionId || 'conversation';
-
-  if (format === 'markdown') {
-    const md = conversationToMarkdown(cvCurrentMessages, sessionName);
-    downloadBlob(md, 'text/markdown', `${sessionName}.md`);
-  } else if (format === 'jsonl') {
-    // Raw JSONL export — one JSON object per line
-    const jsonl = cvCurrentMessages.map(m => JSON.stringify(m)).join('\n');
-    downloadBlob(jsonl, 'application/x-ndjson', `${sessionName}.jsonl`);
-  } else if (format === 'json') {
-    // JSON array of all messages
-    const json = JSON.stringify(cvCurrentMessages, null, 2);
-    downloadBlob(json, 'application/json', `${sessionName}.json`);
-  }
-}
-
-function downloadBlob(content, mimeType, filename) {
-  const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-cvCopyBtn.addEventListener('click', async () => {
-  if (!cvCurrentMessages.length) return;
-  const md = conversationToMarkdown(cvCurrentMessages, cvCurrentSession?.name || cvCurrentSession?.sessionId);
-  try {
-    await navigator.clipboard.writeText(md);
-    cvCopyBtn.textContent = 'Copied!';
-    setTimeout(() => { cvCopyBtn.textContent = 'Copy'; }, 2000);
-  } catch {}
-});
-
-cvResumeBtn.addEventListener('click', async () => {
-  if (!cvCurrentSession) return;
-  hideConversationViewer();
-  // Force terminal open even though session isn't in activePtyIds yet
-  activeSessionId = cvCurrentSession.sessionId;
-  const session = sessionMap.get(cvCurrentSession.sessionId) || cvCurrentSession;
-  // Temporarily mark as running type so openSession goes to terminal path
-  const originalType = session.type;
-  session._forceTerminal = true;
-  await openSessionForced(session);
-  session._forceTerminal = false;
-});
-
-cvSaveTemplateBtn.addEventListener('click', async () => {
-  if (!cvCurrentSession) return;
-  const session = cvCurrentSession;
-  const project = cachedProjects.find(p => p.projectPath === session.projectPath) || cachedAllProjects.find(p => p.projectPath === session.projectPath);
-  if (!project) return;
-  const opts = { cliAgent: sessionAgentMap.get(session.sessionId) || 'claude' };
-  // Extract first user message from conversation as prompt suggestion
-  const firstPrompt = cvCurrentMessages.find(m => m.role === 'user')?.text || '';
-  showSaveTemplateDialog(project, opts, firstPrompt);
-});
-
-// Open session directly as terminal (bypass conversation viewer)
-async function openSessionForced(session, customOptions) {
-  const { sessionId, projectPath } = session;
-  if (openSessions.has(sessionId)) {
-    showSession(sessionId);
-    return;
-  }
-  const entry = createTerminalEntry(session);
-  const resumeOptions = customOptions || await resolveDefaultSessionOptions({ projectPath });
+  const resumeOptions = { ...(customOptions || await resolveDefaultSessionOptions({ projectPath })) };
+  // Which CLI to resume with. Main re-reads this from the cached row and only
+  // trusts the hint for sessions it has never indexed.
+  if (session.runtime) resumeOptions.runtime = session.runtime;
   const result = await window.api.openTerminal(sessionId, projectPath, false, resumeOptions);
   if (!result.ok) {
     entry.terminal.write(`\r\nError: ${result.error}\r\n`);
@@ -3309,6 +1955,11 @@ async function openSessionForced(session, customOptions) {
     return;
   }
   if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
+
+  // Relaunching a session that had died clears the dead marker on its pending entry
+  const pending = pendingSessions.get(sessionId);
+  if (pending) pending.exited = false;
+
   showSession(sessionId);
   pollActiveSessions();
 }
@@ -7288,6 +5939,118 @@ const updaterHandler = (type, data) => {
   }
 };
 window.api.onUpdaterEvent(updaterHandler);
+
+// --- Quota gauges in status bar ---
+// One bar per limit window the usage API reports — a 5-hour session window, a
+// weekly all-models window, and a weekly window per model. Which one bites
+// first varies, and the 5-hour is usually the emptiest while resetting within
+// the day, so showing a single window would read as "plenty left" while a
+// weekly one is the one actually running out. Rows come from the API
+// self-describing, so a newly launched model gets a bar without a code change.
+const quotaGaugeEl = document.getElementById('status-bar-quota');
+
+// Full labels ("Week (all models)") are too long for a status bar; the tooltip
+// carries them in full.
+function shortQuotaLabel(row) {
+  // codex names its own windows by length, since it reports a duration in
+  // seconds rather than a named bucket like Claude does.
+  if (row.short) return row.short;
+  if (row.kind === 'session') return '5h';
+  if (row.kind === 'weekly_all') return 'Week';
+  return row.model || 'Week';
+}
+
+function buildQuotaBar(row) {
+  const wrap = document.createElement('span');
+  wrap.className = 'quota-item';
+
+  if (row.runtime) wrap.classList.add('quota-item-' + row.runtime);
+
+  const label = document.createElement('span');
+  label.className = 'quota-label';
+  label.textContent = shortQuotaLabel(row);
+  wrap.appendChild(label);
+
+  const track = document.createElement('span');
+  track.className = 'quota-track';
+  const fill = document.createElement('span');
+  const pct = row.percent;
+  fill.className = 'quota-fill' + (pct >= 80 ? ' quota-high' : pct >= 60 ? ' quota-mid' : '');
+  fill.style.width = Math.min(Math.max(pct, 1), 100) + '%';
+  track.appendChild(fill);
+  wrap.appendChild(track);
+
+  const pctEl = document.createElement('span');
+  pctEl.className = 'quota-pct';
+  pctEl.textContent = pct + '%';
+  wrap.appendChild(pctEl);
+
+  const who = row.runtime === 'codex' ? 'Codex' : 'Claude';
+  wrap.title = `${who} \u2014 ${row.label}: ${pct}%` + (row.reset ? ` \u2014 resets ${row.reset}` : '');
+  return wrap;
+}
+
+function quotaRowsFor(usage, runtime) {
+  // Prefer the API's self-describing rows; fall back to the flat 5-hour keys.
+  const rows = Array.isArray(usage?.limits) && usage.limits.length
+    ? usage.limits
+    : (usage?.session !== undefined
+      ? [{ kind: 'session', label: 'Current session', percent: usage.session, reset: usage.sessionReset }]
+      : []);
+  return rows.map(r => ({ runtime, ...r }));
+}
+
+/**
+ * One CLI's bars behind its logo.
+ *
+ * The logo goes on the group rather than each bar: with two CLIs on the bar a
+ * label like "Week" is ambiguous, but repeating the mark per bar is noise.
+ */
+function buildQuotaGroup(runtime, rows) {
+  const group = document.createElement('span');
+  group.className = 'quota-group quota-group-' + runtime;
+
+  const icon = document.createElement('span');
+  icon.className = 'quota-runtime-icon';
+  icon.innerHTML = runtime === 'codex' ? ICONS.codex(12) : ICONS.claude(12);
+  icon.title = runtime === 'codex' ? 'Codex' : 'Claude';
+  group.appendChild(icon);
+
+  for (const row of rows) group.appendChild(buildQuotaBar(row));
+  return group;
+}
+
+async function refreshQuotaGauge() {
+  try {
+    // Both CLIs, in parallel and independently: one being signed out or
+    // switched off must not cost the other its bars.
+    const [claudeUsage, codexUsage] = await Promise.all([
+      window.api.getUsage().catch(() => ({})),
+      window.api.getCodexUsage?.().catch(() => ({})) ?? {},
+    ]);
+    const groups = [];
+    for (const [runtime, usage] of [['claude', claudeUsage], ['codex', codexUsage]]) {
+      const rows = quotaRowsFor(usage, runtime);
+      if (rows.length) groups.push(buildQuotaGroup(runtime, rows));
+    }
+    if (!groups.length) { quotaGaugeEl.style.display = 'none'; return; }
+
+    quotaGaugeEl.replaceChildren(...groups);
+    quotaGaugeEl.style.display = '';
+  } catch {}
+}
+refreshQuotaGauge();
+setInterval(refreshQuotaGauge, 5 * 60 * 1000);
+
+// Switching a CLI on or off changes which bars belong on the gauge and which
+// sessions belong in the sidebar. Both are otherwise only refreshed on a timer.
+window.api.onHarnessesChanged?.(() => {
+  refreshQuotaGauge();
+  loadProjects({ resort: true });
+});
+quotaGaugeEl.addEventListener('click', () => {
+  document.querySelector('.sidebar-tab[data-tab="stats"]')?.click();
+});
 
 // --- Initialize file panel (MCP bridge UI) ---
 if (typeof initFilePanel === 'function') initFilePanel();

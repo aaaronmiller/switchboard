@@ -8,17 +8,12 @@ contextBridge.exposeInMainWorld('api', {
   getStats: () => ipcRenderer.invoke('get-stats'),
   refreshStats: () => ipcRenderer.invoke('refresh-stats'),
   getUsage: () => ipcRenderer.invoke('get-usage'),
+  getCodexUsage: () => ipcRenderer.invoke('get-codex-usage'),
   getMemories: () => ipcRenderer.invoke('get-memories'),
   readMemory: (filePath) => ipcRenderer.invoke('read-memory', filePath),
   saveMemory: (filePath, content) => ipcRenderer.invoke('save-memory', filePath, content),
   getProjects: (showArchived) => ipcRenderer.invoke('get-projects', showArchived),
-  getAgentSessions: (agentId) => ipcRenderer.invoke('get-agent-sessions', agentId),
-  getGitStatus: (projectPath) => ipcRenderer.invoke('get-git-status', projectPath),
-  getProjectMeta: (projectPath) => ipcRenderer.invoke('get-project-meta', projectPath),
-  gitListBranches: (projectPath) => ipcRenderer.invoke('git-list-branches', projectPath),
-  gitCheckoutBranch: (projectPath, branch, opts) => ipcRenderer.invoke('git-checkout-branch', projectPath, branch, opts),
-  gitFetchRemote: (projectPath, opts) => ipcRenderer.invoke('git-fetch-remote', projectPath, opts),
-  gitPull: (projectPath) => ipcRenderer.invoke('git-pull', projectPath),
+  getHarnesses: () => ipcRenderer.invoke('get-harnesses'),
   getActiveSessions: () => ipcRenderer.invoke('get-active-sessions'),
   getActiveTerminals: () => ipcRenderer.invoke('get-active-terminals'),
   stopSession: (id) => ipcRenderer.invoke('stop-session', id),
@@ -74,6 +69,7 @@ contextBridge.exposeInMainWorld('api', {
   addProject: (projectPath) => ipcRenderer.invoke('add-project', projectPath),
   removeProject: (projectPath) => ipcRenderer.invoke('remove-project', projectPath),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  writeClipboard: (text) => ipcRenderer.invoke('clipboard-write-text', text),
 
   // Send (fire-and-forget)
   sendInput: (id, data) => ipcRenderer.send('terminal-input', id, data),
@@ -87,11 +83,15 @@ contextBridge.exposeInMainWorld('api', {
   onSessionDetected: (callback) => {
     ipcRenderer.on('session-detected', (_event, tempId, realId) => callback(tempId, realId));
   },
+  onHarnessesChanged: (callback) => {
+    ipcRenderer.on('harnesses-changed', () => callback());
+  },
   onProcessExited: (callback) => {
-    ipcRenderer.on('process-exited', (_event, sessionId, exitCode) => callback(sessionId, exitCode));
+    ipcRenderer.on('process-exited', (_event, sessionId, exitCode, signal, userStopped) =>
+      callback(sessionId, exitCode, signal, userStopped));
   },
   onTerminalNotification: (callback) => {
-    ipcRenderer.on('terminal-notification', (_event, sessionId, message) => callback(sessionId, message));
+    ipcRenderer.on('terminal-notification', (_event, sessionId, message, kind) => callback(sessionId, message, kind));
   },
   onCliBusyState: (callback) => {
     ipcRenderer.on('cli-busy-state', (_event, sessionId, busy) => callback(sessionId, busy));

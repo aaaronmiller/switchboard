@@ -2,14 +2,20 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const os = require('os');
 
-const DATA_DIR = path.join(os.homedir(), '.switchboard');
+// SWITCHBOARD_DATA_DIR overrides the data dir so a dev/test instance can run
+// alongside the installed app without sharing its DB (main.js also isolates
+// Electron userData / the single-instance lock off the same variable).
+const DATA_DIR = process.env.SWITCHBOARD_DATA_DIR
+  ? path.resolve(process.env.SWITCHBOARD_DATA_DIR)
+  : path.join(os.homedir(), '.switchboard');
 const fs = require('fs');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_PATH = path.join(DATA_DIR, 'switchboard.db');
 
-// Migrate from old locations if needed
-const OLD_LOCATIONS = [
+// Migrate from old locations if needed — never when running against an
+// override dir, so a dev instance can't relocate the real app's legacy DB.
+const OLD_LOCATIONS = process.env.SWITCHBOARD_DATA_DIR ? [] : [
   path.join(os.homedir(), '.claude', 'browser', 'switchboard.db'),
   path.join(os.homedir(), '.claude', 'browser', 'session-browser.db'),
   path.join(os.homedir(), '.claude', 'session-browser.db'),
@@ -49,7 +55,10 @@ db.exec(`
     modified TEXT,
     messageCount INTEGER DEFAULT 0,
     slug TEXT,
-    aiTitle TEXT
+    aiTitle TEXT,
+    fileMtime TEXT,
+    runtime TEXT NOT NULL DEFAULT 'claude',
+    sessionFile TEXT
   )
 `);
 
@@ -99,6 +108,9 @@ const migrations = [
     try { db.exec('DELETE FROM session_cache'); } catch {}
     try { db.exec('DELETE FROM cache_meta'); } catch {}
   },
+  // v4: (superseded — fileMtime is added by the schema reconciliation below,
+  // keyed on column presence rather than version number)
+  () => {},
 ];
 
 const currentDbVersion = (() => {
@@ -113,6 +125,50 @@ for (let i = currentDbVersion; i < migrations.length; i++) {
 }
 if (migrations.length > currentDbVersion) {
   db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', ?)").run(JSON.stringify(migrations.length));
+}
+
+// --- Schema reconciliation ---
+// Version-numbered migrations cannot be trusted to add columns: a DB already
+// migrated to a HIGHER version by a build from a parallel branch skips this
+// branch's migrations entirely (a db_version-5 DB from the subagent branch
+// never ran our v4, so the fileMtime ALTER never happened and every prepare()
+// below crashed the app at startup). Required columns are therefore ensured by
+// inspecting the actual schema, independent of db_version. Errors here are
+// deliberately NOT swallowed: a transient failure (e.g. SQLITE_BUSY) must not
+// be recorded as migrated — the next launch simply retries.
+{
+  const cols = new Set(db.prepare('PRAGMA table_info(session_cache)').all().map(c => c.name));
+  if (!cols.has('aiTitle')) db.exec('ALTER TABLE session_cache ADD COLUMN aiTitle TEXT');
+  if (!cols.has('fileMtime')) {
+    db.exec('ALTER TABLE session_cache ADD COLUMN fileMtime TEXT');
+    // fileMtime's introduction changed what `modified` means (file mtime →
+    // last-message timestamp), so cached values written by pre-fileMtime code
+    // are stale. Clear the cache to force a full re-index; without this,
+    // dormant folders would keep mtime-based times indefinitely because the
+    // folder-level index gate never re-reads them.
+    db.exec('DELETE FROM session_cache');
+    db.exec('DELETE FROM cache_meta');
+  }
+  // Which CLI owns a session (`runtime`), and where its transcript actually
+  // lives (`sessionFile`).
+  //
+  // Both already exist in DBs built from a parallel branch, with exactly these
+  // semantics — runtime defaulting to 'claude', sessionFile null — so we adopt
+  // them rather than adding a second pair that would immediately drift.
+  //
+  // Neither invalidates the cache. Every row that predates them is a Claude
+  // session, which is what the default backfills, and a null sessionFile falls
+  // back to the <folder>/<sessionId>.jsonl path Claude has always used (see
+  // harnesses/claude.js transcriptPath). Codex needs the column because it
+  // names transcripts rollout-<timestamp>-<sessionId>.jsonl, which cannot be
+  // reconstructed from the session id alone.
+  //
+  // The ALTER omits NOT NULL on purpose: the parallel branch's column is
+  // nullable, so requiring it here would mean rebuilding the table on DBs that
+  // already have data. The default covers inserts, and every read goes through
+  // getHarness(), which treats null as Claude.
+  if (!cols.has('runtime')) db.exec("ALTER TABLE session_cache ADD COLUMN runtime TEXT DEFAULT 'claude'");
+  if (!cols.has('sessionFile')) db.exec('ALTER TABLE session_cache ADD COLUMN sessionFile TEXT');
 }
 
 // --- FTS5 full-text search ---
@@ -152,17 +208,17 @@ const stmts = {
   cacheCount: db.prepare('SELECT COUNT(*) as cnt FROM session_cache'),
   cacheGetAll: db.prepare('SELECT * FROM session_cache'),
   cacheUpsert: db.prepare(`
-    INSERT INTO session_cache (sessionId, folder, projectPath, summary, firstPrompt, created, modified, messageCount, slug, aiTitle)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO session_cache (sessionId, folder, projectPath, summary, firstPrompt, created, modified, messageCount, slug, aiTitle, fileMtime, runtime, sessionFile)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(sessionId) DO UPDATE SET
       folder = excluded.folder, projectPath = excluded.projectPath,
       summary = excluded.summary, firstPrompt = excluded.firstPrompt,
       created = excluded.created, modified = excluded.modified,
       messageCount = excluded.messageCount, slug = excluded.slug,
-      aiTitle = excluded.aiTitle
+      aiTitle = excluded.aiTitle, fileMtime = excluded.fileMtime,
+      runtime = excluded.runtime, sessionFile = excluded.sessionFile
   `),
-  cacheGetByFolder: db.prepare('SELECT sessionId, modified FROM session_cache WHERE folder = ?'),
-  cacheGetFolder: db.prepare('SELECT folder FROM session_cache WHERE sessionId = ?'),
+  cacheGetByFolder: db.prepare('SELECT sessionId, fileMtime FROM session_cache WHERE folder = ?'),
   cacheGetSession: db.prepare('SELECT * FROM session_cache WHERE sessionId = ?'),
   cacheDeleteSession: db.prepare('DELETE FROM session_cache WHERE sessionId = ?'),
   cacheDeleteFolder: db.prepare('DELETE FROM session_cache WHERE folder = ?'),
@@ -246,7 +302,8 @@ const upsertCachedSessionsBatch = db.transaction((sessions) => {
     stmts.cacheUpsert.run(
       s.sessionId, s.folder, s.projectPath, s.summary,
       s.firstPrompt, s.created, s.modified, s.messageCount || 0,
-      s.slug || null, s.aiTitle || null
+      s.slug || null, s.aiTitle || null, s.fileMtime || null,
+      s.runtime || 'claude', s.sessionFile || null
     );
   }
 });
@@ -257,11 +314,6 @@ function upsertCachedSessions(sessions) {
 
 function getCachedByFolder(folder) {
   return stmts.cacheGetByFolder.all(folder);
-}
-
-function getCachedFolder(sessionId) {
-  const row = stmts.cacheGetFolder.get(sessionId);
-  return row ? row.folder : null;
 }
 
 function getCachedSession(sessionId) {
@@ -685,7 +737,7 @@ function closeDb() {
 
 module.exports = {
   getMeta, getAllMeta, setName, toggleStar, setArchived,
-  isCachePopulated, getAllCached, getCachedByFolder, getCachedFolder, getCachedSession, upsertCachedSessions,
+  isCachePopulated, getAllCached, getCachedByFolder, getCachedSession, upsertCachedSessions,
   deleteCachedSession, deleteCachedFolder,
   getFolderMeta, getAllFolderMeta, setFolderMeta,
   upsertSearchEntries, updateSearchTitle, deleteSearchSession, deleteSearchFolder, deleteSearchType,

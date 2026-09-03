@@ -225,7 +225,6 @@ body { display: flex; flex-direction: column; }
 }
 
 #status-bar-activity {
-  margin-left: auto;
   white-space: nowrap;
   color: #8088ff;
 }
@@ -239,6 +238,52 @@ body { display: flex; flex-direction: column; }
   color: #888;
   font-style: italic;
 }
+
+#status-bar-quota {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  cursor: pointer;
+  opacity: 0.95;
+  flex-shrink: 0;
+  margin-left: auto;
+  transition: opacity 0.15s;
+}
+/* One bar per limit window; count varies with what the usage API reports. */
+.quota-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.quota-label {
+  color: #b4b8d0;
+  white-space: nowrap;
+}
+#status-bar-quota:hover { opacity: 1; }
+.quota-track {
+  width: 34px;
+  height: 4px;
+  background: rgba(255,255,255,0.12);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.quota-fill {
+  display: block;
+  height: 100%;
+  background: #3ecf5a;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+.quota-fill.quota-mid { background: #e8a030; }
+.quota-fill.quota-high { background: #e05070; }
+.quota-pct {
+  color: #b4b8d0;
+  white-space: nowrap;
+}
+
+
 
 /* ========== SIDEBAR ========== */
 #sidebar {
@@ -907,9 +952,12 @@ body { display: flex; flex-direction: column; }
   display: none;
 }
 
+/* Left edge lines up with the session rows above it (.session-item's 7px
+   inset), so the toggle reads as part of the same list. It was indented to
+   clear the pin back when the pin had its own gutter column. */
 .sessions-more-toggle {
   padding: 4px 10px;
-  margin: 4px 12px 10px 40px;
+  margin: 4px 12px 10px 7px;
   font-size: 11px;
   font-weight: 500;
   color: #7a7a90;
@@ -1033,9 +1081,10 @@ body { display: flex; flex-direction: column; }
 
 .slug-group.collapsed .slug-group-sessions { display: none; }
 .slug-group.collapsed .slug-group-older { display: none; }
+/* Same alignment as .sessions-more-toggle, inside a slug group's indent. */
 .slug-group-more {
   padding: 4px 10px;
-  margin: 4px 12px 10px 22px;
+  margin: 4px 12px 10px 7px;
   font-size: 11px;
   font-weight: 500;
   color: #7a7a90;
@@ -1061,7 +1110,7 @@ body { display: flex; flex-direction: column; }
 
 /* ---- Session items ---- */
 .session-item {
-  padding: 0 12px;
+  padding: 0 7px;
   cursor: pointer;
   transition: all 0.12s;
   position: relative;
@@ -1072,7 +1121,7 @@ body { display: flex; flex-direction: column; }
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 10px 10px;
+  padding: 10px 8px;
   border-radius: 8px;
   transition: background 0.12s;
   position: relative;
@@ -1093,77 +1142,24 @@ body { display: flex; flex-direction: column; }
   background: rgba(120,130,255,0.14);
 }
 
-/* ---- Activity-based border colors (F5) ---- */
-.session-item.activity-recent {
-  border-left-color: #22c55e; /* green — active within 5 min */
-}
-.session-item.activity-recent::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: #22c55e;
-  animation: pulse-green 2s ease-in-out infinite;
-}
-@keyframes pulse-green {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+/* ---- Gutter: logo above, pin below ---- */
+.session-gutter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
-.session-item.activity-recent-hour {
-  border-left-color: #eab308; /* yellow — active within 1 hour */
+/* Dim until the row is hovered or the session is actually pinned, so an
+   unpinned pin does not compete with the logo above it. */
+.session-gutter .session-pin {
+  opacity: 0.4;
 }
 
-.session-item.activity-stale {
-  border-left-color: #444460; /* grey — older */
-}
-
-/* ---- Git status border overrides (take priority over activity) ---- */
-.session-item.git-ahead {
-  border-left-color: #3b82f6 !important; /* blue */
-  border-left-width: 3px;
-}
-.session-item.git-ahead::before {
-  content: '\2191'; /* ↑ */
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  font-size: 10px;
-  color: #3b82f6;
-  z-index: 1;
-}
-
-.session-item.git-current {
-  border-left-color: #22c55e !important; /* green */
-  border-left-width: 2px;
-}
-
-.session-item.git-behind,
-.session-item.git-diverged {
-  border-left-color: #f97316 !important; /* orange */
-  border-left-width: 2px;
-}
-.session-item.git-behind::before,
-.session-item.git-diverged::before {
-  content: '\2193'; /* ↓ */
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  font-size: 10px;
-  color: #f97316;
-  z-index: 1;
-}
-
-.session-item.git-dirty {
-  border-left-color: #a855f7 !important; /* purple — uncommitted changes */
-  border-left-width: 2px;
-}
-
-.session-item.git-unknown {
-  border-left-color: #444460 !important; /* grey — no git info */
-  border-left-width: 1px;
+.session-item:hover .session-gutter .session-pin,
+.session-gutter .session-pin.pinned {
+  opacity: 1;
 }
 
 /* ---- Pin ---- */
@@ -1171,13 +1167,12 @@ body { display: flex; flex-direction: column; }
   flex-shrink: 0;
   cursor: pointer;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1;
   color: #7a7a96;
   transition: all 0.15s;
   user-select: none;
   display: flex;
   align-items: center;
-  margin-top: 5px;
 }
 
 .session-pin:hover {
@@ -1190,15 +1185,44 @@ body { display: flex; flex-direction: column; }
 }
 
 /* ---- Running dot ---- */
+/* Gutter mark: the session's CLI logo with its running dot tucked into the
+   corner. One column shared with the pin, so titles line up whatever the
+   session type is. The dot stays a separate element because the busy,
+   attention and response-ready states all restyle it. */
+.session-mark {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.session-mark-icon {
+  display: flex;
+  color: #7a7a90;
+  opacity: 0.8;
+}
+
+.session-item.has-running-pty .session-mark-icon { opacity: 1; }
+
+.session-item.is-codex .session-mark-icon { color: #10a37f; }
+.session-item.is-terminal .session-mark-icon { color: #3ecf5a; }
+
 .session-status-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -1px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
-  margin-top: 7px;
-  background: rgba(255,255,255,0.18);
+  background: transparent;
 }
 
+/* Idle sessions show the logo alone — an always-on grey dot is noise. */
 .session-status-dot.running {
   background: #3ecf5a;
 }
@@ -1213,10 +1237,17 @@ body { display: flex; flex-direction: column; }
 .session-item.cli-busy:not(.needs-attention) .session-status-dot,
 .session-item.cli-busy:not(.needs-attention) .session-status-dot.running {
   background: transparent !important;
+  box-shadow: none !important;
+}
+
+.session-item.cli-busy:not(.needs-attention) .session-mark::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
   border: 1.5px solid #4fc3f7;
   border-top-color: transparent;
-  animation: spin-dot 0.8s linear infinite !important;
-  box-shadow: none !important;
+  animation: spin-dot 0.8s linear infinite;
 }
 
 @keyframes spin-dot {
@@ -1287,20 +1318,18 @@ body { display: flex; flex-direction: column; }
   margin-top: 3px;
 }
 
-.session-project-label {
-  font-size: 10px;
-  color: #666680;
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
-  letter-spacing: -0.01em;
+/* Sidebar session items: time on the left, short session id on the right */
+.session-item .session-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.dark .session-project-label,
-[data-theme="dark"] .session-project-label {
+.session-short-id {
+  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
   color: #5a5a72;
+  flex-shrink: 0;
 }
 
 /* ---- Session action buttons ---- */
@@ -1327,6 +1356,7 @@ body { display: flex; flex-direction: column; }
 .session-launch-config-btn,
 .session-fork-btn,
 .session-jsonl-btn,
+.session-unread-btn,
 .session-archive-btn {
   cursor: pointer;
   background: none;
@@ -1353,6 +1383,14 @@ body { display: flex; flex-direction: column; }
   color: #5a7a6a;
 }
 
+.session-unread-btn {
+  color: #4a7f96;
+}
+
+.session-item.response-ready .session-unread-btn {
+  color: #4fc3f7;
+}
+
 .session-archive-btn {
   color: #6068b0;
 }
@@ -1370,6 +1408,11 @@ body { display: flex; flex-direction: column; }
 .session-fork-btn:hover {
   color: #3ecf5a;
   background: rgba(62,207,90,0.1);
+}
+
+.session-unread-btn:hover {
+  color: #4fc3f7;
+  background: rgba(79,195,247,0.1);
 }
 
 .session-archive-btn:hover {
@@ -1418,12 +1461,22 @@ body { display: flex; flex-direction: column; }
 }
 
 /* ---- Needs attention indicator (ripple) ---- */
+/* The dot is absolutely positioned in the gutter mark; it must stay that way
+   (it was `position: relative` when it was a plain flex child). */
 .session-item.needs-attention .session-status-dot,
 .session-item.needs-attention .session-status-dot.running {
   background: #f0a050;
   box-shadow: none;
   animation: none;
-  position: relative;
+}
+
+/* The logo is the thing the eye lands on, so a blocked session colours that,
+   not just the 6px dot beside it. */
+.session-item.needs-attention .session-mark-icon,
+.session-item.needs-attention.is-codex .session-mark-icon,
+.session-item.needs-attention.is-terminal .session-mark-icon {
+  color: #f0a050;
+  opacity: 1;
 }
 
 .session-item.needs-attention .session-status-dot::before,
@@ -4410,6 +4463,18 @@ body { display: flex; flex-direction: column; }
   border-radius: 3px;
 }
 
+/* Every harness mark is 16px so the labels line up; the base 18px predates
+   there being more than one. */
+.popover-option-icon.codex-icon,
+.popover-option-icon.terminal-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.popover-option-icon.codex-icon {
+  color: #10a37f;
+}
+
 .popover-option-terminal .popover-option-icon,
 .terminal-icon {
   color: #3ecf5a;
@@ -4450,16 +4515,6 @@ body { display: flex; flex-direction: column; }
 }
 
 /* ========== TERMINAL BADGE ========== */
-.terminal-badge {
-  display: inline-flex;
-  align-items: center;
-  color: #3ecf5a;
-  margin-right: 5px;
-  vertical-align: middle;
-  position: relative;
-  top: -1px;
-}
-
 /* Terminal sessions: green status dot */
 .session-item.is-terminal .session-status-dot.running {
   background: #3ecf5a;
@@ -4687,1827 +4742,51 @@ body { display: flex; flex-direction: column; }
   vertical-align: middle;
 }
 
-/* ========== CONVERSATION VIEWER ========== */
+/* The running dot means "running", not "which CLI" — it stays one colour for
+   every harness. The logo beside it is what carries the brand. */
 
-#conversation-viewer {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  overflow: hidden;
-  background: #111118;
-}
-
-#cv-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 18px;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
-  background: rgba(255,255,255,0.02);
-  flex-shrink: 0;
-  gap: 12px;
-}
-
-#cv-header-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-#cv-session-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: #e0e0f0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-#cv-session-meta {
-  font-size: 11px;
-  color: #5a5a7a;
-}
-
-#cv-header-actions {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-#cv-header-actions button {
-  background: transparent;
-  border: 1px solid rgba(255,255,255,0.08);
-  color: #9090a8;
-  font-size: 11px;
-  padding: 3px 10px;
-  border-radius: 5px;
-  cursor: pointer;
-  transition: all 0.15s;
-  font-family: inherit;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-#cv-export-md-btn:hover { border-color: rgba(96,165,250,0.3); color: #60a5fa; background: rgba(96,165,250,0.06); }
-#cv-copy-btn:hover { border-color: rgba(96,165,250,0.3); color: #60a5fa; background: rgba(96,165,250,0.06); }
-#cv-resume-btn { border-color: rgba(62,207,90,0.2); color: #3ecf5a; }
-#cv-resume-btn:hover { border-color: rgba(62,207,90,0.4); background: rgba(62,207,90,0.08); }
-
-#cv-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px 32px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-.cv-loading, .cv-empty, .cv-error {
-  color: #5a5a7a;
-  font-size: 13px;
-  padding: 40px 0;
-  text-align: center;
-}
-.cv-error { color: #ef4444; }
-
-/* ---- Message bubbles ---- */
-.cv-message {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 820px;
-}
-
-.cv-user {
-  align-self: flex-end;
-}
-
-.cv-assistant {
-  align-self: flex-start;
-}
-
-.cv-msg-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.cv-msg-role {
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #5a5a7a;
-}
-
-.cv-user .cv-msg-role { color: #4fc3f7; }
-.cv-assistant .cv-msg-role { color: #d97757; }
-
-.cv-msg-time, .cv-msg-model {
-  font-size: 10px;
-  color: #3a3a5a;
-}
-
-.cv-msg-model {
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.05);
-  border-radius: 3px;
-  padding: 1px 5px;
-  color: #4a4a6a;
-}
-
-.cv-msg-body {
-  font-size: 13px;
-  line-height: 1.65;
-  color: #c8c8e0;
-  word-break: break-word;
-}
-
-.cv-user .cv-msg-body {
-  background: rgba(79,195,247,0.07);
-  border: 1px solid rgba(79,195,247,0.12);
-  border-radius: 10px 10px 2px 10px;
-  padding: 10px 14px;
-  color: #d8eefa;
-}
-
-.cv-msg-body p { margin: 0 0 8px 0; }
-.cv-msg-body p:last-child { margin-bottom: 0; }
-.cv-msg-body h1, .cv-msg-body h2, .cv-msg-body h3 { color: #e0e0f0; margin: 12px 0 6px 0; }
-.cv-h1 { font-size: 1.3em; }
-.cv-h2 { font-size: 1.15em; }
-.cv-h3 { font-size: 1.05em; }
-
-.cv-code-block {
-  background: #0e0e1a;
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 6px;
-  padding: 10px 14px;
-  font-size: 12px;
-  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-  overflow-x: auto;
-  white-space: pre;
-  color: #9090c0;
-  margin: 8px 0;
-}
-
-.cv-inline-code {
-  background: rgba(255,255,255,0.06);
-  border-radius: 3px;
-  padding: 1px 5px;
-  font-size: 0.9em;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  color: #b0a0e0;
-}
-
-/* ---- Tool calls ---- */
-.cv-tools {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  margin-top: 4px;
-}
-
-.cv-tool {
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 6px;
-  overflow: hidden;
-  background: rgba(255,255,255,0.02);
-  font-size: 12px;
-}
-
-.cv-tool[open] {
-  border-color: rgba(255,255,255,0.1);
-}
-
-.cv-tool-summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-}
-
-.cv-tool-summary::-webkit-details-marker { display: none; }
-
-.cv-tool-summary::before {
-  content: '▶';
-  font-size: 9px;
-  color: #4a4a6a;
-  transition: transform 0.1s;
-}
-
-.cv-tool[open] .cv-tool-summary::before { transform: rotate(90deg); }
-
-.cv-tool-name {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  color: #a090d0;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.cv-tool-preview {
-  color: #4a4a6a;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-
-.cv-tool-err-badge {
-  background: rgba(239,68,68,0.15);
-  color: #ef4444;
-  border-radius: 3px;
-  padding: 1px 6px;
-  font-size: 10px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.cv-tool-input, .cv-tool-result {
-  padding: 8px 10px;
-  border-top: 1px solid rgba(255,255,255,0.04);
-}
-
-.cv-tool-input pre, .cv-tool-result pre {
-  margin: 0;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 11px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: #7070a0;
-}
-
-.cv-tool-input pre { color: #8080b0; }
-
-.cv-tool-result-error pre { color: #ef4444; }
-
-/* ---- Usage badge ---- */
-.cv-usage {
-  font-size: 10px;
-  color: #3a3a5a;
-  text-align: right;
-}
-
-/* ---- Summary divider ---- */
-.cv-summary {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 0;
-  border-top: 1px dashed rgba(255,255,255,0.06);
-  border-bottom: 1px dashed rgba(255,255,255,0.06);
-}
-
-.cv-summary-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: #5a5a9a;
-  white-space: nowrap;
-}
-
-.cv-summary-text {
-  font-size: 11px;
-  color: #4a4a7a;
-  font-style: italic;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ---- System message ---- */
-.cv-system {
-  font-size: 11px;
-  color: #3a3a5a;
-  font-style: italic;
-  padding: 4px 0;
-}
-
-/* ========== HEADLESS SESSIONS ========== */
-
-.headless-badge {
-  display: inline-flex;
-  align-items: center;
-  color: #eab308;
-  margin-right: 4px;
-  flex-shrink: 0;
-}
-
-.headless-sparkline {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  height: 10px;
-  margin-top: 3px;
-  overflow: hidden;
-}
-.headless-sparkline:empty {
-  display: none;
-}
-
-.spark-block {
-  display: inline-block;
-  width: 4px;
-  height: 10px;
-  border-radius: 1px;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-
-.session-item.is-headless .session-status-dot.running {
-  background: #eab308;
-  box-shadow: 0 0 6px rgba(234, 179, 8, 0.5);
-}
-
-/* Headless prompt dialog */
-.headless-prompt-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(4px);
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.headless-prompt-dialog {
-  background: #1a1a24;
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 12px;
-  padding: 20px;
-  width: 480px;
-  max-width: 90vw;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-}
-
-.headless-prompt-dialog h3 {
-  margin: 0 0 12px;
-  font-size: 14px;
-  color: #b0b0c4;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.headless-prompt-dialog h3 svg {
-  color: #eab308;
-}
-
-.headless-prompt-dialog textarea {
-  width: 100%;
-  min-height: 100px;
-  background: #12121a;
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 8px;
-  color: #d0d0e0;
-  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
-  font-size: 13px;
-  padding: 10px;
-  resize: vertical;
-  outline: none;
-  box-sizing: border-box;
-}
-
-.headless-prompt-dialog textarea:focus {
-  border-color: rgba(234, 179, 8, 0.4);
-}
-
-.headless-prompt-options {
-  display: flex;
-  gap: 16px;
-  margin-top: 8px;
-}
-.headless-option {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: #999;
-  cursor: pointer;
-}
-.headless-option input[type="checkbox"] {
-  accent-color: #eab308;
-}
-.headless-option-hint {
-  color: #555;
-  font-size: 11px;
-}
-
-.headless-prompt-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.headless-prompt-actions button {
-  padding: 6px 16px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  font-family: inherit;
-  border: 1px solid rgba(255,255,255,0.08);
-  transition: all 0.15s;
-}
-
-.headless-cancel-btn {
-  background: transparent;
-  color: #8888a0;
-}
-
-.headless-cancel-btn:hover {
-  background: rgba(255,255,255,0.05);
-  color: #b0b0c4;
-}
-
-.headless-start-btn {
-  background: rgba(234, 179, 8, 0.15);
-  color: #eab308;
-  border-color: rgba(234, 179, 8, 0.3) !important;
-}
-
-.headless-start-btn:hover {
-  background: rgba(234, 179, 8, 0.25);
-}
-
-.headless-start-btn:disabled {
+/* A CLI that is not installed shows its toggle greyed rather than hidden, so
+   the list explains itself. */
+.settings-toggle input:disabled + .settings-toggle-slider {
   opacity: 0.4;
   cursor: not-allowed;
 }
 
-/* Headless event log (shown in main area instead of terminal) */
-.headless-log {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px 16px;
-  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
-  font-size: 12px;
-  background: #0d0d14;
-  color: #b0b0c4;
-}
-
-.headless-log-entry {
-  padding: 2px 0;
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-}
-
-.headless-log-time {
-  color: #555568;
-  font-size: 10px;
-  flex-shrink: 0;
-  min-width: 60px;
-}
-
-.headless-log-type {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  min-width: 60px;
-  flex-shrink: 0;
-}
-
-.headless-log-text {
-  color: #d0d0e0;
-  word-break: break-word;
-}
-
-/* Popover headless button */
-.popover-option-headless {
-  color: #eab308 !important;
-}
-
-/* ========== PEERS MESSAGING ========== */
-
-/* Toast notification for incoming messages */
-.peer-toast {
-  position: fixed;
-  bottom: 40px;
-  right: 20px;
-  width: 340px;
-  background: #1e1e2e;
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 10px;
-  padding: 12px 14px;
-  z-index: 999;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
-  animation: toastSlide 0.25s ease-out;
-}
-
-@keyframes toastSlide {
-  from { transform: translateY(20px); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-
-.peer-toast-header {
+/* ---- Quota gauge: one group per CLI ---- */
+/* Each CLI's windows sit behind its own logo, with a wider gap between groups
+   than between bars so the two read as separate blocks rather than one run. */
+.quota-group {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.peer-toast-agent {
-  font-weight: 600;
-  font-size: 12px;
-}
-
-.peer-toast-path {
-  color: #555568;
-  font-size: 11px;
-  flex: 1;
-}
-
-.peer-toast-close {
-  background: none;
-  border: none;
-  color: #555568;
-  font-size: 16px;
-  cursor: pointer;
-  padding: 0 2px;
-  line-height: 1;
-}
-
-.peer-toast-close:hover { color: #b0b0c4; }
-
-.peer-toast-body {
-  color: #d0d0e0;
-  font-size: 12px;
-  line-height: 1.4;
-  word-break: break-word;
-  max-height: 80px;
-  overflow-y: auto;
-  margin-bottom: 8px;
-}
-
-.peer-toast-actions {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.peer-toast-reply {
-  background: rgba(100,100,255,0.12);
-  border: 1px solid rgba(100,100,255,0.2);
-  color: #8888ff;
-  font-size: 11px;
-  font-weight: 500;
-  padding: 4px 12px;
-  border-radius: 5px;
-  cursor: pointer;
-  font-family: inherit;
-}
-
-.peer-toast-reply:hover {
-  background: rgba(100,100,255,0.2);
-}
-
-/* Peers popover */
-.peers-popover {
-  background: #1a1a24;
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 10px;
-  padding: 6px;
-  min-width: 220px;
-  max-width: 320px;
-  z-index: 1000;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
-}
-
-.peers-popover-empty {
-  color: #555568;
-  font-size: 12px;
-  padding: 10px 12px;
-  text-align: center;
-}
-
-.peers-popover-peer {
-  display: flex !important;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.peers-peer-label {
-  font-size: 12px;
-  flex: 1;
-}
-
-.peers-peer-summary {
-  width: 100%;
-  font-size: 10px;
-  color: #555568;
-  margin-left: 16px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Terminal header peers button */
-.terminal-header-peers-btn {
-  background: rgba(255, 50, 50, 0.15);
-  border: 1px solid rgba(255, 60, 60, 0.5);
-  border-radius: 5px;
-  color: #ff4444;
-  cursor: pointer;
-  padding: 4px 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-right: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  transition: all 0.15s;
-}
-
-.terminal-header-peers-btn:hover {
-  background: rgba(255, 50, 50, 0.3);
-  color: #ff6666;
-  border-color: rgba(255, 60, 60, 0.8);
-}
-
-/* ========== COMMAND SCHEDULER ========== */
-.scheduler-btn {
-  background: none;
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 5px;
-  color: #8888a0;
-  cursor: pointer;
-  padding: 3px 6px;
-  display: inline-flex;
-  align-items: center;
-  margin-left: 6px;
-  transition: all 0.15s;
-  position: relative;
-}
-.scheduler-btn:hover {
-  background: rgba(128,136,255,0.1);
-  color: #b0b0ff;
-  border-color: rgba(128,136,255,0.2);
-}
-.scheduler-btn.active {
-  color: #8088ff;
-  border-color: rgba(128,136,255,0.3);
-}
-.scheduler-btn .scheduler-running-dot {
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #3ecf5a;
-  animation: scheduler-pulse 1.5s ease-in-out infinite;
-}
-@keyframes scheduler-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.5; transform: scale(0.7); }
-}
-
-/* Overlay */
-.scheduler-overlay {
-  position: fixed;
-  top: 0;
-  bottom: 24px; /* leave status bar visible */
-  right: 0;
-  left: var(--sidebar-width, 260px);
-  background: rgba(11, 11, 18, 0.82);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  z-index: 900;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  animation: scheduler-fade-in 0.2s ease-out;
-}
-@keyframes scheduler-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-.scheduler-panel {
-  background: rgba(26, 26, 36, 0.95);
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 14px;
-  width: 580px;
-  max-width: 95%;
-  max-height: 85vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 24px 72px rgba(0,0,0,0.5), 0 0 0 1px rgba(128,136,255,0.05);
-  overflow: hidden;
-}
-
-.scheduler-header {
-  padding: 18px 20px 14px;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   gap: 12px;
-}
-.scheduler-header h3 {
-  font-size: 14px;
-  font-weight: 600;
-  color: #d0d0e8;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-}
-.scheduler-header h3 svg { color: #8088ff; flex-shrink: 0; }
-.scheduler-close-btn {
-  background: none;
-  border: none;
-  color: #666;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
-  transition: all 0.15s;
-  display: flex;
-}
-.scheduler-close-btn:hover { background: rgba(255,255,255,0.06); color: #aaa; }
-
-/* Target selector */
-.scheduler-targets {
-  padding: 12px 20px;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
-}
-.scheduler-targets-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: #7a7a90;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 8px;
-}
-.scheduler-target-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.scheduler-target-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.03);
-  color: #8888a0;
-  transition: all 0.15s;
-  user-select: none;
-}
-.scheduler-target-chip:hover {
-  background: rgba(128,136,255,0.08);
-  border-color: rgba(128,136,255,0.2);
-}
-.scheduler-target-chip.selected {
-  background: rgba(128,136,255,0.12);
-  border-color: rgba(128,136,255,0.3);
-  color: #b0b8ff;
-}
-.scheduler-target-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #555;
-}
-.scheduler-target-chip.selected .scheduler-target-dot { background: #8088ff; }
-
-/* Steps list */
-.scheduler-steps {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px 20px;
-  min-height: 120px;
-  max-height: 45vh;
-}
-.scheduler-steps::-webkit-scrollbar { width: 5px; }
-.scheduler-steps::-webkit-scrollbar-track { background: transparent; }
-.scheduler-steps::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
-
-.scheduler-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  margin-bottom: 6px;
-  border-radius: 8px;
-  border: 1px solid rgba(255,255,255,0.06);
-  background: rgba(255,255,255,0.02);
-  transition: all 0.15s;
-  position: relative;
-}
-.scheduler-step:hover { border-color: rgba(255,255,255,0.1); }
-.scheduler-step.active-step {
-  border-color: rgba(128,136,255,0.4);
-  background: rgba(128,136,255,0.06);
-  box-shadow: 0 0 12px rgba(128,136,255,0.08);
-}
-.scheduler-step.is-wait { border-left: 3px solid rgba(234,179,8,0.5); }
-.scheduler-step.is-command { border-left: 3px solid rgba(128,136,255,0.3); }
-
-.scheduler-step-badge {
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 2px 6px;
-  border-radius: 4px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.scheduler-step.is-command .scheduler-step-badge {
-  background: rgba(128,136,255,0.12);
-  color: #8088ff;
-}
-.scheduler-step.is-wait .scheduler-step-badge {
-  background: rgba(234,179,8,0.12);
-  color: #eab308;
-}
-
-.scheduler-step-input {
-  flex: 1;
-  background: rgba(0,0,0,0.3);
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 5px;
-  color: #d0d0e0;
-  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
-  font-size: 12px;
-  padding: 6px 8px;
-  outline: none;
-  min-width: 0;
-}
-.scheduler-step-input:focus {
-  border-color: rgba(128,136,255,0.3);
-}
-.scheduler-step-input::placeholder { color: #555; }
-
-/* Wait duration inputs */
-.scheduler-wait-inputs {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 1;
-}
-.scheduler-wait-num {
-  width: 52px;
-  background: rgba(0,0,0,0.3);
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 5px;
-  color: #eab308;
-  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
-  font-size: 12px;
-  padding: 6px 6px;
-  outline: none;
-  text-align: center;
-}
-.scheduler-wait-num:focus { border-color: rgba(234,179,8,0.3); }
-.scheduler-wait-unit {
-  font-size: 10px;
-  color: #7a7a90;
-  font-weight: 500;
-  width: 16px;
-}
-
-/* Step action buttons */
-.scheduler-step-actions {
-  display: flex;
-  gap: 2px;
-  flex-shrink: 0;
-}
-.scheduler-step-btn {
-  background: none;
-  border: none;
-  color: #555;
-  cursor: pointer;
-  padding: 3px;
-  border-radius: 4px;
-  display: flex;
-  transition: all 0.15s;
-}
-.scheduler-step-btn:hover { background: rgba(255,255,255,0.06); color: #999; }
-.scheduler-step-btn.remove-btn:hover { color: #e05070; }
-
-/* Add step buttons */
-.scheduler-add-row {
-  display: flex;
-  gap: 8px;
-  padding: 8px 20px 4px;
-}
-.scheduler-add-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 12px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-  border: 1px dashed rgba(255,255,255,0.1);
-  background: transparent;
-  color: #7a7a90;
-  transition: all 0.15s;
-  font-family: inherit;
-}
-.scheduler-add-btn:hover {
-  border-color: rgba(128,136,255,0.3);
-  color: #b0b8ff;
-  background: rgba(128,136,255,0.05);
-}
-.scheduler-add-btn.add-wait:hover {
-  border-color: rgba(234,179,8,0.3);
-  color: #eab308;
-  background: rgba(234,179,8,0.05);
-}
-
-/* Repeat config */
-.scheduler-repeat {
-  padding: 12px 20px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.scheduler-repeat label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: #8888a0;
-  cursor: pointer;
-  user-select: none;
-}
-.scheduler-repeat input[type="checkbox"] {
-  accent-color: #8088ff;
-  width: 14px;
-  height: 14px;
-}
-.scheduler-repeat-config {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: #7a7a90;
-}
-.scheduler-repeat-input {
-  width: 48px;
-  background: rgba(0,0,0,0.3);
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 5px;
-  color: #d0d0e0;
-  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
-  font-size: 11px;
-  padding: 4px 6px;
-  outline: none;
-  text-align: center;
-}
-.scheduler-repeat-input:focus { border-color: rgba(128,136,255,0.3); }
-.scheduler-repeat-select {
-  background: rgba(0,0,0,0.3);
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 5px;
-  color: #d0d0e0;
-  font-size: 11px;
-  padding: 4px 6px;
-  outline: none;
-  font-family: inherit;
-}
-
-/* Footer actions */
-.scheduler-footer {
-  padding: 14px 20px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.scheduler-footer-left {
-  display: flex;
-  gap: 6px;
-}
-.scheduler-footer-right {
-  display: flex;
-  gap: 8px;
-  margin-left: auto;
-}
-.scheduler-footer button {
-  padding: 7px 16px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  font-family: inherit;
-  border: 1px solid rgba(255,255,255,0.08);
-  transition: all 0.15s;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-.scheduler-save-btn, .scheduler-load-btn {
-  background: transparent;
-  color: #7a7a90;
-}
-.scheduler-save-btn:hover, .scheduler-load-btn:hover {
-  background: rgba(255,255,255,0.05);
-  color: #b0b0c4;
-}
-.scheduler-cancel-btn {
-  background: transparent;
-  color: #8888a0;
-}
-.scheduler-cancel-btn:hover {
-  background: rgba(255,255,255,0.05);
-  color: #b0b0c4;
-}
-.scheduler-run-btn {
-  background: rgba(62,207,90,0.1);
-  color: #3ecf5a;
-  border-color: rgba(62,207,90,0.25) !important;
-}
-.scheduler-run-btn:hover {
-  background: rgba(62,207,90,0.18);
-}
-.scheduler-run-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.scheduler-stop-run-btn {
-  background: rgba(224,80,112,0.1);
-  color: #e05070;
-  border-color: rgba(224,80,112,0.25) !important;
-}
-.scheduler-stop-run-btn:hover {
-  background: rgba(224,80,112,0.18);
-}
-
-/* Progress indicator */
-.scheduler-progress {
-  padding: 8px 20px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 11px;
-  color: #7a7a90;
-}
-.scheduler-progress-bar {
-  flex: 1;
-  height: 3px;
-  background: rgba(255,255,255,0.06);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.scheduler-progress-fill {
-  height: 100%;
-  background: #8088ff;
-  border-radius: 2px;
-  transition: width 0.3s ease;
-}
-.scheduler-progress-text { white-space: nowrap; }
-.scheduler-countdown {
-  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
-  color: #eab308;
-}
-
-/* Empty state */
-.scheduler-empty {
-  text-align: center;
-  padding: 32px 20px;
-  color: #555;
-  font-size: 12px;
-}
-.scheduler-empty svg { margin-bottom: 8px; opacity: 0.3; }
-
-/* Grid card scheduler button */
-.grid-card-scheduler-btn {
-  background: none;
-  border: none;
-  color: #666;
-  cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 3px;
-  display: inline-flex;
-  transition: all 0.15s;
-  margin-left: 4px;
-}
-.grid-card-scheduler-btn:hover { color: #8088ff; background: rgba(128,136,255,0.1); }
-
-/* New step type colors */
-.scheduler-step.is-watch { border-left: 3px solid rgba(62,207,90,0.5); }
-.scheduler-step.is-gate { border-left: 3px solid rgba(192,132,252,0.5); }
-.scheduler-step.is-parallel { border-left: 3px solid rgba(34,211,238,0.5); }
-.scheduler-step.is-comment { border-left: 3px solid rgba(85,85,85,0.5); opacity: 0.7; }
-.scheduler-step.is-condition { border-left: 3px solid rgba(251,146,60,0.5); }
-.scheduler-step.is-peer-msg { border-left: 3px solid rgba(96,165,250,0.5); }
-.scheduler-step.is-launch { border-left: 3px solid rgba(244,114,182,0.5); }
-
-.scheduler-step.is-watch .scheduler-step-badge { background: rgba(62,207,90,0.12); color: #3ecf5a; }
-.scheduler-step.is-gate .scheduler-step-badge { background: rgba(192,132,252,0.12); color: #c084fc; }
-.scheduler-step.is-parallel .scheduler-step-badge { background: rgba(34,211,238,0.12); color: #22d3ee; }
-.scheduler-step.is-comment .scheduler-step-badge { background: rgba(85,85,85,0.15); color: #666; }
-.scheduler-step.is-condition .scheduler-step-badge { background: rgba(251,146,60,0.12); color: #fb923c; }
-.scheduler-step.is-peer-msg .scheduler-step-badge { background: rgba(96,165,250,0.12); color: #60a5fa; }
-.scheduler-step.is-launch .scheduler-step-badge { background: rgba(244,114,182,0.12); color: #f472b6; }
-
-/* Comment input styling */
-.scheduler-comment-input {
-  font-style: italic;
-  color: #777 !important;
-  background: transparent !important;
-  border-color: transparent !important;
-}
-.scheduler-comment-input::placeholder { color: #444; font-style: italic; }
-
-/* Breakpoint dot */
-.scheduler-bp-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  border: 1.5px solid rgba(255,255,255,0.08);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all 0.15s;
-}
-.scheduler-bp-dot:hover { border-color: rgba(224,80,112,0.5); }
-.scheduler-bp-dot.active {
-  background: #e05070;
-  border-color: #e05070;
-  box-shadow: 0 0 6px rgba(224,80,112,0.4);
-}
-
-/* Per-step target badge */
-.scheduler-step-target-badge {
-  font-size: 9px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: rgba(128,136,255,0.08);
-  color: #8088ff;
-  border: 1px solid rgba(128,136,255,0.15);
-  cursor: pointer;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition: all 0.15s;
-}
-.scheduler-step-target-badge:hover {
-  background: rgba(128,136,255,0.15);
-  border-color: rgba(128,136,255,0.3);
-}
-
-/* Broadcast active indicator */
-.scheduler-add-btn.broadcast-active {
-  color: #3ecf5a !important;
-  border-color: rgba(62,207,90,0.4) !important;
-  background: rgba(62,207,90,0.06) !important;
-}
-
-/* Macro recording active */
-.scheduler-add-btn.macro-active {
-  color: #e05070 !important;
-  border-color: rgba(224,80,112,0.4) !important;
-  background: rgba(224,80,112,0.06) !important;
-  animation: scheduler-pulse 1.5s ease-in-out infinite;
-}
-
-/* Add button type-specific hover colors */
-.scheduler-add-btn.add-watch:hover { border-color: rgba(62,207,90,0.3); color: #3ecf5a; background: rgba(62,207,90,0.05); }
-.scheduler-add-btn.add-gate:hover { border-color: rgba(192,132,252,0.3); color: #c084fc; background: rgba(192,132,252,0.05); }
-.scheduler-add-btn.add-parallel:hover { border-color: rgba(34,211,238,0.3); color: #22d3ee; background: rgba(34,211,238,0.05); }
-.scheduler-add-btn.add-comment:hover { border-color: rgba(85,85,85,0.3); color: #888; background: rgba(85,85,85,0.05); }
-.scheduler-add-btn.add-condition:hover { border-color: rgba(251,146,60,0.3); color: #fb923c; background: rgba(251,146,60,0.05); }
-.scheduler-add-btn.add-peer:hover { border-color: rgba(96,165,250,0.3); color: #60a5fa; background: rgba(96,165,250,0.05); }
-.scheduler-add-btn.add-launch:hover { border-color: rgba(244,114,182,0.3); color: #f472b6; background: rgba(244,114,182,0.05); }
-
-/* LAN Peers settings */
-.settings-lan-machines {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 4px;
-}
-.lan-machine-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 8px;
-  border-radius: 10px;
-  background: rgba(96,165,250,0.12);
-  border: 1px solid rgba(96,165,250,0.25);
-  color: #60a5fa;
-  font-size: 11px;
-  font-family: monospace;
-}
-.lan-machine-ip {
-  color: rgba(96,165,250,0.6);
-  font-size: 10px;
-}
-
-/* Remote peer machine badge in peers popover */
-.peeuler-add-btn.add-peer:hover { border-color: rgba(96,165,250,0.3); color: #60a5fa; background: rgba(96,165,250,0.05); }
-.scheduler-add-btn.add-launch:hover { border-color: rgba(244,114,182,0.3); color: #f472b6; background: rgba(244,114,182,0.05); }
-
-/* LAN Peers settings */
-.settings-lan-machines {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 4px;
-}
-.lan-machine-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 8px;
-  border-radius: 10px;
-  background: rgba(96,165,250,0.12);
-  border: 1px solid rgba(96,165,250,0.25);
-  color: #60a5fa;
-  font-size: 11px;
-  font-family: monospace;
-}
-.lan-machine-ip {
-  color: rgba(96,165,250,0.6);
-  font-size: 10px;
-}
-
-/* Remote peer machine badge in peers popover */
-.peers-remote-badge {
-  display: inline-block;
-  margin-left: 5px;
-  padding: 1px 5px;
-  border-radius: 8px;
-  background: rgba(96,165,250,0.15);
-  color: #60a5fa;
-  font-size: 9px;
-  vertical-align: middle;
-}
-
-/* Terminal loading overlay (F6) */
-.terminal-loading {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #111118;
-  z-index: 50;
-}
-.terminal-loading .spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid rgba(255,255,255,0.1);
-  border-top-color: #8088ff;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-/* F9: Focus-visible outlines for keyboard navigation */
-*:focus-visible {
-  outline: 2px solid #8088ff;
-  outline-offset: 2px;
-  border-radius: 2px;
-}
-
-button:focus-visible,
-[role="button"]:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible,
-a:focus-visible {
-  outline: 2px solid #8088ff;
-  outline-offset: 2px;
-}
-
-/* Suppress focus ring for mouse users — only show for keyboard nav */
-button:focus:not(:focus-visible),
-[role="button"]:focus:not(:focus-visible) {
-  outline: none;
-}
-
-/* Export dropdown in conversation viewer header */
-.cv-export-dropdown {
-  position: relative;
-  display: inline-block;
-}
-.cv-export-menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 100;
-  display: flex;
-  flex-direction: column;
-  background: #1a1a2e;
-  border: 1px solid #333;
-  border-radius: 6px;
-  overflow: hidden;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-  min-width: 140px;
-}
-.cv-export-menu button {
-  background: none;
-  border: none;
-  color: #ccc;
-  padding: 8px 12px;
-  text-align: left;
-  cursor: pointer;
-  font-size: 13px;
-}
-.cv-export-menu button:hover {
-  background: rgba(255,255,255,0.08);
-  color: #fff;
-}
-
-/* ========== Feature 1: Agent context menu (right-click on sidebar expand) ========== */
-.agent-context-menu {
-  position: fixed;
-  z-index: 10000;
-  min-width: 180px;
-  max-width: 240px;
-  background: #1a1a2e;
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 8px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04);
-  padding: 4px 0;
-  backdrop-filter: blur(8px);
-}
-.agent-context-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 14px;
-  cursor: pointer;
-  transition: background 0.1s;
-  color: #c8c8e0;
-  font-size: 13px;
-  border: none;
-  background: none;
-  width: 100%;
-  text-align: left;
-  font-family: inherit;
-}
-.agent-context-menu-item:hover {
-  background: rgba(255,255,255,0.08);
-}
-.agent-context-menu-item .ctx-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.agent-context-menu-item .ctx-checkmark {
-  margin-left: auto;
-  color: #22c55e;
-  font-size: 14px;
-}
-/* Context-menu row = clickable label (select view) + flag toggle */
-.agent-context-menu-item .ctx-item-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1 1 auto;
-  min-width: 0;
-  background: none;
-  border: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  padding: 0;
-}
-.agent-context-menu-item.active { color: #fff; }
-.ctx-flag-btn {
-  flex: 0 0 auto;
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  color: #666680;
-  padding: 2px 4px;
-  border-radius: 4px;
-}
-.ctx-flag-btn:hover { background: rgba(255,255,255,0.1); }
-.ctx-flag-btn.flagged { color: #ef4444; }
-.agent-context-menu-header {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #666680;
-  padding: 6px 14px 4px;
-}
-.agent-context-menu-sep {
-  height: 1px;
-  background: rgba(255,255,255,0.08);
-  margin: 4px 0;
-}
-/* Flag marker on per-CLI selector buttons */
-.agent-flag-mark { font-size: 9px; color: #ef4444; margin-left: 2px; }
-.agent-selector-btn.flagged { border-color: rgba(239,68,68,0.4); }
-/* Rotate-toolbar arrows (cycle through CLI views) */
-.agent-rotate-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  margin-top: 4px;
-  padding-top: 4px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-}
-.agent-rotate-btn {
-  background: none;
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 4px;
-  color: #888;
-  cursor: pointer;
-  font-size: 10px;
-  padding: 2px 10px;
-  font-family: inherit;
-  transition: all 0.15s;
-}
-.agent-rotate-btn:hover { background: rgba(255,255,255,0.08); color: #ddd; }
-.agent-rotate-label {
-  font-size: 11px;
-  color: #888;
-  min-width: 70px;
-  text-align: center;
-}
-/* CLI Agents settings list */
-.cli-agents-list { display: flex; flex-direction: column; gap: 4px; }
-.cli-agent-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 6px;
-  border-radius: 6px;
-  font-size: 12px;
-  cursor: pointer;
-}
-.cli-agent-row:hover { background: rgba(255,255,255,0.04); }
-.cli-agent-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-.cli-agent-name { color: #d0d0e0; min-width: 90px; }
-.cli-agent-cmd { color: #777; font-size: 11px; }
-.cli-agent-status { margin-left: auto; font-size: 10px; padding: 2px 6px; border-radius: 4px; }
-.cli-agent-status.ok { color: #22c55e; background: rgba(34,197,94,0.12); }
-.cli-agent-status.partial { color: #eab308; background: rgba(234,179,8,0.12); }
-.cli-agent-status.missing { color: #888; background: rgba(255,255,255,0.05); }
-
-/* ========== Multi-Agent Sidebar ========== */
-.multi-agent-sidebar {
-  padding: 0 0 12px;
-}
-
-/* Multi-sidebar controls bar (layout switch + recency gate) */
-.multi-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 8px 12px;
-}
-.multi-layout-switch { display: inline-flex; gap: 2px; }
-.multi-layout-btn {
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
-  color: #b0b0c8;
-  border-radius: 6px;
-  padding: 3px 9px;
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
-}
-.multi-layout-btn:hover { background: rgba(255,255,255,0.08); }
-.multi-layout-btn.active {
-  background: rgba(217,119,87,0.22);
-  border-color: #d97757;
-  color: #fff;
-}
-.multi-recency {
-  font-size: 11px;
-  color: #888;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.multi-recency input {
-  width: 48px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
-  color: #ddd;
-  border-radius: 5px;
-  padding: 2px 4px;
-  font-size: 11px;
-}
-
-/* Columns layout — side-by-side panes that tile across the sidebar, so on an
-   ultrawide monitor every CLI's sidebar can stay open at once. */
-.multi-agent-sidebar.columns {
-  display: flex;
-  flex-flow: row wrap;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 0 8px 12px;
-}
-.multi-agent-sidebar.columns .multi-controls {
-  flex: 0 0 100%;
-  width: 100%;
-}
-.multi-agent-sidebar.columns .multi-pinned-section,
-.multi-agent-sidebar.columns .agent-panel {
-  flex: 1 1 260px;
-  min-width: 240px;
-  max-width: 380px;
-  margin: 0;
-  max-height: calc(100vh - 220px);
-  overflow-y: auto;
-}
-
-/* Agent panel (collapsible section for each CLI agent) */
-.agent-panel {
-  margin: 6px 8px;
-  border-radius: 10px;
-  overflow: hidden;
-  background: rgba(255,255,255,0.02);
-  border: 1px solid rgba(255,255,255,0.06);
-  transition: background 0.15s;
-}
-.agent-panel:hover {
-  border-color: rgba(255,255,255,0.10);
-}
-
-.agent-panel-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 12px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: #c0c0d8;
-  cursor: pointer;
-  user-select: none;
-  border-left: 3px solid #888;
-  background: rgba(255,255,255,0.02);
-  transition: background 0.15s;
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-}
-.agent-panel-header:hover {
-  background: rgba(255,255,255,0.04);
-  color: #d8d8f0;
-}
-
-.agent-panel-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
   flex-shrink: 0;
 }
 
-.agent-panel-name {
-  flex: 1;
-  min-width: 0;
-}
-
-.agent-panel-count {
-  font-size: 11px;
-  font-weight: 500;
-  color: #666680;
-  white-space: nowrap;
-}
-
-.agent-panel-arrow {
-  font-size: 10px;
-  color: #555570;
-  transition: transform 0.2s;
-}
-
-.agent-panel.collapsed .agent-panel-arrow {
-  transform: rotate(-90deg);
-}
-
-.agent-panel.collapsed .agent-panel-body {
-  display: none;
-}
-
-.agent-panel-body {
-  padding: 0 0 4px;
-}
-
-.agent-panel-body .project-group {
-  margin: 4px 6px;
-}
-
-.agent-panel-body .project-group:first-child {
-  margin-top: 4px;
-}
-
-/* Pinned section at top of multi-agent view */
-.multi-pinned-section {
-  margin: 6px 8px;
-  border-radius: 10px;
-  overflow: hidden;
-  background: rgba(250, 204, 21, 0.04);
-  border: 1px solid rgba(250, 204, 21, 0.15);
-}
-.multi-pinned-section:hover {
-  border-color: rgba(250, 204, 21, 0.25);
-}
-.multi-pinned-section .agent-panel-header {
-  border-left-color: #eab308;
-  background: rgba(250, 204, 21, 0.04);
-}
-.pinned-dot {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  line-height: 1;
-  color: #eab308;
-  width: auto;
-  height: auto;
-  border-radius: 0;
-  background: none !important;
-  width: 14px;
-  height: 14px;
-}
-
-.multi-agent-pinned-sessions {
-  padding: 2px 0;
-}
-.multi-agent-pinned-sessions .session-item {
-  border-left: 2px solid rgba(250, 204, 21, 0.2);
-}
-
-.multi-empty {
-  padding: 16px 14px;
-  color: #666680;
-  font-size: 12px;
-  text-align: center;
-}
-
-/* Agent badge on session items in multi-agent view */
-.session-agent-badge {
-  font-size: 10px;
-  font-weight: 600;
-  margin-top: 2px;
-  display: inline-block;
-  opacity: 0.8;
-}
-
-/* Multi-agent toggle button */
-#multi-agent-toggle {
-  background: transparent;
-  border: 1px solid rgba(255,255,255,0.08);
-  color: #7a7a90;
-  border-radius: 4px;
-  cursor: pointer;
-  padding: 2px 6px;
-  font-size: 13px;
-  line-height: 1.4;
-  display: inline-flex;
-  align-items: center;
-  transition: all 0.15s;
-}
-#multi-agent-toggle:hover {
-  background: rgba(255,255,255,0.06);
-  color: #aaa;
-  border-color: rgba(255,255,255,0.12);
-}
-#multi-agent-toggle.active {
-  background: rgba(120, 130, 255, 0.15);
-  color: #8088ff;
-  border-color: rgba(120, 130, 255, 0.3);
-}
-
-/* ========== Feature 4: Enhanced activity-recent styling ========== */
-.session-item.activity-recent {
-  box-shadow: 0 0 8px rgba(34,197,94,0.3), inset 0 0 0 1px rgba(34,197,94,0.15);
-}
-.session-item.activity-recent .session-summary {
-  color: #4ade80;
-}
-.session-item.activity-recent .session-live-badge {
-  display: inline-flex;
-}
-.session-live-badge {
-  display: none;
-  align-items: center;
-  gap: 3px;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  color: #000;
-  background: #22c55e;
-  padding: 1px 5px;
-  border-radius: 3px;
-  margin-left: 6px;
-  vertical-align: middle;
-  animation: badge-pulse 2s ease-in-out infinite;
-}
-.session-live-badge::before {
-  content: '';
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #000;
-  display: inline-block;
-}
-@keyframes badge-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 4px rgba(34,197,94,0.5); }
-  50% { opacity: 0.7; box-shadow: 0 0 8px rgba(34,197,94,0.8); }
-}
-
-/* ========== Feature 5-6: Color customization via CSS custom properties ========== */
-:root {
-  --card-border-hue: 0;
-  --card-text-brightness: 1;
-}
-
-/* Apply hue rotation to session card borders */
-.session-item .session-row {
-  filter: hue-rotate(calc(var(--card-border-hue) * 1deg));
-}
-
-/* Apply brightness to session text */
-.session-summary {
-  opacity: var(--card-text-brightness);
-}
-.session-meta,
-.session-id,
-.session-project-label {
-  opacity: calc(var(--card-text-brightness) * 0.85);
-}
-
-/* Settings color sliders */
-.color-slider-section {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-}
-.color-slider-section .settings-section-title {
-  margin-bottom: 8px;
-}
-.color-slider-field {
+.quota-runtime-icon {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  flex-shrink: 0;
+  opacity: 0.9;
 }
-.color-slider-field label {
-  font-size: 12px;
-  color: #8888a0;
-  min-width: 130px;
-}
-.color-slider-field input[type="range"] {
-  flex: 1;
-  height: 4px;
-  -webkit-appearance: none;
-  appearance: none;
-  background: rgba(255,255,255,0.1);
-  border-radius: 2px;
-  outline: none;
-}
-.color-slider-field input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #6382ff;
-  cursor: pointer;
-  border: 2px solid #1a1a2e;
-}
-.color-slider-field input[type="range"]::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #6382ff;
-  cursor: pointer;
-  border: 2px solid #1a1a2e;
-}
-.color-slider-value {
-  font-size: 11px;
-  color: #666680;
-  min-width: 36px;
+
+.quota-group-codex .quota-runtime-icon { color: #10a37f; }
+
+/* Bars are tinted by the CLI that reported them too — the label alone
+   ("Week") is ambiguous once two CLIs are on the bar. */
+.quota-item-codex .quota-label { color: #10a37f; }
+.quota-item-codex .quota-fill { background: #10a37f; }
+.quota-item-codex .quota-fill.quota-mid { background: #d6a53c; }
+.quota-item-codex .quota-fill.quota-high { background: #e5714d; }
+
+/* Plan, credit balance and reset credits — codex reports these, Claude does not. */
+.usage-account-facts {
+  margin-top: 10px;
   text-align: right;
-  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
 }
 
-
+/* A session that never started shows a dismiss cross where the stop square
+   would be — there is no process to stop, only a row to clear. */
+.session-dismiss-btn:hover {
+  color: #e5714d;
+}
