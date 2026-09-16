@@ -225,10 +225,28 @@ test('skipping permissions replaces the sandbox and approval flags', () => {
   assert.deepEqual(args, ['resume', ID, '--dangerously-bypass-approvals-and-sandbox']);
 });
 
-test('addDirs splits and trims the same way Claude does', () => {
+test('addDirs splits and trims the same way Claude does, when the sandbox can take them', () => {
   assert.deepEqual(
-    argsWithoutForcedConfig({ sessionId: ID, isNew: false, options: { addDirs: ' /one , , /two ' } }),
-    ['resume', ID, '--add-dir', '/one', '--add-dir', '/two']
+    argsWithoutForcedConfig({ sessionId: ID, isNew: false, options: { codexSandbox: 'workspace-write', addDirs: ' /one , , /two ' } }),
+    ['resume', ID, '--sandbox', 'workspace-write', '--add-dir', '/one', '--add-dir', '/two']
+  );
+  assert.deepEqual(
+    argsWithoutForcedConfig({ sessionId: ID, isNew: false, options: { codexSandbox: 'danger-full-access', addDirs: '/one' } }),
+    ['resume', ID, '--sandbox', 'danger-full-access', '--add-dir', '/one']
+  );
+});
+
+test('addDirs are dropped when codex would refuse them', () => {
+  // Codex exits with "effective permissions do not allow additional writable
+  // roots" for --add-dir under read-only, which is also its default.
+  assert.deepEqual(argsWithoutForcedConfig({ sessionId: ID, isNew: false, options: { addDirs: '/one' } }), ['resume', ID]);
+  assert.deepEqual(
+    argsWithoutForcedConfig({ sessionId: ID, isNew: false, options: { codexSandbox: 'read-only', addDirs: '/one' } }),
+    ['resume', ID, '--sandbox', 'read-only']
+  );
+  assert.deepEqual(
+    argsWithoutForcedConfig({ sessionId: ID, isNew: false, options: { dangerouslySkipPermissions: true, addDirs: '/one' } }),
+    ['resume', ID, '--dangerously-bypass-approvals-and-sandbox']
   );
 });
 
@@ -243,6 +261,40 @@ test('every flag codex is launched with is one the CLI declares', () => {
   });
   for (const a of args) {
     if (a.startsWith('--')) assert.ok(KNOWN.has(a), `unknown flag ${a}`);
+  }
+});
+
+test('reasoning effort goes through -c, since codex has no flag for it; anything else is dropped', () => {
+  assert.deepEqual(
+    argsWithoutForcedConfig({ sessionId: ID, isNew: true, options: { codexModel: 'gpt-5.5', codexEffort: 'high' } }),
+    ['--model', 'gpt-5.5', '-c', 'model_reasoning_effort="high"']
+  );
+  // The value is parsed as TOML: a stored value must never add its own keys.
+  assert.deepEqual(argsWithoutForcedConfig({ sessionId: ID, isNew: true, options: { codexEffort: 'high" model="x' } }), []);
+  assert.deepEqual(argsWithoutForcedConfig({ sessionId: ID, isNew: true, options: { codexEffort: '' } }), []);
+});
+
+test("the model catalog is read from codex's own cache, and is empty when that is missing or unreadable", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  try {
+    assert.deepEqual(codex.readModelCatalog(), []);
+    fs.writeFileSync(path.join(home, 'models_cache.json'), '{not json');
+    assert.deepEqual(codex.readModelCatalog(), []);
+    fs.writeFileSync(path.join(home, 'models_cache.json'), JSON.stringify({ models: [
+      { slug: 'gpt-5.5', display_name: 'GPT-5.5', visibility: 'list', default_reasoning_level: 'medium',
+        supported_reasoning_levels: [{ effort: 'low', description: 'Fast' }, { effort: 'xhigh' }] },
+      { slug: 'hidden-one', visibility: 'hide', supported_reasoning_levels: ['high'] },
+      { display_name: 'No slug' },
+    ] }));
+    assert.deepEqual(codex.readModelCatalog(), [
+      { slug: 'gpt-5.5', label: 'GPT-5.5', efforts: ['low', 'xhigh'], defaultEffort: 'medium', visible: true },
+      { slug: 'hidden-one', label: 'hidden-one', efforts: ['high'], defaultEffort: null, visible: false },
+    ]);
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous;
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -401,7 +453,7 @@ test('"Action Required" in the title means the session is blocked on the user', 
   // The signal the user sees. It must not depend on OSC 9, which only fires
   // when the CLI's notifications are on — a session started before Switchboard
   // began forcing them has none.
-  assert.equal(codex.parseTitleState('[ . ] Action Required | MyClaude'), 'attention');
+  assert.equal(codex.parseTitleState('[ . ] Action Required | my-app'), 'attention');
   assert.equal(codex.parseTitleState('[ ! ] Action Required | Open link'), 'attention');
   assert.equal(codex.parseTitleState('[ ! ] action required'), 'attention');
 });
@@ -587,4 +639,15 @@ test('a codex fork is matched by its parent, not the inherited tag', () => {
   // And an existing fork of the same parent, from before this launch, is not taken.
   assert.equal(codex.matchesLaunch({ ...sig, startedAt: '2026-08-01T00:00:00Z' },
     { tag: ourTag, forkFrom: sig.forkedFrom, projectPath: '/p', spawnedAt: at }), false);
+});
+
+// --- initialPrompt (project page: start a session on a phase or a todo) ---
+test('initialPrompt is the last positional argument for a fresh session only', () => {
+  const H = typeof claude !== 'undefined' ? claude : codex;
+  const fresh = H.buildLaunchArgs({ sessionId: 'abc', isNew: true, options: { initialPrompt: 'Work on phase 2' } });
+  assert.equal(fresh[fresh.length - 1], 'Work on phase 2');
+  const resumed = H.buildLaunchArgs({ sessionId: 'abc', isNew: false, options: { initialPrompt: 'Work on phase 2' } });
+  assert.ok(!resumed.includes('Work on phase 2'), 'a resume keeps its conversation');
+  const forked = H.buildLaunchArgs({ sessionId: 'new', isNew: true, options: { forkFrom: 'src', initialPrompt: 'x' } });
+  assert.ok(!forked.includes('x'), 'a fork carries its parent prompt');
 });
