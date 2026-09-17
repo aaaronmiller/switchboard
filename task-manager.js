@@ -25,6 +25,9 @@ function createTaskManager(options) {
   const baseEnv = options.baseEnv || process.env;
   const logger = options.log || console;
   const send = options.send || (() => {});
+  // Project worktrees live under <project>/repos/<name>, which the path-shape
+  // inference in task-config cannot see; the caller looks their parent up.
+  const resolveParent = options.resolveWorktreeParent || (() => null);
 
   function serializeRun(run, includeOutput = false) {
     if (!run) return null;
@@ -175,9 +178,9 @@ function createTaskManager(options) {
   function spawnLeaf(run, task) {
     if (run.state === 'running' && run.process) return run;
     resetRun(run);
-    const spec = spawnSpec(task, run.projectPath);
-    logger.info(`[task] ${task.label}: ${spec.executable} ${spec.args.join(' ')}`);
     try {
+      const spec = spawnSpec(task, run.projectPath);
+      logger.info(`[task] ${task.label}: ${spec.executable} ${spec.args.join(' ')}`);
       run.process = spawnPty.spawn(spec.executable, spec.args, {
         name: 'xterm-256color',
         cols: 120,
@@ -189,8 +192,6 @@ function createTaskManager(options) {
       run.error = error.message;
       appendOutput(run, `\r\nTask failed to start: ${error.message}\r\n`);
       finishRun(run, null, null);
-      run.state = 'failed';
-      emitState(run);
       throw error;
     }
     run.exitPromise = new Promise(resolve => { run.resolveExit = resolve; });
@@ -228,18 +229,21 @@ function createTaskManager(options) {
   }
 
   function startTask(projectPath, label) {
+    const existing = runs.get(taskKey(projectPath, label));
+    if (existing?.state === 'running') return serializeRun(existing, true);
     let tasks;
     try {
-      tasks = loadTasks(projectPath);
+      // Use the same source lookup as the menu, including inherited worktree tasks.
+      tasks = loadTasks(projectPath, { parentPath: resolveParent(projectPath) });
       const graph = resolveTaskGraph(tasks, label);
-      const existing = runs.get(taskKey(projectPath, label));
-      if (existing?.state === 'running') return serializeRun(existing, true);
 
       const rootRun = createRun(projectPath, graph.task);
       resetRun(rootRun, { virtual: graph.task.type === 'compound' });
       Promise.resolve()
         .then(() => launchNode(graph, rootRun, true))
         .catch(error => {
+          // A root spawn failure was already recorded by spawnLeaf.
+          if (rootRun.state === 'failed') return;
           rootRun.error = error.message;
           appendOutput(rootRun, `\r\nTask failed: ${error.message}\r\n`);
           rootRun.state = 'failed';
@@ -252,7 +256,16 @@ function createTaskManager(options) {
         });
       return serializeRun(rootRun, true);
     } catch (error) {
-      return { projectPath, label, state: 'failed', running: false, error: error.message, output: '' };
+      // Configuration and dependency errors happen before spawning. Retain them
+      // just like process output so View log works after the menu is reopened.
+      const task = tasks?.find(task => task.label === label) || { label, type: 'shell' };
+      const run = createRun(projectPath, task);
+      resetRun(run, { virtual: task.type === 'compound' });
+      run.orchestrationPending = false;
+      run.error = error.message;
+      appendOutput(run, `\r\nTask failed to start: ${error.message}\r\n`);
+      finishRun(run, null, null);
+      return serializeRun(run, true);
     }
   }
 
@@ -360,7 +373,7 @@ function createTaskManager(options) {
         }
       }));
       watchVscodeDirectory();
-      const taskSource = taskFileForWorkspace(projectPath);
+      const taskSource = taskFileForWorkspace(projectPath, fs.existsSync, resolveParent(projectPath));
       if (taskSource?.inherited) {
         projectWatchers.push(fs.watch(path.dirname(taskSource.filePath), (_event, filename) => {
           if (!filename || String(filename) === 'tasks.json') changed();
@@ -374,12 +387,14 @@ function createTaskManager(options) {
 
   function listTasks(projectPath) {
     ensureWatch(projectPath);
-    const taskSource = taskFileForWorkspace(projectPath);
+    const parentPath = resolveParent(projectPath);
+    const taskSource = taskFileForWorkspace(projectPath, fs.existsSync, parentPath);
     try {
-      const tasks = loadTasks(projectPath);
+      const tasks = loadTasks(projectPath, { parentPath });
       return {
         tasks: tasks.map(task => ({
           ...task,
+          taskSource,
           env: undefined,
           run: serializeRun(runs.get(taskKey(projectPath, task.label))),
         })),

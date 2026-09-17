@@ -60,6 +60,22 @@ test('addDirs splits on commas and trims, skipping empties', () => {
   assert.deepEqual(args, ['--session-id', 'a', '--add-dir', '/one', '--add-dir', '/two']);
 });
 
+test('model and effort pass through; empty and unknown levels are left to claude', () => {
+  assert.deepEqual(
+    claude.buildLaunchArgs({ sessionId: 'a', isNew: true, options: { model: 'opus', effort: 'xhigh' } }),
+    ['--session-id', 'a', '--model', 'opus', '--effort', 'xhigh']
+  );
+  assert.deepEqual(
+    claude.buildLaunchArgs({ sessionId: 'a', isNew: true, options: { model: '', effort: '' } }),
+    ['--session-id', 'a']
+  );
+  assert.deepEqual(
+    claude.buildLaunchArgs({ sessionId: 'a', isNew: true, options: { effort: 'ultra' } }),
+    ['--session-id', 'a'],
+    'claude has no ultra level'
+  );
+});
+
 test('appendSystemPrompt goes last', () => {
   const args = claude.buildLaunchArgs({
     sessionId: 'a', isNew: true, options: { chrome: true, appendSystemPrompt: 'hi' },
@@ -300,4 +316,15 @@ test('readLaunchSignals survives a truncated final line', () => {
 
 test('a missing file yields nothing rather than throwing', () => {
   assert.equal(claude.readLaunchSignals('/definitely/not/here.jsonl'), null);
+});
+
+// --- initialPrompt (project page: start a session on a phase or a todo) ---
+test('initialPrompt is the last positional argument for a fresh session only', () => {
+  const H = typeof claude !== 'undefined' ? claude : codex;
+  const fresh = H.buildLaunchArgs({ sessionId: 'abc', isNew: true, options: { initialPrompt: 'Work on phase 2' } });
+  assert.equal(fresh[fresh.length - 1], 'Work on phase 2');
+  const resumed = H.buildLaunchArgs({ sessionId: 'abc', isNew: false, options: { initialPrompt: 'Work on phase 2' } });
+  assert.ok(!resumed.includes('Work on phase 2'), 'a resume keeps its conversation');
+  const forked = H.buildLaunchArgs({ sessionId: 'new', isNew: true, options: { forkFrom: 'src', initialPrompt: 'x' } });
+  assert.ok(!forked.includes('x'), 'a fork carries its parent prompt');
 });

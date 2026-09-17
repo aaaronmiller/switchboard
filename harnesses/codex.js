@@ -213,7 +213,9 @@ function messageText(payload) {
   const content = payload?.content;
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
-  return content.map(c => (c && typeof c.text === 'string' ? c.text : '')).join('');
+  return content
+    .filter(c => c && ['text', 'input_text', 'output_text'].includes(c.type) && typeof c.text === 'string')
+    .map(c => c.text).join('\n');
 }
 
 /**
@@ -235,7 +237,7 @@ function readSessionFile(filePath, folder) {
     let projectPath = null;
     let summary = '';
     let messageCount = 0;
-    let textContent = '';
+    const textParts = [];
     let firstTimestamp = null;
     let lastTimestamp = null;
 
@@ -276,7 +278,9 @@ function readSessionFile(filePath, folder) {
 
       messageCount++;
       if (!summary && role === 'user' && text) summary = text.slice(0, 120);
-      if (text && textContent.length < 8000) textContent += text.slice(0, 500) + '\n';
+      // Keep full conversation text; tool calls/results and reasoning never
+      // reach this branch because they are not user/assistant messages.
+      if (text) textParts.push(text);
     }
 
     // No cwd means no project to file it under; no user turn means the session
@@ -292,7 +296,7 @@ function readSessionFile(filePath, folder) {
       created: firstTimestamp || stat.birthtime.toISOString(),
       modified: lastTimestamp || stat.mtime.toISOString(),
       fileMtime: stat.mtime.toISOString(),
-      messageCount, textContent,
+      messageCount, textContent: textParts.join('\n'),
       slug: null, customTitle: null, aiTitle: null,
     };
   } catch {
@@ -534,6 +538,40 @@ function classifyNotification(message) {
 
 const SANDBOX_MODES = new Set(['read-only', 'workspace-write', 'danger-full-access']);
 const APPROVAL_POLICIES = new Set(['on-request', 'never']);
+// Reasoning efforts across codex's model catalog. Codex has no --effort flag:
+// it is the model_reasoning_effort config key, passed as a -c override. The
+// value is parsed as TOML, so only these exact words are ever written into it.
+const REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+
+/**
+ * Codex's model list, from the cache its own model picker reads
+ * ($CODEX_HOME/models_cache.json). Each model names the reasoning efforts it
+ * supports, which the settings form uses to keep an effort the model rejects
+ * out of a launch. Read rather than running `codex debug models`: the main
+ * process does not have the login shell's PATH (see available()). Empty when
+ * codex has never fetched it or the file is not the shape expected.
+ */
+function readModelCatalog() {
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(path.join(codexHome(), 'models_cache.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const m of Array.isArray(data?.models) ? data.models : []) {
+    if (!m || typeof m.slug !== 'string' || !m.slug) continue;
+    const levels = Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels : [];
+    out.push({
+      slug: m.slug,
+      label: typeof m.display_name === 'string' && m.display_name ? m.display_name : m.slug,
+      efforts: levels.map(l => (typeof l === 'string' ? l : l?.effort)).filter(e => typeof e === 'string' && e),
+      defaultEffort: typeof m.default_reasoning_level === 'string' ? m.default_reasoning_level : null,
+      visible: m.visibility !== 'hide',
+    });
+  }
+  return out;
+}
 
 /**
  * Argv for the codex binary.
@@ -585,12 +623,28 @@ function buildLaunchArgs({ sessionId, isNew, options }) {
     if (options.codexModel) {
       args.push('--model', String(options.codexModel));
     }
-    if (options.addDirs) {
+    if (REASONING_EFFORTS.has(options.codexEffort)) {
+      args.push('-c', `model_reasoning_effort="${options.codexEffort}"`);
+    }
+    // --add-dir names extra writable roots, and codex refuses to start when
+    // the sandbox cannot grant them ("effective permissions do not allow
+    // additional writable roots"). Read-only, the default, can already read
+    // every path, and the bypass flag can already write everywhere, so the
+    // dirs only go on the command line for the two modes that take them.
+    const canAddDirs = !options.dangerouslySkipPermissions &&
+      (options.codexSandbox === 'workspace-write' || options.codexSandbox === 'danger-full-access');
+    if (options.addDirs && canAddDirs) {
       const dirs = String(options.addDirs).split(',').map(d => d.trim()).filter(Boolean);
       for (const dir of dirs) {
         args.push('--add-dir', dir);
       }
     }
+  }
+
+  // A first prompt, as codex's positional argument. Fresh sessions only; a
+  // resume or fork already has a conversation.
+  if (isNew && !options?.forkFrom && options?.initialPrompt) {
+    args.push(String(options.initialPrompt));
   }
 
   return args;
@@ -601,6 +655,7 @@ module.exports = {
   titleIndexPath, readSessionTitles,
   parseTitleState, classifyNotification,
   buildLaunchArgs, launchEnv, originatorTag, readLaunchSignals, matchesLaunch, needsIdDetection,
+  readModelCatalog,
   available, codexHome, sessionsRoot, listFolders, folderPath, folderForProject,
   listTranscripts, sessionIdFromPath, transcriptPath, isSubagentMeta,
   deriveProjectPath,
