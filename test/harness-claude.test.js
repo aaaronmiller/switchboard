@@ -57,7 +57,7 @@ test('addDirs splits on commas and trims, skipping empties', () => {
   const args = claude.buildLaunchArgs({
     sessionId: 'a', isNew: true, options: { addDirs: ' /one , , /two ' },
   });
-  assert.deepEqual(args, ['--session-id', 'a', '--add-dir', '/one', '--add-dir', '/two']);
+  assert.deepEqual(args, ['--add-dir', '/one', '--add-dir', '/two', '--session-id', 'a']);
 });
 
 test('model and effort pass through; empty and unknown levels are left to claude', () => {
@@ -319,6 +319,32 @@ test('a missing file yields nothing rather than throwing', () => {
 });
 
 // --- initialPrompt (project page: start a session on a phase or a todo) ---
+test('a scheduled prompt is not consumed by multi-value directory or tool options', () => {
+  const prompt = 'Investigate the latest alarm.\nRead the logs and summarize findings.';
+  for (const addDirs of ['/attached', ' /repo one , , /repo two ']) {
+    for (const allowedTools of ['', 'Read,Bash']) {
+      for (const ide of [false, true]) {
+        const args = claude.buildLaunchArgs({
+          sessionId: 'scheduled', isNew: true,
+          options: { addDirs, allowedTools, model: 'opus', effort: 'medium', initialPrompt: prompt },
+        });
+        // Main can append --ide after the harness arguments.
+        if (ide) args.push('--ide');
+        assert.ok(args.includes(prompt), 'the first message is present');
+        // Claude consumes every non-option after a variadic flag, even quoted
+        // multi-line text. Check that each list ends before reaching the prompt.
+        for (let i = 0; i < args.length; i++) {
+          if (!['--add-dir', '--allowedTools'].includes(args[i])) continue;
+          const values = [];
+          for (let j = i + 1; j < args.length && !args[j].startsWith('--'); j++) values.push(args[j]);
+          assert.ok(!values.includes(prompt), `${args[i]} must not consume the first message`);
+          if (args[i] === '--add-dir') assert.equal(values.length, 1, 'each directory remains a separate argument');
+        }
+      }
+    }
+  }
+});
+
 test('initialPrompt is the last positional argument for a fresh session only', () => {
   const H = typeof claude !== 'undefined' ? claude : codex;
   const fresh = H.buildLaunchArgs({ sessionId: 'abc', isNew: true, options: { initialPrompt: 'Work on phase 2' } });

@@ -412,9 +412,15 @@ const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
  */
 function buildLaunchArgs({ sessionId, isNew, options }) {
   const args = [];
-  // This flag accepts multiple values; the session flag must delimit its value
-  // so the first prompt cannot be consumed as another allowed tool.
+  // These options accept multiple values. Keep them before the required
+  // session selector so it ends their lists before the positional prompt.
+  // Otherwise project attachments can consume a schedule's entire prompt
+  // as one more --add-dir value, leaving an empty interactive session.
   if (options?.allowedTools) args.push('--allowedTools', String(options.allowedTools));
+  if (options?.addDirs) {
+    const dirs = String(options.addDirs).split(',').map(d => d.trim()).filter(Boolean);
+    for (const dir of dirs) args.push('--add-dir', dir);
+  }
   if (options?.forkFrom) {
     args.push('--resume', String(options.forkFrom), '--fork-session');
   } else if (isNew) {
@@ -450,12 +456,6 @@ function buildLaunchArgs({ sessionId, isNew, options }) {
     }
     if (options.chrome) {
       args.push('--chrome');
-    }
-    if (options.addDirs) {
-      const dirs = String(options.addDirs).split(',').map(d => d.trim()).filter(Boolean);
-      for (const dir of dirs) {
-        args.push('--add-dir', dir);
-      }
     }
   }
 
