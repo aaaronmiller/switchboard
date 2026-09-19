@@ -2120,6 +2120,44 @@ async function renderFileTree(project, list, state) {
   }
 }
 
+function bindFilesDivider(project, container) {
+  const handle = container.querySelector('.ws-files-divider');
+  const storageKey = `project-files-tree-width:${project.id}`;
+  const saved = Number(localStorage.getItem(storageKey));
+  const resize = (width) => {
+    const max = Math.max(0, Math.min(600, container.getBoundingClientRect().width * 0.6));
+    const next = Math.round(Math.max(Math.min(160, max), Math.min(max, width)));
+    container.style.setProperty('--files-tree-width', `${next}px`);
+    handle.setAttribute('aria-valuenow', String(next));
+    return next;
+  };
+  if (Number.isFinite(saved) && saved > 0) resize(saved);
+  let drag = null;
+  handle.onpointerdown = (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    handle.focus();
+    drag = { x: event.clientX, width: container.firstElementChild.getBoundingClientRect().width };
+    handle.setPointerCapture(event.pointerId);
+    container.classList.add('is-resizing');
+  };
+  handle.onpointermove = (event) => {
+    if (drag) resize(drag.width + event.clientX - drag.x);
+  };
+  handle.onlostpointercapture = () => {
+    if (!drag) return;
+    drag = null;
+    container.classList.remove('is-resizing');
+    localStorage.setItem(storageKey, parseFloat(container.style.getPropertyValue('--files-tree-width')) || container.firstElementChild.getBoundingClientRect().width);
+  };
+  handle.onkeydown = (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const width = container.firstElementChild.getBoundingClientRect().width;
+    localStorage.setItem(storageKey, resize(width + (event.key === 'ArrowLeft' ? -20 : 20)));
+  };
+}
+
 async function renderFilesTab(project, body) {
   body.classList.add('ws-body--files');
   body.innerHTML = `
@@ -2129,9 +2167,11 @@ async function renderFilesTab(project, body) {
         <div class="ws-files-list" id="ws-files-list"></div>
         <div class="ws-help ws-files-hint">CLAUDE.md is the brief every session reads. The agent creates plan.md, plan-tracker.md, todos.md and memory.md when it needs them. Attached repositories are not listed here.</div>
       </div>
+      <div class="ws-files-divider" role="separator" aria-label="Resize file tree" aria-orientation="vertical" tabindex="0"></div>
       <div class="ws-editor" id="ws-editor"><div class="ws-editor-empty">Pick a file to read or edit it here.</div></div>
     </div>`;
   const state = filesState(project);
+  bindFilesDivider(project, body.querySelector('.ws-files'));
   const list = body.querySelector('#ws-files-list');
   body.querySelector('#ws-files-open').onclick = async () => {
     const result = await window.api.openPath(project.root);
@@ -3198,6 +3238,7 @@ function sessionMenuItems(session) {
     ? { ...launchTargetFor(info.project, (info.project.tracks || []).find(t => t.id === session.trackId) || null), projectPath: session.projectPath }
     : folder;
   const sessionActions = [
+    running ? { label: 'Stop', icon: '<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="2" width="8" height="8" rx="1"/></svg>', onClick: () => confirmAndStopSession(session.sessionId) } : null,
     session.type !== 'terminal' && !running ? { label: 'Resume with config…', icon: ICONS.launchConfig(14), onClick: () => showResumeSessionDialog(session) } : null,
     session.type !== 'terminal' ? { label: 'Fork', icon: PICONS.fork(14), onClick: () => forkSession(session, forkTarget) } : null,
     session.type !== 'terminal' ? { label: unread ? 'Mark as read' : 'Mark as unread', icon: unread ? ICONS.markRead(14) : ICONS.markUnread(14), onClick: () => { if (unread) clearUnread(session.sessionId); else markUnread(session.sessionId); refreshSidebar(); } } : null,
@@ -3205,7 +3246,6 @@ function sessionMenuItems(session) {
   ].filter(Boolean);
   const stateActions = [
     { label: 'Copy session ID', onClick: () => window.api.writeClipboard(session.sessionId) },
-    running ? { label: 'Stop', icon: '<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="2" width="8" height="8" rx="1"/></svg>', onClick: () => confirmAndStopSession(session.sessionId) } : null,
     isDismissibleSession(session.sessionId) ? { label: 'Dismiss', icon: PICONS.x(14), hint: 'never started', onClick: () => dismissSession(session.sessionId) } : null,
     session.type !== 'terminal' ? { label: session.archived ? 'Unarchive' : 'Archive', icon: PICONS.archive(14), onClick: () => toggleArchiveSession(session) } : null,
   ].filter(Boolean);

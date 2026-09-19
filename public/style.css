@@ -1852,6 +1852,18 @@ body { display: flex; flex-direction: column; }
   height: 100%;
 }
 
+/* Keep link destinations visible even before the preview receives focus. */
+.viewer-panel-editor .cm-editor .cm-line.cm-activeLine {
+  background-color: rgba(128, 136, 255, 0.24);
+  box-shadow: inset 3px 0 #a6abff;
+}
+
+.viewer-panel-editor .cm-editor .cm-gutterElement.cm-activeLineGutter {
+  background-color: #484c78;
+  color: #fff;
+  font-weight: 700;
+}
+
 /* ========== STATS VIEWER ========== */
 #stats-viewer {
   position: absolute;
@@ -6162,18 +6174,30 @@ body { display: flex; flex-direction: column; }
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: min(var(--files-tree-width, 240px), 60%) 8px minmax(0, 1fr);
+  gap: 4px;
 }
 
 @media (max-width: 900px) {
-  .ws-files { grid-template-columns: 200px minmax(0, 1fr); }
+  .ws-files { --files-tree-width: 200px; }
 }
+
+.ws-files-divider {
+  cursor: col-resize;
+  touch-action: none;
+  border-radius: 4px;
+}
+.ws-files-divider:hover,
+.ws-files-divider:focus-visible,
+.ws-files.is-resizing .ws-files-divider { background: rgba(128,136,255,0.4); }
+.ws-files.is-resizing { user-select: none; }
+.ws-files.is-resizing iframe { pointer-events: none; }
 
 .ws-files-side {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   background: #18181f;
   border: 1px solid rgba(255,255,255,0.06);
   border-radius: 10px;

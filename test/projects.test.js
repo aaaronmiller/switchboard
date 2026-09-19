@@ -453,6 +453,54 @@ test('the brief uses absolute paths and keeps its attached-folder list current',
   } finally { t.cleanup(); }
 });
 
+test('brief sync migrates legacy sections and removes duplicates without losing user notes', async () => {
+  const t = setup();
+  try {
+    const { project } = await projects.createProject({ name: 'Current title' });
+    const current = projects.defaultBrief(project.name, project.root);
+    const legacy = `<!-- switchboard:managed -->
+<!-- Managed by Switchboard: this block is replaced on update. Put your own notes outside it. -->
+# Old title
+Project folder: ${project.root}
+
+<!-- switchboard:rules -->
+## Working rules
+Old rules
+<!-- /switchboard:rules -->
+My notes between sections.
+<!-- switchboard:folders -->
+## Attached folders
+- /old/folder
+<!-- /switchboard:folders -->
+My trailing notes.
+`;
+    for (const original of [legacy, current + legacy, legacy + current, current + current, legacy.replace(/\n/g, '\r\n')]) {
+      for (const file of ['CLAUDE.md', 'AGENTS.md']) {
+        fs.writeFileSync(path.join(project.root, file), 'My leading notes.\n' + original);
+      }
+      await projects.syncProjectBrief(project.id);
+      for (const file of ['CLAUDE.md', 'AGENTS.md']) {
+        const filePath = path.join(project.root, file);
+        const result = fs.readFileSync(filePath, 'utf8');
+        assert.equal((result.match(/<!-- switchboard:managed -->/g) || []).length, 1);
+        assert.equal((result.match(/<!-- \/switchboard:managed -->/g) || []).length, 1);
+        assert.ok(result.includes(current));
+        assert.ok(result.startsWith('My leading notes.\n'));
+        assert.ok(!result.includes('Old title'));
+        assert.ok(!result.includes('/old/folder'));
+        assert.ok(!result.includes('switchboard:rules'));
+        assert.ok(!result.includes('switchboard:folders'));
+        if (original.includes('My trailing notes.')) {
+          assert.ok(result.includes('My notes between sections.'));
+          assert.ok(result.includes('My trailing notes.'));
+        }
+        await projects.syncProjectBrief(project.id);
+        assert.equal(fs.readFileSync(filePath, 'utf8'), result, 'repeat sync is unchanged');
+      }
+    }
+  } finally { t.cleanup(); }
+});
+
 test('defaultCwd is validated, and detaching a folder resets cwds that pointed into it', async () => {
   const t = setup();
   try {
