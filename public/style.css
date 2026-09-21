@@ -1571,6 +1571,11 @@ body { display: flex; flex-direction: column; }
 }
 
 /* ========== SESSION GRID ========== */
+.message-search-bar { top: 44px; max-width: calc(100% - 24px); right: 12px; }
+.message-search-bar .terminal-search-input { min-width: 40px; flex: 1; }
+::highlight(message-find) { background-color: #515C6A; color: #fff; }
+::highlight(message-find-active) { background-color: #EAA549; color: #171717; }
+
 #grid-viewer {
   display: none;
   flex-shrink: 0;
@@ -6008,6 +6013,11 @@ body { display: flex; flex-direction: column; }
 .ctx-item.muted .ctx-icon, .ctx-item.disabled .ctx-icon { color: #6a6a80; }
 .ctx-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ctx-hint { font-size: 11px; color: #7a7a90; margin-left: 10px; }
+.terminal-file-choices { max-width: min(560px, calc(100vw - 16px)); }
+.terminal-file-choices .ctx-item { flex-direction: column; align-items: stretch; height: auto; gap: 4px; padding: 8px; white-space: normal; }
+.terminal-file-choices .ctx-label { flex: none; }
+.terminal-file-choices .ctx-hint { margin-left: 0; overflow-wrap: anywhere; }
+.terminal-file-choices .ctx-item:focus-visible { outline: 1px solid #8088ff; }
 .ctx-arrow { color: #6a6a80; display: inline-flex; margin-left: 6px; }
 .ctx-sep { height: 1px; background: rgba(255,255,255,0.08); margin: 4px 6px; }
 .ctx-head {
