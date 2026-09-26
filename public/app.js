@@ -146,6 +146,7 @@ const terminalArea = document.getElementById('terminal-area');
 const settingsViewer = document.getElementById('settings-viewer');
 const globalSettingsBtn = document.getElementById('global-settings-btn');
 const addProjectBtn = document.getElementById('add-project-btn');
+const projectsContent = document.getElementById('projects-content');
 const resortBtn = document.getElementById('resort-btn');
 const jsonlViewer = document.getElementById('jsonl-viewer');
 const jsonlViewerTitle = document.getElementById('jsonl-viewer-title');
@@ -158,11 +159,19 @@ let gridViewActive = localStorage.getItem('gridViewActive') === '1';
 // Map<sessionId, { terminal, element, fitAddon, session, closed }>
 const openSessions = new Map();
 window._openSessions = openSessions;
-let activeSessionId = sessionStorage.getItem('activeSessionId') || null;
+// sessionStorage covers renderer reloads; localStorage also restores the last
+// terminal after the Electron process itself restarts.
+const ACTIVE_SESSION_KEY = 'activeSessionId';
+let activeSessionId = sessionStorage.getItem(ACTIVE_SESSION_KEY) || localStorage.getItem(ACTIVE_SESSION_KEY) || null;
 function setActiveSession(id) {
   activeSessionId = id;
-  if (id) sessionStorage.setItem('activeSessionId', id);
-  else sessionStorage.removeItem('activeSessionId');
+  if (id) {
+    sessionStorage.setItem(ACTIVE_SESSION_KEY, id);
+    localStorage.setItem(ACTIVE_SESSION_KEY, id);
+  } else {
+    sessionStorage.removeItem(ACTIVE_SESSION_KEY);
+    localStorage.removeItem(ACTIVE_SESSION_KEY);
+  }
   // Update file panel to show this session's open files/diffs
   if (typeof switchPanel === 'function') switchPanel(id);
 }
@@ -186,12 +195,26 @@ let activeTimeFilter = (() => {
 let activeSortMode = localStorage.getItem('activeSortMode') || 'date-desc';
 let cachedProjects = [];
 let cachedAllProjects = [];
+// Projects tab (projects-view.js): project → tracks → sessions, from
+// getProjectTree. Same session objects as the two caches above (dedupTree).
+let cachedProjectTree = { projects: [] };    // archived excluded
+let cachedProjectTreeAll = { projects: [] }; // everything
 let activePtyIds = new Set();
 let sessionAgentMap = new Map(); // sessionId → cliAgent id
 let tokenCache = {}; // sessionId → { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, model, costCents }
 let loopCache = {}; // sessionId → { loopCount, lastLoopAt, lastLoopTool, lastLoopReason }
 let headlessState = new Map(); // sessionId → { events: [], lastAction: '', startTime }
 let sortedOrder = []; // [{ projectPath, itemIds: [itemId, ...] }, ...] — single source of truth for sidebar order
+// Only Sessions and Projects are remembered: the others (Plans, Agent Files,
+// Stats) are places you visit, not places you work from.
+const REMEMBERED_TABS = ['sessions', 'projects'];
+const LAST_TAB_KEY = 'lastTab';
+function rememberedTab() {
+  try {
+    const saved = localStorage.getItem(LAST_TAB_KEY);
+    return REMEMBERED_TABS.includes(saved) ? saved : 'sessions';
+  } catch { return 'sessions'; }
+}
 let activeTab = 'sessions';
 let activeAgent = localStorage.getItem('activeAgent') || 'claude'; // which CLI agent's sessions to show
 let multiAgentMode = localStorage.getItem('multiAgentMode') === '1'; // show all agents stacked
@@ -251,7 +274,8 @@ let searchMatchProjectPaths = null; // Set<string> of project paths matched by n
 // --- Activity tracking ---
 //
 // Activity is determined by two signals:
-//   1. OSC 0 braille spinner (authoritative: Claude CLI sets title to spinner chars)
+//   1. OSC 0 spinner (authoritative: Claude CLI prefixes the title with a
+//      braille or half-circle spinner frame)
 //   2. Noise-filtered terminal output (fallback: non-noise, non-TUI-repaint data)
 //
 // Both feed into setActivity(sessionId, active):
@@ -260,22 +284,96 @@ let searchMatchProjectPaths = null; // Set<string> of project paths matched by n
 // OSC 0 idle signal is the authoritative source for marking sessions as idle.
 //
 const attentionSessions = new Set(); // sessions needing user action (OSC 9)
-const responseReadySessions = new Set(); // Claude finished, user hasn't looked (terminal state)
+const responseReadySessions = new Set(); // CLI finished, user hasn't looked (terminal state)
 const sessionBusyState = new Map(); // sessionId → boolean (currently active)
-const errorSessions = new Set(); // sessions that errored out / API issues / non-zero exit
-const lastActivityTime = new Map(); // sessionId → Date of last terminal output
 
-// Noise patterns — these don't count as activity
-const activityNoiseRe = /file-history-snapshot|^\s*$/;
+// Unread and needs-you outlive the app. A session that finished, or asked for
+// something, while you were away still says so after a restart; only opening
+// it (or Mark as read) clears it. Busy is not saved: nothing is running yet.
+const SESSION_NOTICES_KEY = 'sessionNotices';
+
+// When something last happened to a session that is worth moving it for: a
+// new session started, a turn finished, or the CLI asked for something.
+// Opening or resuming a session does not count, so the list holds still under
+// a click. Not persisted: every event coincides with a transcript write, so
+// after a restart the transcript's own last-message time says the same thing.
+const sessionEventTimes = new Map(); // sessionId → ms since epoch
+
+function bumpSessionEvent(sessionId) {
+  if (!sessionId) return;
+  sessionEventTimes.set(sessionId, Date.now());
+  saveSessionNotices();
+  if (typeof refreshProjectViews === 'function') refreshProjectViews({ reason: 'sessions' });
+}
+
+/**
+ * The time to sort a session by: the later of its last event and the
+ * transcript's last message. A working session rewrites its transcript
+ * constantly, so while the CLI is busy the session keeps the time it had when
+ * the turn began (frozen in setActivity); the turn ending moves it.
+ */
+function sessionEventTime(session) {
+  const id = session.sessionId;
+  const known = sessionEventTimes.get(id) || 0;
+  const t = new Date(session.modified).getTime();
+  const modified = Number.isFinite(t) ? t : 0;
+  if (known && sessionBusyState.get(id) === true) return known;
+  return Math.max(known, modified);
+}
+
+function saveSessionNotices() {
+  try {
+    // Ids of sessions that no longer exist cost nothing but should not pile up.
+    const cap = (set) => [...set].slice(-200);
+    localStorage.setItem(SESSION_NOTICES_KEY, JSON.stringify({ ready: cap(responseReadySessions), attention: cap(attentionSessions) }));
+  } catch {}
+}
+try {
+  const saved = JSON.parse(localStorage.getItem(SESSION_NOTICES_KEY) || 'null');
+  for (const id of saved?.ready || []) responseReadySessions.add(id);
+  for (const id of saved?.attention || []) attentionSessions.add(id);
+} catch {}
+
+// Some CLIs (notably Codex) start under a temporary ID and are re-keyed once
+// their transcript appears. Activity often begins before that detection, so it
+// must move with the rest of the session or the eventual idle event will have
+// no matching busy state to transition from.
+function rekeySessionActivity(oldId, newId) {
+  if (oldId === newId) return;
+
+  if (attentionSessions.delete(oldId)) attentionSessions.add(newId);
+  if (responseReadySessions.delete(oldId)) responseReadySessions.add(newId);
+  if (sessionBusyState.has(oldId)) {
+    sessionBusyState.set(newId, sessionBusyState.get(oldId));
+    sessionBusyState.delete(oldId);
+  }
+  if (activePtyIds.delete(oldId)) activePtyIds.add(newId);
+  if (sessionEventTimes.has(oldId)) { sessionEventTimes.set(newId, sessionEventTimes.get(oldId)); sessionEventTimes.delete(oldId); }
+  saveSessionNotices();
+}
+
+// A session row can be on screen twice: under its folder in the Sessions tab
+// and in a project's pane or track card. State classes go to every copy.
+function forEachSessionItem(sessionId, fn) {
+  document.querySelectorAll(`.session-item[data-session-id="${sessionId}"], .pane-session[data-session-id="${sessionId}"]`).forEach(fn);
+}
 
 // Central activity dispatcher
 function setActivity(sessionId, active) {
-  if (responseReadySessions.has(sessionId)) {
-    return;
+  const wasActive = sessionBusyState.get(sessionId) || false;
+  // A new turn clears the previous unread response. Repeated busy signals
+  // during that turn preserve a manual "Mark as unread" reminder.
+  if (active && !wasActive && responseReadySessions.has(sessionId)) {
+    responseReadySessions.delete(sessionId);
   }
 
-  const wasActive = sessionBusyState.get(sessionId) || false;
   sessionBusyState.set(sessionId, active);
+  if (active && typeof hideSessionHoverPreview === 'function') hideSessionHoverPreview(sessionId);
+  // A turn is starting: pin the row where it is until the turn ends.
+  if (active && !wasActive) {
+    const session = sessionMap.get(sessionId);
+    if (session) sessionEventTimes.set(sessionId, sessionEventTime(session));
+  }
 
   // Clear error state when session becomes active again (restarted/recovered)
   if (active && errorSessions.has(sessionId)) {
@@ -285,53 +383,47 @@ function setActivity(sessionId, active) {
   }
 
   if (wasActive && !active) {
+    bumpSessionEvent(sessionId);
     // Activity ended → response-ready if user isn't looking at this session
     if (sessionId !== activeSessionId) {
       responseReadySessions.add(sessionId);
-      const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-      if (item) {
-        item.classList.remove('cli-busy');
-        item.classList.add('response-ready');
-      }
     }
   }
 
-  // Sync cli-busy class (only if not response-ready)
-  if (!responseReadySessions.has(sessionId)) {
-    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-    if (item) item.classList.toggle('cli-busy', active);
-  }
-}
-
-// Terminal output activity — updates lastActivityTime only, busy state driven by backend
-// Patterns that indicate API errors, rate limits, auth failures, or crashes
-const errorPatterns = /overloaded|rate.limit|exceeded|api.error|unauthorized|authentication.failed|invalid.api.key|quota|529|503|502|500.*error|credit|billing|internal.server.error/i;
-
-function trackActivity(sessionId, data) {
-  if (activityNoiseRe.test(data)) return;
-  lastActivityTime.set(sessionId, new Date());
-
-  // Detect API/auth errors in terminal output
-  if (errorPatterns.test(data)) {
-    errorSessions.add(sessionId);
-    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-    if (item) item.classList.add('session-error');
-  }
+  // Activity and unread are independent: a reminder must not stop the spinner.
+  forEachSessionItem(sessionId, item => {
+    item.classList.toggle('cli-busy', active);
+    item.classList.toggle('response-ready', responseReadySessions.has(sessionId));
+  });
+  // The Projects tab rolls working / finished / needs-you up onto its rows.
+  if (typeof updateProjectStatusDots === 'function') updateProjectStatusDots();
+  saveSessionNotices();
 }
 
 function clearUnread(sessionId) {
   responseReadySessions.delete(sessionId);
-  const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-  if (item) {
-    item.classList.remove('response-ready');
-  }
+  forEachSessionItem(sessionId, item => item.classList.remove('response-ready'));
+  if (typeof updateProjectStatusDots === 'function') updateProjectStatusDots();
+  saveSessionNotices();
+}
+
+// User-initiated reminder; it does not change what the process is doing.
+function markUnread(sessionId) {
+  if (responseReadySessions.has(sessionId)) return;
+  responseReadySessions.add(sessionId);
+  forEachSessionItem(sessionId, item => item.classList.add('response-ready'));
+  if (typeof updateProjectStatusDots === 'function') updateProjectStatusDots();
+  saveSessionNotices();
 }
 
 function clearNotifications(sessionId) {
+  // Opening a session is not an event: the row stays where it is so the
+  // list does not reshuffle under the pointer.
   clearUnread(sessionId);
   attentionSessions.delete(sessionId);
-  const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-  if (item) item.classList.remove('needs-attention');
+  forEachSessionItem(sessionId, item => item.classList.remove('needs-attention'));
+  if (typeof updateProjectStatusDots === 'function') updateProjectStatusDots();
+  saveSessionNotices();
 }
 // Terminal themes, utils (cleanDisplayName, formatDate, escapeHtml, shellEscape)
 // are defined in terminal-themes.js and utils.js (loaded before app.js).
@@ -377,10 +469,6 @@ window.api.onTerminalData((sessionId, data) => {
       scheduleFlush(sessionId, buf);
     }
   }
-  // Update last activity time (noise-filtered)
-  trackActivity(sessionId, data);
-  // Feed terminal output to scheduler (wait-for-output, condition checks)
-  if (typeof schedulerOnTerminalData === 'function') schedulerOnTerminalData(sessionId, data);
 });
 
 window.api.onSessionDetected((tempId, realId) => {
@@ -389,13 +477,30 @@ window.api.onSessionDetected((tempId, realId) => {
 
   entry.session.sessionId = realId;
   if (activeSessionId === tempId) setActiveSession(realId);
+  rekeySessionActivity(tempId, realId);
+  rekeyTerminalHistory(tempId, realId);
+  if (typeof rekeyProjectSessionState === 'function') rekeyProjectSessionState(tempId, realId);
 
   // Re-key in openSessions
   openSessions.delete(tempId);
   openSessions.set(realId, entry);
 
+  // Re-key file panel state for the new session ID
+  if (typeof rekeyFilePanelState === 'function') rekeyFilePanelState(tempId, realId);
+
+  // Re-key the pending entry so the sidebar row survives until the DB has real
+  // data. Without this the temp id keeps being re-injected by loadProjects and
+  // the session appears twice.
+  const pendingEntry = pendingSessions.get(tempId);
+  pendingSessions.delete(tempId);
+  if (pendingEntry) {
+    pendingEntry.sessionId = realId;
+    pendingSessions.set(realId, pendingEntry);
+  }
+  sessionMap.delete(tempId);
+  sessionMap.set(realId, entry.session);
+
   terminalHeaderId.textContent = realId;
-  terminalHeaderName.textContent = 'New session';
 
   // Refresh sidebar to show the new session, then select it
   loadProjects().then(() => {
@@ -414,6 +519,9 @@ window.api.onSessionForked((oldId, newId) => {
 
   entry.session.sessionId = newId;
   if (activeSessionId === oldId) setActiveSession(newId);
+  rekeySessionActivity(oldId, newId);
+  rekeyTerminalHistory(oldId, newId);
+  if (typeof rekeyProjectSessionState === 'function') rekeyProjectSessionState(oldId, newId);
 
   openSessions.delete(oldId);
   openSessions.set(newId, entry);
@@ -445,24 +553,41 @@ window.api.onSessionForked((oldId, newId) => {
   pollActiveSessions();
 });
 
-window.api.onProcessExited((sessionId, exitCode) => {
+window.api.onProcessExited((sessionId, exitCode, signal, userStopped) => {
   const entry = openSessions.get(sessionId);
   const session = sessionMap.get(sessionId);
-  if (entry) {
-    entry.closed = true;
+  if (entry) entry.closed = true;
+
+  const intentional = wasIntentionalExit({ exitCode, signal, userStopped });
+
+  // A Claude session that died stays mounted behind an exit banner so the user
+  // can read the error it printed (claude / devbox / shell stderr) — without
+  // this, a fast-failing pre-launch command tears the terminal down before the
+  // error is readable. Cleanup is deferred to openSession, which destroys the
+  // closed entry when the user re-clicks the session. The sidebar row stays
+  // put too, so there's somewhere to relaunch from.
+  if (session?.type !== 'terminal' && !intentional) {
+    if (entry) {
+      try {
+        const reason = signal ? `signal ${signal}` : `code ${exitCode}`;
+        entry.terminal.write(`\r\n\x1b[33m── session exited (${reason}) ──\x1b[0m\r\n`);
+      } catch {}
+    }
+    // A pending session that died never wrote a .jsonl, so loadProjects keeps
+    // re-injecting it. Mark it dead so it stops sorting as a running session.
+    const pending = pendingSessions.get(sessionId);
+    if (pending) pending.exited = true;
+    if (gridViewActive) {
+      gridViewerCount.textContent = gridCards.size + ' session' + (gridCards.size !== 1 ? 's' : '');
+    }
+    pollActiveSessions();
+    return;
   }
 
-  // Mark as errored if non-zero exit (crash, API failure, etc.)
-  if (exitCode !== 0 && exitCode != null) {
-    errorSessions.add(sessionId);
-    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-    if (item) item.classList.add('session-error');
-  }
-
-  // Clean up terminal UI on exit (uses destroySession to handle grid cards too)
-  if (entry) {
-    destroySession(sessionId);
-  }
+  // Everything else — a raw shell that exited and harness sessions the user
+  // ended themselves — goes away, including its retained terminal history.
+  // Run cleanup even if the pane was already detached from the renderer.
+  destroySession(sessionId);
   if (gridViewActive) {
     gridViewerCount.textContent = gridCards.size + ' session' + (gridCards.size !== 1 ? 's' : '');
   } else if (activeSessionId === sessionId) {
@@ -472,51 +597,45 @@ window.api.onProcessExited((sessionId, exitCode) => {
     placeholder.style.display = '';
   }
 
-  // Plain terminal sessions: remove from sidebar entirely (ephemeral)
-  if (session?.type === 'terminal') {
+  // Drop the sidebar row for sessions with nothing to reopen: plain terminals,
+  // and Claude sessions still pending (no .jsonl was ever written). A session
+  // that produced real data keeps its row and reloads from the DB.
+  if (session?.type === 'terminal' || pendingSessions.has(sessionId)) {
     pendingSessions.delete(sessionId);
     for (const projList of [cachedProjects, cachedAllProjects]) {
       for (const proj of projList) {
         proj.sessions = proj.sessions.filter(s => s.sessionId !== sessionId);
       }
     }
+    removeSessionFromTrees(sessionId);
     sessionMap.delete(sessionId);
     refreshSidebar();
-    pollActiveSessions();
-    return;
-  }
-
-  // Clean up no-op pending sessions (never created a .jsonl)
-  if (pendingSessions.has(sessionId)) {
-    pendingSessions.delete(sessionId);
-    // Remove from cached project data
-    for (const projList of [cachedProjects, cachedAllProjects]) {
-      for (const proj of projList) {
-        proj.sessions = proj.sessions.filter(s => s.sessionId !== sessionId);
-      }
-    }
-    sessionMap.delete(sessionId);
-    refreshSidebar();
+    // The pending marker can outlive the .jsonl by a beat (reconciliation only
+    // runs in loadProjects), so re-sync: a session that did write real data
+    // gets its row back from the DB rather than vanishing until the next watch.
+    if (session?.type !== 'terminal') loadProjects();
   }
 
   pollActiveSessions();
 });
 
 // --- Terminal notifications (iTerm2 OSC 9 — "needs attention") ---
-window.api.onTerminalNotification((sessionId, message) => {
-  // Only mark as needing attention for "attention" messages, not "waiting for input"
-  // Matches all four CLI notification types:
-  // 1. "Claude Code needs your attention"         → attention
-  // 2. "Claude Code needs your approval for the plan" → approval, needs your
-  // 3. "Claude needs your permission to use {tool}"   → permission, needs your
-  // 4. "Claude Code wants to enter plan mode"         → wants to enter
-  if (/attention|approval|permission|needs your|wants to enter/i.test(message) && sessionId !== activeSessionId) {
+window.api.onTerminalNotification((sessionId, message, kind) => {
+  // `kind` is classified by the session's harness in main, since the wording is
+  // per-CLI: Claude says "needs your permission to use {tool}", codex says
+  // "Approval requested: <command>".
+  if (kind === 'attention' && sessionId !== activeSessionId) {
     attentionSessions.add(sessionId);
-    const item = document.querySelector(`.session-item[data-session-id="${sessionId}"]`);
-    if (item) item.classList.add('needs-attention');
-  } else if (/waiting for your input/i.test(message)) {
-    // "Claude is waiting for your input" — delayed idle notification, mark response-ready
+    bumpSessionEvent(sessionId);
+    // The same session can be on screen in both tabs.
+    document.querySelectorAll(`.session-item[data-session-id="${sessionId}"]`).forEach(item => item.classList.add('needs-attention'));
+    if (typeof updateProjectStatusDots === 'function') updateProjectStatusDots();
+  } else if (kind === 'idle') {
+    // A completion notification is authoritative even if a quick turn never
+    // produced a busy frame, or its busy state arrived under a temporary ID.
+    // Active sessions are already being viewed, so they only need to go idle.
     setActivity(sessionId, false);
+    if (sessionId !== activeSessionId) markUnread(sessionId);
   }
 
   // Show in header if active
@@ -526,7 +645,7 @@ window.api.onTerminalNotification((sessionId, message) => {
   }
 });
 
-// --- CLI busy state (OSC 0 title spinner detection) ---
+// --- CLI busy state (OSC 0 title spinner and OSC 9;4 progress detection) ---
 window.api.onCliBusyState((sessionId, busy) => {
   setActivity(sessionId, busy);
 });
@@ -1052,18 +1171,9 @@ function updateTimeFilterButtons() {
 // --- Single entry point for all sidebar renders ---
 // resort=true: re-sort items by priority+time (use for user-initiated actions)
 // resort=false (default): preserve existing DOM order, new items go to top
-function refreshSidebar({ resort = false } = {}) {
-  if (multiAgentMode) {
-    // Multi-agent mode: load all and render stacked
-    loadAllAgentsData().then(agentData => {
-      renderMultiSidebar(agentData);
-      renderDefaultStatus();
-    }).catch(err => {
-      console.error('Failed to load multi-agent data:', err);
-    });
-    return;
-  }
-
+// `reason` is passed straight to the Projects tab: 'sessions' means only the
+// session list moved, so the project page patches itself instead of rebuilding.
+function refreshSidebar({ resort = false, reason = 'project' } = {}) {
   // When searching, always use all projects (search ignores archive filter)
   let projects = (searchMatchIds !== null)
     ? cachedAllProjects
@@ -1083,6 +1193,7 @@ function refreshSidebar({ resort = false } = {}) {
   }
 
   renderProjects(projects, resort);
+  if (typeof refreshProjectViews === 'function') refreshProjectViews({ reason });
 }
 
 // --- Archive toggle ---
@@ -1188,7 +1299,38 @@ globalSettingsBtn.addEventListener('click', () => {
   openSettingsViewer('global');
 });
 
-// --- Add project button ---
+// --- "More" button: Plans, Agent Files, Stats and Global settings share one
+// menu so the tab strip stays short. The tab buttons stay in the DOM, hidden,
+// so everything that clicks them (shortcuts, the quota gauge) keeps working.
+const sidebarMoreBtn = document.getElementById('sidebar-more-btn');
+const MORE_TABS = ['plans', 'memory', 'stats'];
+const moreIdleIcon = sidebarMoreBtn.innerHTML;
+const tabButton = (name) => document.querySelector(`.sidebar-tab[data-tab="${name}"]`);
+const menuIcon = (svg) => svg.replace(/width="18" height="18"/, 'width="14" height="14"');
+
+/** Show the active hidden tab's icon on the more button, or the dots when none is active. */
+function updateMoreButton() {
+  const tab = MORE_TABS.includes(activeTab) ? tabButton(activeTab) : null;
+  sidebarMoreBtn.innerHTML = tab ? tab.innerHTML : moreIdleIcon;
+  sidebarMoreBtn.title = tab ? tab.title : 'More';
+  sidebarMoreBtn.classList.toggle('active', !!tab);
+}
+
+sidebarMoreBtn.addEventListener('click', (e) => {
+  const slackLink = document.getElementById('status-bar-slack');
+  const tabItem = (name) => {
+    const tab = tabButton(name);
+    return { label: tab.title, icon: menuIcon(tab.innerHTML), muted: activeTab === name, onClick: () => tab.click() };
+  };
+  showContextMenu([
+    ...MORE_TABS.map(tabItem),
+    { sep: true },
+    { label: 'Global settings', icon: ICONS.gear(14), onClick: () => globalSettingsBtn.click() },
+    { label: 'Join Slack', icon: slackLink.querySelector('svg').outerHTML, onClick: () => window.api.openExternal(slackLink.href) },
+  ], { anchor: e.currentTarget });
+});
+
+// --- Add folder / new project buttons ---
 addProjectBtn.addEventListener('click', () => {
   showAddProjectDialog();
 });
@@ -1223,7 +1365,7 @@ function clearSearch() {
   searchInput.value = '';
   searchBar.classList.remove('has-query');
   if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null; }
-  if (activeTab === 'sessions') {
+  if (activeTab === 'sessions' || activeTab === 'projects') {
     searchMatchIds = null;
     searchMatchProjectPaths = null;
     refreshSidebar({ resort: true });
@@ -1254,7 +1396,7 @@ searchInput.addEventListener('input', () => {
     }
 
     try {
-      if (activeTab === 'sessions') {
+      if (activeTab === 'sessions' || activeTab === 'projects') {
         const results = await window.api.search('session', query, searchTitlesOnly);
         searchMatchIds = new Set(results.map(r => r.id));
         // When title-only, also match project names
@@ -1262,7 +1404,7 @@ searchInput.addEventListener('input', () => {
         if (searchTitlesOnly) {
           const lowerQ = query.toLowerCase();
           for (const p of cachedAllProjects) {
-            const shortName = p.projectPath.split('/').filter(Boolean).slice(-2).join('/');
+            const shortName = shortProjectPath(p.projectPath);
             if (shortName.toLowerCase().includes(lowerQ)) {
               if (!searchMatchProjectPaths) searchMatchProjectPaths = new Set();
               searchMatchProjectPaths.add(p.projectPath);
@@ -1280,7 +1422,7 @@ searchInput.addEventListener('input', () => {
         renderMemories(matchIds);
       }
     } catch {
-      if (activeTab === 'sessions') {
+      if (activeTab === 'sessions' || activeTab === 'projects') {
         searchMatchIds = null;
         searchMatchProjectPaths = null;
         refreshSidebar({ resort: true });
@@ -1290,6 +1432,43 @@ searchInput.addEventListener('input', () => {
 });
 
 // --- Stop session helper ---
+/**
+ * A row for a session that never produced a transcript, and is not running.
+ *
+ * These exist so a session that died on launch can be relaunched or read, but
+ * nothing on disk backs them — so nothing else can ever clear them, and without
+ * a way out they sit in the sidebar for good.
+ */
+function isDismissibleSession(sessionId) {
+  return pendingSessions.has(sessionId) && !activePtyIds.has(sessionId);
+}
+
+/** Drop such a row. Purely renderer state, so it cannot come back. */
+function dismissSession(sessionId) {
+  const session = sessionMap.get(sessionId);
+  pendingSessions.delete(sessionId);
+  sessionMap.delete(sessionId);
+  for (const projList of [cachedProjects, cachedAllProjects]) {
+    for (const proj of projList) {
+      proj.sessions = proj.sessions.filter(s => s.sessionId !== sessionId);
+    }
+  }
+  if (typeof removeSessionFromTrees === 'function') removeSessionFromTrees(sessionId);
+  if (openSessions.has(sessionId)) destroySession(sessionId);
+  else {
+    forgetTerminalHistory(sessionId);
+    if (session?.type === 'terminal') forgetPersistedTerminalSession(sessionId);
+  }
+  if (activeSessionId === sessionId) {
+    setActiveSession(null);
+    terminalHeader.style.display = 'none';
+    placeholder.style.display = '';
+  }
+  attentionSessions.delete(sessionId);
+  responseReadySessions.delete(sessionId);
+  refreshSidebar();
+}
+
 async function confirmAndStopSession(sessionId) {
   if (!confirm('Stop this session?')) return;
   await window.api.stopSession(sessionId);
@@ -1304,6 +1483,7 @@ async function confirmAndStopSession(sessionId) {
 
 // --- Terminal header controls ---
 terminalStopBtn.addEventListener('click', () => {
+  if (activeTaskView) return;
   if (activeSessionId) confirmAndStopSession(activeSessionId);
 });
 
@@ -1335,12 +1515,33 @@ terminalDetachBtn.addEventListener('click', async () => {
 });
 
 // --- Poll for active PTY sessions ---
+// Adaptive cadence: poll fast (3s) only while PTYs are running; when idle, back
+// off to 30s. Every renderer path that starts a session (launchNewSession,
+// openSession, launchTerminalSession, onSessionDetected/Forked) calls
+// pollActiveSessions() explicitly, which re-arms the fast cadence immediately.
+// The 30s idle floor still catches sessions started outside the renderer
+// (scheduler-spawned PTYs, other windows) within at most 30s.
+const POLL_FAST_MS = 3000;
+const POLL_IDLE_MS = 30000;
+let pollTimer = null;
+
+function scheduleActiveSessionsPoll() {
+  if (pollTimer) clearTimeout(pollTimer);
+  const delay = activePtyIds.size > 0 ? POLL_FAST_MS : POLL_IDLE_MS;
+  pollTimer = setTimeout(pollActiveSessions, delay);
+}
+
 async function pollActiveSessions() {
   try {
-    const sessions = await window.api.getActiveSessions();
-    const prevSize = activePtyIds.size;
-    activePtyIds = new Set(sessions.map(s => s.sessionId));
-    for (const s of sessions) sessionAgentMap.set(s.sessionId, s.cliAgent);
+    const ids = await window.api.getActiveSessions();
+    // A new session that just came alive is news. A resumed one keeps its
+    // place until the agent does something.
+    for (const id of ids) {
+      if (activePtyIds.has(id)) continue;
+      const pending = pendingSessions.get(id);
+      if (pending && !pending.restored) sessionEventTimes.set(id, Date.now());
+    }
+    activePtyIds = new Set(ids);
     updateRunningIndicators();
     updateTerminalHeader();
     // Auto-refresh the "Active" meta-view when PTY count changes
@@ -1348,6 +1549,7 @@ async function pollActiveSessions() {
       loadMetaView('_active');
     }
   } catch {}
+  scheduleActiveSessionsPoll();
 }
 
 function updateRunningIndicators() {
@@ -1356,9 +1558,10 @@ function updateRunningIndicators() {
     const running = activePtyIds.has(id);
     item.classList.toggle('has-running-pty', running);
     if (!running) {
-      item.classList.remove('needs-attention', 'response-ready', 'cli-busy');
-      attentionSessions.delete(id);
-      responseReadySessions.delete(id);
+      // Unread and needs-you stay until the user looks; only busy needs a PTY.
+      item.classList.remove('cli-busy');
+      item.classList.toggle('needs-attention', attentionSessions.has(id));
+      item.classList.toggle('response-ready', responseReadySessions.has(id));
       sessionBusyState.delete(id);
     }
     const dot = item.querySelector('.session-status-dot');
@@ -1370,6 +1573,7 @@ function updateRunningIndicators() {
     const dot = group.querySelector('.slug-group-dot');
     if (dot) dot.classList.toggle('running', hasRunning);
   });
+  if (typeof updateProjectStatusDots === 'function') updateProjectStatusDots();
   // Update grid card dots and status text
   for (const [sid, card] of gridCards) {
     const running = activePtyIds.has(sid);
@@ -1405,18 +1609,18 @@ function updatePtyTitle() {
   terminalHeaderPtyTitle.style.display = title ? '' : 'none';
 }
 
-setInterval(pollActiveSessions, 3000);
+scheduleActiveSessionsPoll();
 
 // Refresh sidebar timeago labels every 30s so "just now" ticks forward
 setInterval(() => {
-  for (const [sessionId, time] of lastActivityTime) {
+  for (const [sessionId, session] of sessionMap) {
+    if (!session.modified) continue;
     const item = document.getElementById('si-' + sessionId);
     if (!item) continue;
-    const meta = item.querySelector('.session-meta');
-    if (!meta) continue;
-    const session = sessionMap.get(sessionId);
-    const msgSuffix = session?.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '';
-    meta.textContent = formatDate(time) + msgSuffix;
+    const timeEl = item.querySelector('.session-time');
+    if (!timeEl) continue;
+    const msgSuffix = session.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '';
+    timeEl.textContent = formatDate(new Date(session.modified)) + msgSuffix;
   }
 }, 30000);
 
@@ -1437,23 +1641,74 @@ function dedup(projects) {
   }
 }
 
-async function loadProjects({ resort = false } = {}) {
+/**
+ * Raw terminals have no transcript/database row. Recreate their renderer rows
+ * from localStorage before the sidebar/project panes render after a restart.
+ */
+function injectPersistedTerminalRows() {
+  for (const saved of persistedTerminalSessions()) {
+    if (pendingSessions.has(saved.sessionId)) continue;
+    const session = sessionMap.get(saved.sessionId) || saved;
+    Object.assign(session, saved);
+    sessionMap.set(session.sessionId, session);
+    const folder = encodeProjectPath(session.projectPath);
+    pendingSessions.set(session.sessionId, {
+      session,
+      projectPath: session.projectPath,
+      folder,
+      restored: true,
+    });
+    for (const projList of [cachedProjects, cachedAllProjects]) {
+      let proj = projList.find(p => p.projectPath === session.projectPath);
+      if (!proj) {
+        proj = { folder, projectPath: session.projectPath, sessions: [] };
+        projList.unshift(proj);
+      }
+      if (!proj.sessions.some(item => item.sessionId === session.sessionId)) proj.sessions.unshift(session);
+    }
+    injectPendingIntoTree(session);
+  }
+}
+
+/** Reopen every saved raw terminal as a fresh shell, initially hidden. */
+async function restorePersistedTerminalProcesses() {
+  const jobs = [];
+  for (const saved of persistedTerminalSessions()) {
+    if (openSessions.has(saved.sessionId)) continue;
+    const session = sessionMap.get(saved.sessionId) || saved;
+    jobs.push(openRawTerminalSession(session, { show: false }));
+  }
+  if (jobs.length) {
+    await Promise.all(jobs);
+    await pollActiveSessions();
+  }
+}
+
+async function loadProjects({ resort = false, reason = 'project' } = {}) {
   const wasEmpty = cachedProjects.length === 0;
   if (wasEmpty) {
     loadingStatus.textContent = 'Loading\u2026';
     loadingStatus.className = 'active';
     loadingStatus.style.display = '';
   }
-  const [defaultProjects, allProjects] = await Promise.all([
+  const [defaultProjects, allProjects, tree, treeAll] = await Promise.all([
     window.api.getProjects(false),
     window.api.getProjects(true),
+    window.api.getProjectTree(false).catch(() => ({ projects: [] })),
+    window.api.getProjectTree(true).catch(() => ({ projects: [] })),
+    // Scheduled tasks ride along: the folder clocks and session chips read them.
+    typeof loadSchedules === 'function' ? loadSchedules() : null,
   ]);
   cachedProjects = defaultProjects;
   cachedAllProjects = allProjects;
+  cachedProjectTree = tree || { projects: [] };
+  cachedProjectTreeAll = treeAll || { projects: [] };
   loadingStatus.style.display = 'none';
   loadingStatus.className = '';
   dedup(cachedProjects);
   dedup(cachedAllProjects);
+  dedupTree(cachedProjectTree);
+  dedupTree(cachedProjectTreeAll);
 
   // Reconcile pending sessions: remove ones that now have real data
   let hasReinjected = false;
@@ -1475,13 +1730,14 @@ async function loadProjects({ resort = false } = {}) {
           proj.sessions.unshift(pending.session);
         }
       }
+      injectPendingIntoTree(pending.session);
     }
   }
 
   // Track active plain terminals in pendingSessions/sessionMap (data now comes from backend)
   try {
     const activeTerminals = await window.api.getActiveTerminals();
-    for (const { sessionId, projectPath } of activeTerminals) {
+    for (const { sessionId, projectPath, projectId, trackId } of activeTerminals) {
       if (pendingSessions.has(sessionId)) continue; // already tracked
       const folder = encodeProjectPath(projectPath);
       // Find the session object already injected by the backend
@@ -1491,13 +1747,28 @@ async function loadProjects({ resort = false } = {}) {
         if (session) break;
       }
       if (!session) continue;
+      // An attached folder can sit outside the project's root, so cwd alone is
+      // not enough to restore where this ephemeral terminal belongs.
+      if (projectId) session.projectId = projectId;
+      if (trackId) session.trackId = trackId;
+      // Also adopts terminals that were already running when this persistence
+      // feature was introduced; the next restart should retain them too.
+      persistTerminalSession(session);
       pendingSessions.set(sessionId, { session, projectPath, folder });
       sessionMap.set(sessionId, session);
     }
   } catch {}
 
+  // A full app exit kills raw PTYs, so the main-process active list is empty on
+  // the next launch. Their durable descriptors still put them back in the same
+  // project/track and starting folder.
+  injectPersistedTerminalRows();
+
+  // Project roots and attached folders get their tasks too, even with no
+  // sessions of their own, so a project's task menu is complete.
+  await hydrateProjectTasks([cachedProjects, cachedAllProjects], treeTaskPaths(cachedProjectTreeAll));
   await pollActiveSessions();
-  refreshSidebar({ resort });
+  refreshSidebar({ resort, reason });
   renderDefaultStatus();
 }
 
@@ -1508,1043 +1779,19 @@ function folderId(projectPath) {
   return 'project-' + projectPath.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
-function buildSlugGroup(slug, sessions) {
-  const group = document.createElement('div');
-  const id = slugId(slug);
-  const expanded = getExpandedSlugs().has(id);
-  group.className = expanded ? 'slug-group' : 'slug-group collapsed';
-  group.id = id;
-
-  const mostRecent = sessions.reduce((a, b) => {
-    const aTime = lastActivityTime.get(a.sessionId) || new Date(a.modified);
-    const bTime = lastActivityTime.get(b.sessionId) || new Date(b.modified);
-    return bTime > aTime ? b : a;
-  });
-  const displayName = cleanDisplayName(mostRecent.name || mostRecent.summary || slug);
-  const mostRecentTime = lastActivityTime.get(mostRecent.sessionId) || new Date(mostRecent.modified);
-  const timeStr = formatDate(mostRecentTime);
-
-  const header = document.createElement('div');
-  header.className = 'slug-group-header';
-
-  const row = document.createElement('div');
-  row.className = 'slug-group-row';
-
-  const expand = document.createElement('span');
-  expand.className = 'slug-group-expand';
-  expand.innerHTML = '<span class="arrow">&#9654;</span>';
-
-  const info = document.createElement('div');
-  info.className = 'slug-group-info';
-
-  const nameEl = document.createElement('div');
-  nameEl.className = 'slug-group-name';
-  nameEl.textContent = displayName;
-
-  const hasRunning = sessions.some(s => activePtyIds.has(s.sessionId));
-
-  const meta = document.createElement('div');
-  meta.className = 'slug-group-meta';
-  meta.innerHTML = `<span class="slug-group-dot${hasRunning ? ' running' : ''}"></span><span class="slug-group-count">${sessions.length} sessions</span> ${escapeHtml(timeStr)}`;
-
-  const archiveSlugBtn = document.createElement('button');
-  archiveSlugBtn.className = 'slug-group-archive-btn';
-  archiveSlugBtn.title = 'Archive all sessions in group';
-  archiveSlugBtn.innerHTML = ICONS.archive(14);
-
-  info.appendChild(nameEl);
-  info.appendChild(meta);
-  row.appendChild(expand);
-  row.appendChild(info);
-  row.appendChild(archiveSlugBtn);
-  header.appendChild(row);
-
-  const sessionsContainer = document.createElement('div');
-  sessionsContainer.className = 'slug-group-sessions';
-
-  const promoted = [];
-  const rest = [];
-  for (const session of sessions) {
-    if (activePtyIds.has(session.sessionId)) {
-      promoted.push(session);
-    } else {
-      rest.push(session);
-    }
-  }
-
-  if (promoted.length > 0) {
-    group.classList.add('has-promoted');
-    for (const session of promoted) {
-      sessionsContainer.appendChild(buildSessionItem(session));
-    }
-    if (rest.length > 0) {
-      const moreBtn = document.createElement('div');
-      moreBtn.className = 'slug-group-more';
-      moreBtn.id = 'sgm-' + id;
-      moreBtn.textContent = `+ ${rest.length} more`;
-
-      const olderDiv = document.createElement('div');
-      olderDiv.className = 'slug-group-older';
-      olderDiv.id = 'sgo-' + id;
-      for (const session of rest) {
-        olderDiv.appendChild(buildSessionItem(session));
-      }
-
-      sessionsContainer.appendChild(moreBtn);
-      sessionsContainer.appendChild(olderDiv);
-    }
-  } else {
-    for (const session of sessions) {
-      sessionsContainer.appendChild(buildSessionItem(session));
-    }
-  }
-
-  group.appendChild(header);
-  group.appendChild(sessionsContainer);
-  return group;
-}
-
-function renderProjects(projects, resort) {
-  const newSidebar = document.createElement('div');
-
-  // Sort project groups using sortedOrder as source of truth
-  if (!resort && sortedOrder.length > 0) {
-    const orderIndex = new Map(sortedOrder.map((e, i) => [e.projectPath, i]));
-    projects = [...projects].sort((a, b) => {
-      const aPos = orderIndex.get(a.projectPath);
-      const bPos = orderIndex.get(b.projectPath);
-      if (aPos !== undefined && bPos !== undefined) return aPos - bPos;
-      if (aPos === undefined && bPos !== undefined) return -1;
-      if (aPos !== undefined && bPos === undefined) return 1;
-      return 0;
-    });
-  }
-  // projects are now in the correct order (data order for resort, preserved order otherwise)
-
-  const newSortedOrder = [];
-
-  for (const project of projects) {
-    // === STEP 1: Filter ===
-    let filtered = project.sessions;
-    if (showStarredOnly) {
-      filtered = filtered.filter(s => s.starred);
-    }
-    if (showRunningOnly) {
-      filtered = filtered.filter(s => activePtyIds.has(s.sessionId));
-    }
-    if (showTodayOnly) {
-      const now = new Date();
-      const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      filtered = filtered.filter(s => {
-        if (!s.modified) return false;
-        const d = new Date(s.modified);
-        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` === todayStr;
-      });
-    }
-    // Time range filter (applies to all views including pinned/active)
-    if (activeTimeFilter > 0) {
-      filtered = filterSessionsByDate(filtered, activeTimeFilter);
-    }
-
-    // === STEP 1.5: User-selected sort (applies after filters, before priority grouping) ===
-    filtered = sortSessions(filtered, activeSortMode);
-
-    const anyFilterActive = showStarredOnly || showRunningOnly || showTodayOnly || activeTimeFilter > 0 || searchMatchIds !== null;
-    if (filtered.length === 0 && !project._projectMatchedOnly && (project.sessions.length > 0 || anyFilterActive)) continue;
-    const fId = folderId(project.projectPath);
-
-    // === STEP 2: Priority sort ===
-    // Priority: pinned+running > running > pinned > rest (within each tier, use user sort mode)
-    filtered = [...filtered].sort((a, b) => {
-      const aRunning = activePtyIds.has(a.sessionId) || pendingSessions.has(a.sessionId);
-      const bRunning = activePtyIds.has(b.sessionId) || pendingSessions.has(b.sessionId);
-      const aPri = (a.starred && aRunning ? 3 : aRunning ? 2 : a.starred ? 1 : 0);
-      const bPri = (b.starred && bRunning ? 3 : bRunning ? 2 : b.starred ? 1 : 0);
-      if (aPri !== bPri) return bPri - aPri;
-      // Within same priority tier, use user-selected sort
-      switch (activeSortMode) {
-        case 'date-desc':
-          return new Date(b.endTime || b.startTime || 0) - new Date(a.endTime || a.startTime || 0);
-        case 'date-asc':
-          return new Date(a.startTime || a.endTime || 0) - new Date(b.startTime || b.endTime || 0);
-        case 'size-desc':
-          return (b.size || 0) - (a.size || 0);
-        case 'size-asc':
-          return (a.size || 0) - (b.size || 0);
-        case 'msgs-desc':
-          return (b.messageCount || b.turnCount || 0) - (a.messageCount || a.turnCount || 0);
-        case 'project':
-          return (a.projectPath || '').localeCompare(b.projectPath || '');
-        case 'git': {
-          const gitOrder = { ahead: 0, current: 1, behind: 2, dirty: 3, unknown: 4 };
-          return (gitOrder[a.gitStatus || 'unknown'] ?? 4) - (gitOrder[b.gitStatus || 'unknown'] ?? 4);
-        }
-        default:
-          return new Date(b.modified) - new Date(a.modified);
-      }
-    });
-
-    // === STEP 3: Slug grouping ===
-    const slugMap = new Map(); // slug → sessions[]
-    const ungrouped = [];
-    for (const session of filtered) {
-      if (session.slug) {
-        if (!slugMap.has(session.slug)) slugMap.set(session.slug, []);
-        slugMap.get(session.slug).push(session);
-      } else {
-        ungrouped.push(session);
-      }
-    }
-
-    // Build render items (slug group = 1 item)
-    const allItems = [];
-    for (const session of ungrouped) {
-      const isRunning = activePtyIds.has(session.sessionId) || pendingSessions.has(session.sessionId);
-      allItems.push({
-        sortTime: new Date(session.modified).getTime(),
-        pinned: !!session.starred, running: isRunning,
-        element: buildSessionItem(session),
-        session, isSlug: false,
-      });
-    }
-    for (const [slug, sessions] of slugMap) {
-      const mostRecentTime = Math.max(...sessions.map(s => new Date(s.modified).getTime()));
-      const hasRunning = sessions.some(s => activePtyIds.has(s.sessionId) || pendingSessions.has(s.sessionId));
-      const hasPinned = sessions.some(s => s.starred);
-      const element = sessions.length === 1 ? buildSessionItem(sessions[0]) : buildSlugGroup(slug, sessions);
-      allItems.push({
-        session: sessions.length === 1 ? sessions[0] : null,
-        isSlug: sessions.length > 1,
-        sortTime: mostRecentTime,
-        pinned: hasPinned, running: hasRunning,
-        element,
-      });
-    }
-
-    // === STEP 4: Sort render items ===
-    const prevEntry = sortedOrder.find(e => e.projectPath === project.projectPath);
-    if (resort || !prevEntry) {
-      // Full sort by priority + modified time
-      allItems.sort((a, b) => {
-        const aPri = (a.pinned && a.running ? 3 : a.running ? 2 : a.pinned ? 1 : 0);
-        const bPri = (b.pinned && b.running ? 3 : b.running ? 2 : b.pinned ? 1 : 0);
-        if (aPri !== bPri) return bPri - aPri;
-        return b.sortTime - a.sortTime;
-      });
-    } else {
-      // Preserve last-sorted order; new items go to top
-      const orderIndex = new Map(prevEntry.itemIds.map((id, i) => [id, i]));
-      allItems.sort((a, b) => {
-        const aPos = orderIndex.get(a.element.id);
-        const bPos = orderIndex.get(b.element.id);
-        if (aPos !== undefined && bPos !== undefined) return aPos - bPos;
-        if (aPos === undefined && bPos !== undefined) return -1;
-        if (aPos !== undefined && bPos === undefined) return 1;
-        return b.sortTime - a.sortTime;
-      });
-    }
-    // Save current order for this project
-    newSortedOrder.push({ projectPath: project.projectPath, itemIds: allItems.map(item => item.element.id) });
-
-    // === STEP 5: Split items for display ===
-    // Two modes:
-    //  • Flat (search / star / running / today): show every matching item, as before.
-    //  • Card model (default project view): show running + pinned + slug-groups
-    //    EXPANDED, and collapse the remaining dormant sessions into a per-project
-    //    pulldown — so each project reads as a single card unless work is running.
-    const flatMode = searchMatchIds !== null || showStarredOnly || showRunningOnly || showTodayOnly;
-    let visible = [];
-    let older = [];
-    let dormant = []; // card-model pulldown contents
-    if (flatMode) {
-      visible = allItems;
-    } else {
-      for (const item of allItems) {
-        if (item.running || item.pinned || item.isSlug) visible.push(item);
-        else dormant.push(item);
-      }
-      // A lone dormant session with nothing expanded renders inline (no pulldown).
-      if (visible.length === 0 && dormant.length === 1) {
-        visible = dormant;
-        dormant = [];
-      }
-    }
-
-    // === STEP 6: Build DOM ===
-    const group = document.createElement('div');
-    group.className = 'project-group';
-    group.id = fId;
-
-    // Per-CLI color accent for the card. In a per-CLI view use that CLI's color;
-    // otherwise color by the agent that owns the project's newest session.
-    const cardAgent = (activeAgent && !activeAgent.startsWith('_'))
-      ? activeAgent
-      : (filtered[0]?.agent || sessionAgentMap.get(filtered[0]?.sessionId) || 'claude');
-    const cardAgentColor = AGENT_COLORS[cardAgent];
-    if (cardAgentColor) {
-      group.classList.add('has-agent-color');
-      group.dataset.agent = cardAgent;
-      group.style.setProperty('--agent-color', cardAgentColor);
-    }
-
-    const header = document.createElement('div');
-    header.className = 'project-header';
-    header.id = 'ph-' + fId;
-    const shortName = project.projectPath.split('/').filter(Boolean).slice(-2).join('/');
-    header.innerHTML = `<span class="arrow">&#9660;</span> <span class="project-name">${shortName}</span>`;
-
-    const settingsBtn = document.createElement('button');
-    settingsBtn.className = 'project-settings-btn';
-    settingsBtn.title = 'Project settings';
-    settingsBtn.innerHTML = ICONS.gear(16);
-    header.appendChild(settingsBtn);
-
-    const archiveGroupBtn = document.createElement('button');
-    archiveGroupBtn.className = 'project-archive-btn';
-    archiveGroupBtn.title = 'Archive all sessions';
-    archiveGroupBtn.innerHTML = ICONS.archive(18);
-    header.appendChild(archiveGroupBtn);
-
-    const newBtn = document.createElement('button');
-    newBtn.className = 'project-new-btn';
-    newBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="2" x2="6" y2="10"/><line x1="2" y1="6" x2="10" y2="6"/></svg>';
-    newBtn.title = 'New session';
-    header.appendChild(newBtn);
-
-    // Project card metadata row (path · last-modified · git branch/status).
-    // Rendered with placeholders here; filled asynchronously after morphdom by
-    // enrichProjectCards(). Sits between header and sessions so it stays visible
-    // even when the group is collapsed.
-    const metaRow = document.createElement('div');
-    metaRow.className = 'project-card-meta';
-    metaRow.id = 'pcm-' + fId;
-    metaRow.dataset.projectPath = project.projectPath;
-    metaRow.innerHTML = `
-      <span class="pcm-path" title="${escapeHtml(project.projectPath)}">${escapeHtml(project.projectPath)}</span>
-      <span class="pcm-modified" title="Most recently modified file in project"></span>
-      <span class="pcm-git"></span>`;
-
-    const sessionsList = document.createElement('div');
-    sessionsList.className = 'project-sessions';
-    sessionsList.id = 'sessions-' + fId;
-
-    for (const item of visible) {
-      sessionsList.appendChild(item.element);
-    }
-
-    // Card-model pulldown for dormant (non-running, non-pinned) sessions.
-    if (dormant.length > 0) {
-      const wrap = document.createElement('div');
-      wrap.className = 'session-pulldown-wrap';
-      const select = document.createElement('select');
-      select.className = 'session-pulldown';
-      select.id = 'pull-' + fId;
-      const ph = document.createElement('option');
-      ph.value = '';
-      ph.textContent = `${dormant.length} session${dormant.length > 1 ? 's' : ''} — open…`;
-      select.appendChild(ph);
-      for (const it of dormant) {
-        if (!it.session) continue;
-        const opt = document.createElement('option');
-        opt.value = it.session.sessionId;
-        const d = formatDate(new Date(it.session.modified));
-        const name = cleanDisplayName(it.session.name || it.session.summary) || 'session';
-        opt.textContent = `${d} · ${name}`.slice(0, 80);
-        select.appendChild(opt);
-      }
-      wrap.appendChild(select);
-      sessionsList.appendChild(wrap);
-    }
-
-    if (older.length > 0) {
-      const moreBtn = document.createElement('div');
-      moreBtn.className = 'sessions-more-toggle';
-      moreBtn.id = 'older-' + fId;
-      moreBtn.textContent = `+ ${older.length} older`;
-      const olderList = document.createElement('div');
-      olderList.className = 'sessions-older';
-      olderList.id = 'older-list-' + fId;
-      olderList.style.display = 'none';
-      for (const item of older) {
-        olderList.appendChild(item.element);
-      }
-      sessionsList.appendChild(moreBtn);
-      sessionsList.appendChild(olderList);
-    }
-
-    // Auto-collapse if most recent session is older than 5 days, or project matched with no sessions
-    if (project._projectMatchedOnly) {
-      header.classList.add('collapsed');
-    } else if (searchMatchIds === null && !showStarredOnly && !showRunningOnly) {
-      const mostRecent = filtered[0]?.modified;
-      if (mostRecent && (Date.now() - new Date(mostRecent)) > sessionMaxAgeDays * 86400000) {
-        header.classList.add('collapsed');
-      }
-    }
-
-    group.appendChild(header);
-    group.appendChild(metaRow);
-    group.appendChild(sessionsList);
-    newSidebar.appendChild(group);
-  }
-
-  // Re-apply active state
-  if (activeSessionId) {
-    const activeItem = newSidebar.querySelector(`[data-session-id="${activeSessionId}"]`);
-    if (activeItem) activeItem.classList.add('active');
-  }
-
-  morphdom(sidebarContent, newSidebar, {
-    childrenOnly: true,
-    onBeforeElUpdated(fromEl, toEl) {
-      // Skip updating session items that have an active rename input
-      if (fromEl.classList.contains('session-item') && fromEl.querySelector('.session-rename-input')) {
-        return false;
-      }
-      if (fromEl.classList.contains('project-header')) {
-        if (fromEl.classList.contains('collapsed')) {
-          toEl.classList.add('collapsed');
-        } else {
-          toEl.classList.remove('collapsed');
-        }
-      }
-      if (fromEl.classList.contains('slug-group')) {
-        if (fromEl.classList.contains('collapsed')) {
-          toEl.classList.add('collapsed');
-        } else {
-          toEl.classList.remove('collapsed');
-        }
-      }
-      if (fromEl.classList.contains('sessions-older') && fromEl.style.display !== 'none') {
-        toEl.style.display = '';
-      }
-      if (fromEl.classList.contains('sessions-more-toggle') && fromEl.classList.contains('expanded')) {
-        toEl.classList.add('expanded');
-        toEl.textContent = '- hide older';
-      }
-      if (fromEl.classList.contains('slug-group-older') && fromEl.style.display !== 'none') {
-        toEl.style.display = '';
-      }
-      if (fromEl.classList.contains('slug-group-more') && fromEl.classList.contains('expanded')) {
-        toEl.classList.add('expanded');
-      }
-      return true;
-    },
-    getNodeKey(node) {
-      return node.id || undefined;
-    }
-  });
-
-  // Save the full sorted order (project order + item order) as source of truth
-  sortedOrder = newSortedOrder;
-
-  rebindSidebarEvents(projects);
-
-  // Restore terminal focus after morphdom DOM updates, but not if the user is
-  // interacting with an input/textarea (search box, rename input, dialogs, etc.)
-  const ae = document.activeElement;
-  const isUserTyping = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable || ae.closest('.modal-overlay'));
-  if (activeSessionId && openSessions.has(activeSessionId) && !isUserTyping) {
-    openSessions.get(activeSessionId).terminal.focus();
-  }
-}
-
-// Frontend cache for project card metadata (backend already caches; this avoids
-// redundant IPC on every morphdom refresh).
-const _projectMetaCache = new Map(); // projectPath -> { data, ts }
-const PROJECT_META_FE_TTL = 30_000;
-
-// Lightweight transient status for card git actions (reuses the status bar).
-function cardStatus(text, type) {
-  try {
-    if (!statusBarActivity) return;
-    statusBarActivity.textContent = text;
-    statusBarActivity.className = type === 'error' ? 'status-error' : (type === 'done' ? 'status-done' : '');
-    setTimeout(() => {
-      if (statusBarActivity.textContent === text) {
-        statusBarActivity.textContent = '';
-        statusBarActivity.className = '';
-      }
-    }, 3000);
-  } catch {}
-}
-
-function _renderCardGit(gitEl, projectPath, git) {
-  gitEl.innerHTML = '';
-  if (!git || !git.branch) return;
-  // Branch chip — click to switch branch (lazy-loads branch list).
-  const branchChip = document.createElement('button');
-  branchChip.className = 'pcm-branch';
-  branchChip.title = 'Switch branch';
-  branchChip.innerHTML = `<span class="pcm-branch-icon">&#9095;</span> ${escapeHtml(git.branch)}`;
-  branchChip.onclick = async (e) => {
-    e.stopPropagation();
-    const res = await window.api.gitListBranches(projectPath);
-    if (!res.ok || !res.branches?.length) return;
-    const sel = document.createElement('select');
-    sel.className = 'pcm-branch-select';
-    for (const b of res.branches) {
-      const opt = document.createElement('option');
-      opt.value = b; opt.textContent = b;
-      if (b === res.current) opt.selected = true;
-      sel.appendChild(opt);
-    }
-    sel.onclick = (ev) => ev.stopPropagation();
-    sel.onchange = async () => {
-      const target = sel.value;
-      const out = await window.api.gitCheckoutBranch(projectPath, target, {});
-      if (out.ok) {
-        cardStatus(`Switched to ${target}`, 'done');
-        _projectMetaCache.delete(projectPath);
-        refreshSidebar({ resort: false });
-      } else if (out.dirty) {
-        cardStatus(`Can't switch: uncommitted changes in ${projectPath.split('/').pop()}`, 'error');
-        _renderCardGit(gitEl, projectPath, git); // restore chip
-      } else {
-        cardStatus(out.error || 'Checkout failed', 'error');
-        _renderCardGit(gitEl, projectPath, git);
-      }
-    };
-    branchChip.replaceWith(sel);
-    sel.focus();
-  };
-  gitEl.appendChild(branchChip);
-
-  if (git.dirty) {
-    const b = document.createElement('span');
-    b.className = 'pcm-badge pcm-dirty'; b.title = 'Uncommitted changes'; b.textContent = '●';
-    gitEl.appendChild(b);
-  }
-  if (git.ahead > 0) {
-    const b = document.createElement('span');
-    b.className = 'pcm-badge pcm-ahead'; b.title = `${git.ahead} commit(s) ahead of upstream`; b.textContent = `↑${git.ahead}`;
-    gitEl.appendChild(b);
-  }
-  if (git.behind > 0) {
-    // The cloud-ahead signifier: a "pull" affordance that runs git pull --ff-only.
-    const pull = document.createElement('button');
-    pull.className = 'pcm-badge pcm-pull';
-    pull.title = `${git.behind} commit(s) on the remote not in your folder — click to pull (fast-forward)`;
-    pull.textContent = `⇩${git.behind}`;
-    pull.onclick = async (e) => {
-      e.stopPropagation();
-      pull.disabled = true;
-      const out = await window.api.gitPull(projectPath);
-      if (out.ok) {
-        cardStatus('Pulled latest changes', 'done');
-        _projectMetaCache.delete(projectPath);
-        refreshSidebar({ resort: false });
-      } else {
-        cardStatus(out.error || 'Pull failed', 'error');
-        pull.disabled = false;
-      }
-    };
-    gitEl.appendChild(pull);
-  }
-  // Manual "check remote" (throttled fetch) so the pull signifier is accurate.
-  const fetchBtn = document.createElement('button');
-  fetchBtn.className = 'pcm-badge pcm-fetch'; fetchBtn.title = 'Check remote for new commits';
-  fetchBtn.textContent = '⟳';
-  fetchBtn.onclick = async (e) => {
-    e.stopPropagation();
-    fetchBtn.disabled = true; fetchBtn.classList.add('spinning');
-    const out = await window.api.gitFetchRemote(projectPath, {});
-    fetchBtn.classList.remove('spinning'); fetchBtn.disabled = false;
-    if (out.git) { _renderCardGit(gitEl, projectPath, out.git); }
-  };
-  gitEl.appendChild(fetchBtn);
-}
-
-async function enrichProjectCards(projects) {
-  for (const project of projects) {
-    const fId = folderId(project.projectPath);
-    const metaEl = document.getElementById('pcm-' + fId);
-    if (!metaEl) continue;
-    const modEl = metaEl.querySelector('.pcm-modified');
-    const gitEl = metaEl.querySelector('.pcm-git');
-
-    const cached = _projectMetaCache.get(project.projectPath);
-    const fresh = cached && (Date.now() - cached.ts) < PROJECT_META_FE_TTL;
-    const apply = (data) => {
-      if (!data) return;
-      if (modEl && data.lastModifiedMs) {
-        modEl.textContent = '🕓 ' + formatDate(new Date(data.lastModifiedMs));
-      }
-      if (gitEl) _renderCardGit(gitEl, project.projectPath, data.git);
-    };
-    if (fresh) { apply(cached.data); continue; }
-
-    try {
-      const data = await window.api.getProjectMeta(project.projectPath);
-      if (data && data.ok) {
-        _projectMetaCache.set(project.projectPath, { data, ts: Date.now() });
-        // Element may have been replaced by a later morphdom pass — re-query.
-        const stillThere = document.getElementById('pcm-' + fId);
-        if (stillThere) apply(data);
-      }
-    } catch {}
-  }
-}
-
-function rebindSidebarEvents(projects) {
-  for (const project of projects) {
-    const fId = folderId(project.projectPath);
-    const header = document.getElementById('ph-' + fId);
-    if (!header) continue;
-    const newBtn = header.querySelector('.project-new-btn');
-    if (newBtn) {
-      newBtn.onclick = (e) => { e.stopPropagation(); showNewSessionPopover(project, newBtn); };
-    }
-    const settingsBtn = header.querySelector('.project-settings-btn');
-    if (settingsBtn) {
-      settingsBtn.onclick = (e) => { e.stopPropagation(); openSettingsViewer('project', project.projectPath); };
-    }
-    const archiveGroupBtn = header.querySelector('.project-archive-btn');
-    if (archiveGroupBtn) {
-      archiveGroupBtn.onclick = async (e) => {
-        e.stopPropagation();
-        const sessions = project.sessions.filter(s => !s.archived);
-        if (sessions.length === 0) return;
-        const shortName = project.projectPath.split('/').filter(Boolean).slice(-2).join('/');
-        if (!confirm(`Archive all ${sessions.length} session${sessions.length > 1 ? 's' : ''} in ${shortName}?`)) return;
-        for (const s of sessions) {
-          if (activePtyIds.has(s.sessionId)) {
-            await window.api.stopSession(s.sessionId);
-          }
-          await window.api.archiveSession(s.sessionId, 1);
-          s.archived = 1;
-        }
-        pollActiveSessions();
-        loadProjects();
-      };
-    }
-    header.onclick = (e) => {
-      if (e.target.closest('.project-new-btn') || e.target.closest('.project-archive-btn') || e.target.closest('.project-settings-btn')) return;
-      header.classList.toggle('collapsed');
-    };
-  }
-
-  sidebarContent.querySelectorAll('.slug-group-header').forEach(header => {
-    const archiveBtn = header.querySelector('.slug-group-archive-btn');
-    if (archiveBtn) {
-      archiveBtn.onclick = async (e) => {
-        e.stopPropagation();
-        const group = header.parentElement;
-        const sessionItems = group.querySelectorAll('.session-item');
-        for (const item of sessionItems) {
-          const sid = item.dataset.sessionId;
-          const session = sessionMap.get(sid);
-          if (!session || session.archived) continue;
-          if (activePtyIds.has(sid)) await window.api.stopSession(sid);
-          await window.api.archiveSession(sid, 1);
-          session.archived = 1;
-        }
-        pollActiveSessions();
-        loadProjects();
-      };
-    }
-    header.onclick = (e) => {
-      if (e.target.closest('.slug-group-archive-btn')) return;
-      header.parentElement.classList.toggle('collapsed');
-      saveExpandedSlugs();
-    };
-  });
-
-  sidebarContent.querySelectorAll('.slug-group-more').forEach(moreBtn => {
-    moreBtn.onclick = () => {
-      const group = moreBtn.closest('.slug-group');
-      if (group) {
-        group.classList.remove('collapsed');
-        saveExpandedSlugs();
-      }
-    };
-  });
-
-  // Card-model session pulldown — open the chosen dormant session.
-  sidebarContent.querySelectorAll('.session-pulldown').forEach(sel => {
-    sel.onclick = (e) => e.stopPropagation();
-    sel.onchange = () => {
-      const s = sessionMap.get(sel.value);
-      if (s) openSession(s);
-      sel.value = '';
-    };
-  });
-
-  // Fill project cards with last-modified + git metadata (async, cached).
-  enrichProjectCards(projects);
-
-  sidebarContent.querySelectorAll('.sessions-more-toggle').forEach(moreBtn => {
-    const olderList = moreBtn.nextElementSibling;
-    if (!olderList || !olderList.classList.contains('sessions-older')) return;
-    const count = olderList.children.length;
-    moreBtn.onclick = () => {
-      const showing = olderList.style.display !== 'none';
-      olderList.style.display = showing ? 'none' : '';
-      moreBtn.classList.toggle('expanded', !showing);
-      moreBtn.textContent = showing ? `+ ${count} older` : '- hide older';
-    };
-  });
-
-  sidebarContent.querySelectorAll('.session-item').forEach(item => {
-    const sessionId = item.dataset.sessionId;
-    const session = sessionMap.get(sessionId);
-    if (!session) return;
-
-    item.onclick = () => openSession(session);
-
-    const pin = item.querySelector('.session-pin');
-    if (pin) {
-      pin.onclick = async (e) => {
-        e.stopPropagation();
-        const { starred } = await window.api.toggleStar(session.sessionId);
-        session.starred = starred;
-        refreshSidebar({ resort: true });
-      };
-    }
-
-    const summaryEl = item.querySelector('.session-summary');
-    if (summaryEl) {
-      summaryEl.ondblclick = (e) => { e.stopPropagation(); startRename(summaryEl, session); };
-    }
-
-    const stopBtn = item.querySelector('.session-stop-btn');
-    if (stopBtn) {
-      stopBtn.onclick = (e) => {
-        e.stopPropagation();
-        confirmAndStopSession(session.sessionId);
-      };
-    }
-
-    const launchConfigBtn = item.querySelector('.session-launch-config-btn');
-    if (launchConfigBtn) {
-      launchConfigBtn.onclick = (e) => {
-        e.stopPropagation();
-        showResumeSessionDialog(session);
-      };
-    }
-
-    const forkBtn = item.querySelector('.session-fork-btn');
-    if (forkBtn) {
-      forkBtn.onclick = async (e) => {
-        e.stopPropagation();
-        // Find the project for this session
-        const project = [...cachedAllProjects, ...cachedProjects].find(p =>
-          p.sessions.some(s => s.sessionId === session.sessionId)
-        );
-        if (project) {
-          forkSession(session, project);
-        }
-      };
-    }
-
-    const jsonlBtn = item.querySelector('.session-jsonl-btn');
-    if (jsonlBtn) {
-      jsonlBtn.onclick = (e) => {
-        e.stopPropagation();
-        showJsonlViewer(session);
-      };
-    }
-
-    const archiveBtn = item.querySelector('.session-archive-btn');
-    if (archiveBtn) {
-      archiveBtn.onclick = async (e) => {
-        e.stopPropagation();
-        const newVal = session.archived ? 0 : 1;
-        if (newVal && activePtyIds.has(session.sessionId)) {
-          await window.api.stopSession(session.sessionId);
-          pollActiveSessions();
-        }
-        await window.api.archiveSession(session.sessionId, newVal);
-        session.archived = newVal;
-        loadProjects();
-      };
-    }
-  });
-
-  // Auto-expand slug group if it contains the active session
-  if (activeSessionId) {
-    const activeItem = sidebarContent.querySelector(`[data-session-id="${activeSessionId}"]`);
-    const collapsedGroup = activeItem?.closest('.slug-group.collapsed');
-    if (collapsedGroup) {
-      collapsedGroup.classList.remove('collapsed');
-      saveExpandedSlugs();
-    }
-  }
-}
-
-// Refresh loop badge on an existing session card without full rebuild
-function refreshSessionCard(sessionId) {
-  const card = document.querySelector(`[data-session-id="${sessionId}"]`);
-  if (!card) return;
-  const summaryEl = card.querySelector('.session-summary');
-  if (!summaryEl) return;
-  // Remove existing loop badge
-  const existing = summaryEl.querySelector('.loop-badge');
-  if (existing) existing.remove();
-  // Add updated badge
-  const lp = loopCache[sessionId];
-  if (lp && lp.loopCount > 0) {
-    const loopBadge = document.createElement('span');
-    loopBadge.className = 'loop-badge';
-    loopBadge.title = `Loop detected ${lp.loopCount}x${lp.lastLoopTool ? ' with ' + lp.lastLoopTool : ''}${lp.lastLoopReason ? ': ' + lp.lastLoopReason : ''}`;
-    loopBadge.textContent = '\u21BB' + lp.loopCount;
-    summaryEl.appendChild(loopBadge);
-  }
-}
-
-// F5.6: Determine activity color class from session timestamp
-function getActivityClass(session) {
-  const ts = session.endTime || session.modified;
-  if (!ts) return 'activity-stale';
-  const age = Date.now() - new Date(ts).getTime();
-  if (age < 5 * 60 * 1000) return 'activity-recent';       // < 5 min
-  if (age < 60 * 60 * 1000) return 'activity-recent-hour'; // < 1 hour
-  return 'activity-stale';
-}
-
-function buildSessionItem(session) {
-  const item = document.createElement('div');
-  item.className = 'session-item';
-  item.id = 'si-' + session.sessionId;
-  if (session.type === 'terminal') item.classList.add('is-terminal');
-  if (session.archived) item.classList.add('archived-item');
-  if (activePtyIds.has(session.sessionId)) item.classList.add('has-running-pty');
-  if (attentionSessions.has(session.sessionId)) item.classList.add('needs-attention');
-  if (errorSessions.has(session.sessionId)) item.classList.add('session-error');
-  if (responseReadySessions.has(session.sessionId)) item.classList.add('response-ready');
-  if (sessionBusyState.get(session.sessionId)) item.classList.add('cli-busy');
-
-  // F5.6: Activity color class
-  const activityClass = getActivityClass(session);
-  item.classList.add(activityClass);
-
-  // F5.6: Git status color class
-  const gitClass = session.gitStatus ? `git-${session.gitStatus}` : 'git-unknown';
-  item.classList.add(gitClass);
-
-  // Per-CLI color accent: tint the card's left edge with the agent's color so
-  // sessions from different CLIs are visually distinguishable (esp. in combined
-  // / flagged / running views that mix multiple agents).
-  const cardAgent = session.agent || sessionAgentMap.get(session.sessionId) || 'claude';
-  const cardAgentColor = AGENT_COLORS[cardAgent];
-  if (cardAgentColor) {
-    item.classList.add('has-agent-color');
-    item.dataset.agent = cardAgent;
-    item.style.setProperty('--agent-color', cardAgentColor);
-  }
-
-  item.dataset.sessionId = session.sessionId;
-
-  const modified = lastActivityTime.get(session.sessionId) || new Date(session.modified);
-  const timeStr = formatDate(modified);
-  const displayName = cleanDisplayName(session.name || session.summary);
-
-  const row = document.createElement('div');
-  row.className = 'session-row';
-
-  // Pin
-  const pin = document.createElement('span');
-  pin.className = 'session-pin' + (session.starred ? ' pinned' : '');
-  pin.innerHTML = session.starred
-    ? '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707c-.28-.28-.576-.49-.888-.656L10.073 9.333l-.07 3.181a.5.5 0 0 1-.853.354l-3.535-3.536-4.243 4.243a.5.5 0 1 1-.707-.707l4.243-4.243L1.372 5.11a.5.5 0 0 1 .354-.854l3.18-.07L8.37 .722A3.37 3.37 0 0 1 9.12.074a.5.5 0 0 1 .708.002l-.707.707z"/></svg>'
-    : '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707c-.28-.28-.576-.49-.888-.656L10.073 9.333l-.07 3.181a.5.5 0 0 1-.853.354l-3.535-3.536-4.243 4.243a.5.5 0 1 1-.707-.707l4.243-4.243L1.372 5.11a.5.5 0 0 1 .354-.854l3.18-.07L8.37 .722A3.37 3.37 0 0 1 9.12.074a.5.5 0 0 1 .708.002l-.707.707z"/></svg>';
-
-  // Running status dot
-  const dot = document.createElement('span');
-  dot.className = 'session-status-dot' + (activePtyIds.has(session.sessionId) ? ' running' : '');
-
-  // Info block
-  const info = document.createElement('div');
-  info.className = 'session-info';
-
-  const summaryEl = document.createElement('div');
-  summaryEl.className = 'session-summary';
-  summaryEl.textContent = displayName;
-
-  // F5.6: LIVE badge for recently active sessions (<5 min)
-  if (activityClass === 'activity-recent') {
-    const liveBadge = document.createElement('span');
-    liveBadge.className = 'session-live-badge';
-    liveBadge.textContent = 'LIVE';
-    summaryEl.appendChild(liveBadge);
-  }
-
-  const idEl = document.createElement('div');
-  idEl.className = 'session-id';
-  idEl.textContent = session.sessionId;
-
-  const metaEl = document.createElement('div');
-  metaEl.className = 'session-meta';
-  let metaText = timeStr + (session.messageCount ? ' \u00b7 ' + session.messageCount + ' msgs' : '');
-  const tok = tokenCache[session.sessionId];
-  if (tok) {
-    const totalTok = (tok.inputTokens || 0) + (tok.outputTokens || 0);
-    if (totalTok > 0) metaText += ' \u00b7 ' + formatTokenCount(totalTok);
-    const cost = formatCentsCost(tok.costCents);
-    if (cost) metaText += ' \u00b7 ' + cost;
-  }
-  metaEl.textContent = metaText;
-
-  if (session.type === 'terminal') {
-    const badge = document.createElement('span');
-    badge.className = 'terminal-badge';
-    badge.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>';
-    summaryEl.prepend(badge);
-  }
-
-  if (session.type === 'headless') {
-    item.classList.add('is-headless');
-    const badge = document.createElement('span');
-    badge.className = 'headless-badge';
-    badge.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>';
-    summaryEl.prepend(badge);
-  }
-
-  // Agent badge — use session.agent (from IPC for non-Claude) or sessionAgentMap
-  const agentId = session.agent || sessionAgentMap.get(session.sessionId);
-  if (agentId && agentId !== 'claude') {
-    const agentBadge = document.createElement('span');
-    agentBadge.className = 'agent-badge';
-    agentBadge.style.color = AGENT_COLORS[agentId] || '#8888a0';
-    agentBadge.style.borderColor = AGENT_COLORS[agentId] || '#8888a0';
-    agentBadge.textContent = AGENT_LABELS[agentId] || agentId;
-    summaryEl.appendChild(agentBadge);
-  }
-
-  // Project/folder label — show truncated path below summary
-  if (session.projectPath) {
-    const projectLabel = document.createElement('div');
-    projectLabel.className = 'session-project-label';
-    const segments = session.projectPath.split('/').filter(Boolean);
-    const truncated = segments.length > 3
-      ? '\u2026/' + segments.slice(-3).join('/')
-      : session.projectPath;
-    projectLabel.textContent = truncated;
-    info.appendChild(projectLabel);
-  }
-
-  // Loop badge — orange warning indicator when Claude detected a repeat loop
-  const lp = loopCache[session.sessionId];
-  if (lp && lp.loopCount > 0) {
-    const loopBadge = document.createElement('span');
-    loopBadge.className = 'loop-badge';
-    loopBadge.title = `Loop detected ${lp.loopCount}x${lp.lastLoopTool ? ' with ' + lp.lastLoopTool : ''}${lp.lastLoopReason ? ': ' + lp.lastLoopReason : ''}`;
-    loopBadge.textContent = '\u21BB' + lp.loopCount;
-    summaryEl.appendChild(loopBadge);
-  }
-  info.appendChild(summaryEl);
-  info.appendChild(idEl);
-  info.appendChild(metaEl);
-
-  // Activity sparkline row — shown for ANY session with tool activity (headless, PTY, or file-watched)
-  {
-    const sparkline = document.createElement('div');
-    sparkline.className = 'headless-sparkline';
-    sparkline.id = 'sparkline-' + session.sessionId;
-    const state = headlessState.get(session.sessionId);
-    if (state) {
-      updateHeadlessSparkline(session.sessionId, state);
-    }
-    info.appendChild(sparkline);
-  }
-
-  // Action buttons container
-  const actions = document.createElement('div');
-  actions.className = 'session-actions';
-
-  const stopBtn = document.createElement('button');
-  stopBtn.className = 'session-stop-btn';
-  stopBtn.title = 'Stop session';
-  stopBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="2" width="8" height="8" rx="1"/></svg>';
-
-  const archiveBtn = document.createElement('button');
-  archiveBtn.className = 'session-archive-btn';
-  archiveBtn.title = session.archived ? 'Unarchive' : 'Archive';
-  archiveBtn.innerHTML = ICONS.archive(16);
-
-  const forkBtn = document.createElement('button');
-  forkBtn.className = 'session-fork-btn';
-  forkBtn.title = 'Fork session';
-  forkBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 3h-5v5"/><path d="M21 3l-7.536 7.536a5 5 0 0 0-1.464 3.534v6.93"/><path d="M3 3l7.536 7.536a5 5 0 0 1 1.464 3.534v.93"/></svg>';
-
-  const jsonlBtn = document.createElement('button');
-  jsonlBtn.className = 'session-jsonl-btn';
-  jsonlBtn.title = 'View messages';
-  jsonlBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>';
-
-  const launchConfigBtn = document.createElement('button');
-  launchConfigBtn.className = 'session-launch-config-btn';
-  launchConfigBtn.title = 'Resume with config';
-  launchConfigBtn.innerHTML = ICONS.launchConfig(14);
-
-  actions.appendChild(stopBtn);
-  if (session.type !== 'terminal') {
-    actions.appendChild(forkBtn);
-    actions.appendChild(jsonlBtn);
-    actions.appendChild(archiveBtn);
-    actions.appendChild(launchConfigBtn);
-  }
-
-  row.appendChild(pin);
-  row.appendChild(dot);
-  row.appendChild(info);
-  row.appendChild(actions);
-  item.appendChild(row);
-
-  return item;
-}
-
-function startRename(summaryEl, session) {
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'session-rename-input';
-  input.value = session.name || session.summary;
-
-  summaryEl.replaceWith(input);
-  input.focus();
-  input.select();
-
-  const save = async () => {
-    const newName = input.value.trim();
-    const nameToSave = (newName && newName !== session.summary) ? newName : null;
-    await window.api.renameSession(session.sessionId, nameToSave);
-    session.name = nameToSave;
-
-    const newSummary = document.createElement('div');
-    newSummary.className = 'session-summary';
-    newSummary.textContent = nameToSave || session.summary;
-    newSummary.addEventListener('dblclick', (e) => {
-      e.stopPropagation();
-      startRename(newSummary, session);
-    });
-    input.replaceWith(newSummary);
-  };
-
-  input.addEventListener('blur', save);
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') input.blur();
-    if (e.key === 'Escape') {
-      input.removeEventListener('blur', save);
-      const restored = document.createElement('div');
-      restored.className = 'session-summary';
-      restored.textContent = session.name || session.summary;
-      restored.addEventListener('dblclick', (ev) => {
-        ev.stopPropagation();
-        startRename(restored, session);
-      });
-      input.replaceWith(restored);
-    }
-  });
-}
-
-async function launchNewSession(project, sessionOptions, initialPrompt) {
+async function launchNewSession(project, sessionOptions, { focus = true } = {}) {
+  // A temporary id. Claude is told to use it (--session-id); codex cannot be,
+  // so main watches for its transcript and sends session-detected with the real
+  // one, which re-keys everything below.
   const sessionId = crypto.randomUUID();
   const projectPath = project.projectPath;
+  const runtime = sessionOptions?.runtime || 'claude';
   const session = {
     sessionId,
     summary: 'New session',
     firstPrompt: '',
     projectPath,
+    runtime,
     name: null,
     starred: 0,
     archived: 0,
@@ -2552,6 +1799,22 @@ async function launchNewSession(project, sessionOptions, initialPrompt) {
     modified: new Date().toISOString(),
     created: new Date().toISOString(),
   };
+
+  // Launched from a project (or one of its tracks): main files the session
+  // there when it spawns, and the Projects tab shows it right away.
+  const options = { ...(sessionOptions || {}) };
+  if (project.projectId) {
+    options.projectId = project.projectId;
+    if (project.trackId) options.trackId = project.trackId;
+    session.projectId = project.projectId;
+    session.trackId = project.trackId || null;
+  }
+  // Started by a scheduled task: the row shows the chip from the first
+  // moment, not only once the DB has the link (main records it on spawn).
+  if (options.scheduleId) {
+    session.scheduleId = options.scheduleId;
+    session.scheduledAt = new Date().toISOString();
+  }
 
   // Track as pending (no .jsonl yet)
   const folder = encodeProjectPath(projectPath);
@@ -2567,12 +1830,13 @@ async function launchNewSession(project, sessionOptions, initialPrompt) {
     }
     proj.sessions.unshift(session);
   }
+  injectPendingIntoTree(session);
   refreshSidebar();
 
   const entry = createTerminalEntry(session);
 
   // Open terminal in main process with session options
-  const result = await window.api.openTerminal(sessionId, projectPath, true, { ...sessionOptions, _initialPrompt: initialPrompt });
+  const result = await window.api.openTerminal(sessionId, projectPath, true, Object.keys(options).length ? options : null);
   if (!result.ok) {
     entry.terminal.write(`\r\nError: ${result.error}\r\n`);
     entry.closed = true;
@@ -2580,7 +1844,9 @@ async function launchNewSession(project, sessionOptions, initialPrompt) {
   }
   if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
 
-  showSession(sessionId);
+  // A scheduled launch runs in the background: it shows up in the lists like
+  // any session, but does not take over whatever the user is looking at.
+  if (focus) showSession(sessionId);
   pollActiveSessions();
 }
 
@@ -2873,7 +2139,25 @@ function showSession(sessionId) {
 // --- End shared terminal lifecycle helpers ---
 // Terminal lifecycle (createTerminalEntry, destroySession, showSession, setupDragAndDrop) → terminal-manager.js
 
+async function unarchiveSessionBeforeOpen(session) {
+  if (!session.archived) return true;
+
+  const displayName = cleanDisplayName(session.name || session.aiTitle || session.summary) || 'This session';
+  if (!confirm(`“${displayName}” is archived.\n\nUnarchive it and open it?`)) return false;
+
+  const result = await window.api.archiveSession(session.sessionId, 0);
+  if (result?.error) {
+    alert(result.error);
+    return false;
+  }
+  session.archived = 0;
+  await loadProjects();
+  return true;
+}
+
 async function openSession(session, customOptions) {
+  if (!await unarchiveSessionBeforeOpen(session)) return;
+
   const { sessionId, projectPath } = session;
 
   // Headless sessions don't need a terminal — just show the log panel
@@ -2894,15 +2178,25 @@ async function openSession(session, customOptions) {
   if (openSessions.has(sessionId)) {
     const entry = openSessions.get(sessionId);
     if (entry.closed) {
-      destroySession(sessionId);
+      destroySession(sessionId, {
+        forgetPersisted: session.type !== 'terminal',
+        preserveHistory: true,
+      });
       if (session.type === 'terminal') {
-        launchTerminalSession({ projectPath: session.projectPath });
+        await openRawTerminalSession(session);
+        pollActiveSessions();
         return;
       }
     } else {
       showSession(sessionId);
       return;
     }
+  }
+
+  if (session.type === 'terminal') {
+    await openRawTerminalSession(session);
+    pollActiveSessions();
+    return;
   }
 
   // Create new terminal entry (hidden until showSession)
@@ -2913,395 +2207,10 @@ async function openSession(session, customOptions) {
   if (loadingEl) loadingEl.style.display = 'flex';
 
   // Open terminal in main process
-  const resumeOptions = await resolveDefaultSessionOptions({ projectPath });
-  try {
-    const result = await window.api.openTerminal(sessionId, projectPath, false, resumeOptions);
-    if (!result.ok) {
-      entry.terminal.write(`\r\nError: ${result.error}\r\n`);
-      entry.closed = true;
-      return;
-    }
-    if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
-  } finally {
-    if (loadingEl) loadingEl.style.display = 'none';
-  }
-
-  showSession(sessionId);
-  pollActiveSessions();
-}
-
-// ============================================================
-// CONVERSATION VIEWER
-// Shows historical sessions without spawning a terminal.
-// ============================================================
-
-const cvPanel = document.getElementById('conversation-viewer');
-const cvMessages = document.getElementById('cv-messages');
-const cvSessionName = document.getElementById('cv-session-name');
-const cvSessionMeta = document.getElementById('cv-session-meta');
-const cvExportMdBtn = document.getElementById('cv-export-md-btn');
-const cvCopyBtn = document.getElementById('cv-copy-btn');
-const cvResumeBtn = document.getElementById('cv-resume-btn');
-const cvSaveTemplateBtn = document.getElementById('cv-save-template-btn');
-
-let cvCurrentSession = null;
-let cvCurrentMessages = [];
-
-function hideConversationViewer() {
-  cvPanel.style.display = 'none';
-  cvCurrentSession = null;
-  cvCurrentMessages = [];
-}
-
-async function showConversationViewer(session) {
-  // Update sidebar active state
-  document.querySelectorAll('.session-item.active').forEach(el => el.classList.remove('active'));
-  const item = document.querySelector(`[data-session-id="${session.sessionId}"]`);
-  if (item) item.classList.add('active');
-  setActiveSession(session.sessionId);
-
-  // Hide terminal/placeholder, show viewer
-  placeholder.style.display = 'none';
-  terminalHeader.style.display = 'none';
-  hidePlanViewer();
-  for (const entry of openSessions.values()) entry.element.classList.remove('visible');
-  cvPanel.style.display = 'flex';
-
-  cvCurrentSession = session;
-  cvSessionName.textContent = cleanDisplayName(session.name || session.sessionId);
-  cvSessionMeta.textContent = '';
-  cvMessages.innerHTML = '<div class="cv-loading">Loading conversation…</div>';
-
-  const agentId = session.agent || sessionAgentMap.get(session.sessionId) || 'claude';
-  const result = await window.api.readSessionConversation(session.sessionId, session.file || null, agentId);
-
-  if (result.error) {
-    cvMessages.innerHTML = `<div class="cv-error">Could not load conversation: ${escapeHtml(result.error)}</div>`;
-    return;
-  }
-
-  cvCurrentMessages = result.messages || [];
-  renderConversationMessages(cvCurrentMessages, agentId);
-
-  // Meta: message counts + token/cost from cache
-  const userCount = cvCurrentMessages.filter(m => m.role === 'user').length;
-  const toolCount = cvCurrentMessages.reduce((n, m) => n + (m.tools?.length || 0), 0);
-  const parts = [`${userCount} turns`];
-  if (toolCount > 0) parts.push(`${toolCount} tool calls`);
-  const tok = tokenCache[session.sessionId];
-  if (tok) {
-    const totalTok = (tok.inputTokens || 0) + (tok.outputTokens || 0);
-    if (totalTok > 0) parts.push(formatTokenCount(totalTok) + ' tokens');
-    if (tok.costCents > 0) parts.push(formatCentsCost(tok.costCents));
-    if (tok.model) parts.push(tok.model.replace('claude-', '').replace(/-\d{8}$/, ''));
-  }
-  cvSessionMeta.textContent = parts.join(' · ');
-
-  // Update header for main area
-  updateTerminalHeader();
-}
-
-function renderConversationMessages(messages, agentId) {
-  if (messages.length === 0) {
-    cvMessages.innerHTML = '<div class="cv-empty">No messages found in this session.</div>';
-    return;
-  }
-
-  const frag = document.createDocumentFragment();
-
-  for (const msg of messages) {
-    const el = buildMessageEl(msg);
-    if (el) frag.appendChild(el);
-  }
-
-  cvMessages.innerHTML = '';
-  cvMessages.appendChild(frag);
-}
-
-function buildMessageEl(msg) {
-  if (msg.role === 'summary') {
-    const el = document.createElement('div');
-    el.className = 'cv-summary';
-    el.innerHTML = `<span class="cv-summary-label">⟳ Compacted</span><span class="cv-summary-text">${escapeHtml(msg.text)}</span>`;
-    return el;
-  }
-
-  if (msg.role === 'system') {
-    const el = document.createElement('div');
-    el.className = 'cv-system';
-    el.textContent = msg.text;
-    return el;
-  }
-
-  const el = document.createElement('div');
-  el.className = `cv-message cv-${msg.role}`;
-
-  // Header
-  const header = document.createElement('div');
-  header.className = 'cv-msg-header';
-  const roleLabel = document.createElement('span');
-  roleLabel.className = 'cv-msg-role';
-  roleLabel.textContent = msg.role === 'user' ? 'You' : 'Assistant';
-  header.appendChild(roleLabel);
-
-  if (msg.ts) {
-    const timeEl = document.createElement('span');
-    timeEl.className = 'cv-msg-time';
-    try { timeEl.textContent = new Date(msg.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch {}
-    header.appendChild(timeEl);
-  }
-  if (msg.model) {
-    const modelEl = document.createElement('span');
-    modelEl.className = 'cv-msg-model';
-    modelEl.textContent = msg.model.replace('claude-', '').replace(/-\d{8}$/, '');
-    header.appendChild(modelEl);
-  }
-  el.appendChild(header);
-
-  // Text body
-  if (msg.text) {
-    const body = document.createElement('div');
-    body.className = 'cv-msg-body';
-    body.innerHTML = renderMarkdownLite(msg.text);
-    el.appendChild(body);
-  }
-
-  // Tool calls
-  if (msg.tools && msg.tools.length > 0) {
-    const toolsEl = document.createElement('div');
-    toolsEl.className = 'cv-tools';
-    for (const tool of msg.tools) {
-      toolsEl.appendChild(buildToolCallEl(tool));
-    }
-    el.appendChild(toolsEl);
-  }
-
-  // Token usage badge
-  if (msg.usage) {
-    const usage = document.createElement('div');
-    usage.className = 'cv-usage';
-    usage.textContent = `↑${msg.usage.input_tokens?.toLocaleString() || 0} ↓${msg.usage.output_tokens?.toLocaleString() || 0} tokens`;
-    el.appendChild(usage);
-  }
-
-  return el;
-}
-
-function buildToolCallEl(tool) {
-  const el = document.createElement('details');
-  el.className = 'cv-tool';
-
-  const summary = document.createElement('summary');
-  summary.className = 'cv-tool-summary';
-
-  const nameEl = document.createElement('span');
-  nameEl.className = 'cv-tool-name';
-  nameEl.textContent = tool.name;
-
-  // Quick preview of first input key
-  const inputKeys = tool.input ? Object.keys(tool.input) : [];
-  if (inputKeys.length > 0) {
-    const preview = document.createElement('span');
-    preview.className = 'cv-tool-preview';
-    const val = tool.input[inputKeys[0]];
-    const previewText = typeof val === 'string' ? val.slice(0, 60) : JSON.stringify(val).slice(0, 60);
-    preview.textContent = previewText + (previewText.length >= 60 ? '…' : '');
-    summary.appendChild(nameEl);
-    summary.appendChild(preview);
-  } else {
-    summary.appendChild(nameEl);
-  }
-
-  if (tool.result?.isError) {
-    const errBadge = document.createElement('span');
-    errBadge.className = 'cv-tool-err-badge';
-    errBadge.textContent = 'error';
-    summary.appendChild(errBadge);
-  }
-
-  el.appendChild(summary);
-
-  // Input
-  if (inputKeys.length > 0) {
-    const inputEl = document.createElement('div');
-    inputEl.className = 'cv-tool-input';
-    inputEl.innerHTML = `<pre>${escapeHtml(JSON.stringify(tool.input, null, 2))}</pre>`;
-    el.appendChild(inputEl);
-  }
-
-  // Result
-  if (tool.result) {
-    const resultEl = document.createElement('div');
-    resultEl.className = `cv-tool-result${tool.result.isError ? ' cv-tool-result-error' : ''}`;
-    const resultText = tool.result.text || '';
-    // Truncate very long results
-    const display = resultText.length > 2000 ? resultText.slice(0, 2000) + `\n… (${resultText.length - 2000} chars truncated)` : resultText;
-    resultEl.innerHTML = `<pre>${escapeHtml(display)}</pre>`;
-    el.appendChild(resultEl);
-  }
-
-  return el;
-}
-
-// Lightweight markdown renderer — handles code blocks, bold, italic, inline code, headers
-function renderMarkdownLite(text) {
-  if (!text) return '';
-  let html = escapeHtml(text);
-
-  // Fenced code blocks (```lang\n...\n```)
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
-    `<pre class="cv-code-block${lang ? ' lang-' + lang : ''}">${code}</pre>`
-  );
-
-  // Inline code
-  html = html.replace(/`([^`\n]+)`/g, '<code class="cv-inline-code">$1</code>');
-
-  // Headers
-  html = html.replace(/^### (.+)$/gm, '<h3 class="cv-h3">$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2 class="cv-h2">$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1 class="cv-h1">$1</h1>');
-
-  // Bold / italic
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-
-  // Paragraphs (double newline → paragraph break)
-  html = html.replace(/\n\n+/g, '</p><p>');
-  html = '<p>' + html + '</p>';
-
-  // Single newlines → <br> inside paragraphs
-  html = html.replace(/\n/g, '<br>');
-
-  return html;
-}
-
-// Export conversation as Markdown
-function conversationToMarkdown(messages, sessionName) {
-  const lines = [`# ${sessionName || 'Conversation'}\n`];
-  for (const msg of messages) {
-    if (msg.role === 'summary') {
-      lines.push(`---\n> **[Compacted]** ${msg.text}\n---\n`);
-      continue;
-    }
-    if (msg.role === 'system') {
-      lines.push(`> *System: ${msg.text}*\n`);
-      continue;
-    }
-    const label = msg.role === 'user' ? '## You' : '## Assistant';
-    lines.push(label);
-    if (msg.text) lines.push(msg.text);
-    if (msg.tools && msg.tools.length > 0) {
-      for (const tool of msg.tools) {
-        lines.push(`\n**Tool: \`${tool.name}\`**`);
-        if (Object.keys(tool.input || {}).length > 0) {
-          lines.push('```json\n' + JSON.stringify(tool.input, null, 2) + '\n```');
-        }
-        if (tool.result?.text) {
-          lines.push('**Result:**');
-          lines.push('```\n' + tool.result.text.slice(0, 1000) + '\n```');
-        }
-      }
-    }
-    lines.push('');
-  }
-  return lines.join('\n');
-}
-
-// Wire up export/copy/resume buttons
-const cvExportBtn = document.getElementById('cv-export-btn');
-const cvExportMenu = document.getElementById('cv-export-menu');
-const cvExportDropdown = document.getElementById('cv-export-dropdown');
-
-// Toggle export menu
-cvExportBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  cvExportMenu.style.display = cvExportMenu.style.display === 'none' ? 'flex' : 'none';
-});
-
-// Export format handlers
-cvExportMenu.querySelectorAll('button[data-format]').forEach(btn => {
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const format = btn.dataset.format;
-    exportConversation(format);
-    cvExportMenu.style.display = 'none';
-  });
-});
-
-// Close export menu on outside click
-document.addEventListener('click', () => { cvExportMenu.style.display = 'none'; });
-
-function exportConversation(format) {
-  if (!cvCurrentMessages.length) return;
-  const sessionName = cvCurrentSession?.name || cvCurrentSession?.sessionId || 'conversation';
-
-  if (format === 'markdown') {
-    const md = conversationToMarkdown(cvCurrentMessages, sessionName);
-    downloadBlob(md, 'text/markdown', `${sessionName}.md`);
-  } else if (format === 'jsonl') {
-    // Raw JSONL export — one JSON object per line
-    const jsonl = cvCurrentMessages.map(m => JSON.stringify(m)).join('\n');
-    downloadBlob(jsonl, 'application/x-ndjson', `${sessionName}.jsonl`);
-  } else if (format === 'json') {
-    // JSON array of all messages
-    const json = JSON.stringify(cvCurrentMessages, null, 2);
-    downloadBlob(json, 'application/json', `${sessionName}.json`);
-  }
-}
-
-function downloadBlob(content, mimeType, filename) {
-  const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-cvCopyBtn.addEventListener('click', async () => {
-  if (!cvCurrentMessages.length) return;
-  const md = conversationToMarkdown(cvCurrentMessages, cvCurrentSession?.name || cvCurrentSession?.sessionId);
-  try {
-    await navigator.clipboard.writeText(md);
-    cvCopyBtn.textContent = 'Copied!';
-    setTimeout(() => { cvCopyBtn.textContent = 'Copy'; }, 2000);
-  } catch {}
-});
-
-cvResumeBtn.addEventListener('click', async () => {
-  if (!cvCurrentSession) return;
-  hideConversationViewer();
-  // Force terminal open even though session isn't in activePtyIds yet
-  activeSessionId = cvCurrentSession.sessionId;
-  const session = sessionMap.get(cvCurrentSession.sessionId) || cvCurrentSession;
-  // Temporarily mark as running type so openSession goes to terminal path
-  const originalType = session.type;
-  session._forceTerminal = true;
-  await openSessionForced(session);
-  session._forceTerminal = false;
-});
-
-cvSaveTemplateBtn.addEventListener('click', async () => {
-  if (!cvCurrentSession) return;
-  const session = cvCurrentSession;
-  const project = cachedProjects.find(p => p.projectPath === session.projectPath) || cachedAllProjects.find(p => p.projectPath === session.projectPath);
-  if (!project) return;
-  const opts = { cliAgent: sessionAgentMap.get(session.sessionId) || 'claude' };
-  // Extract first user message from conversation as prompt suggestion
-  const firstPrompt = cvCurrentMessages.find(m => m.role === 'user')?.text || '';
-  showSaveTemplateDialog(project, opts, firstPrompt);
-});
-
-// Open session directly as terminal (bypass conversation viewer)
-async function openSessionForced(session, customOptions) {
-  const { sessionId, projectPath } = session;
-  if (openSessions.has(sessionId)) {
-    showSession(sessionId);
-    return;
-  }
-  const entry = createTerminalEntry(session);
-  const resumeOptions = customOptions || await resolveDefaultSessionOptions({ projectPath });
+  const resumeOptions = { ...(customOptions || await resolveDefaultSessionOptions({ projectPath })) };
+  // Which CLI to resume with. Main re-reads this from the cached row and only
+  // trusts the hint for sessions it has never indexed.
+  if (session.runtime) resumeOptions.runtime = session.runtime;
   const result = await window.api.openTerminal(sessionId, projectPath, false, resumeOptions);
   if (!result.ok) {
     entry.terminal.write(`\r\nError: ${result.error}\r\n`);
@@ -3309,6 +2218,11 @@ async function openSessionForced(session, customOptions) {
     return;
   }
   if (typeof setSessionMcpActive === 'function') setSessionMcpActive(sessionId, !!result.mcpActive);
+
+  // Relaunching a session that had died clears the dead marker on its pending entry
+  const pending = pendingSessions.get(sessionId);
+  if (pending) pending.exited = false;
+
   showSession(sessionId);
   pollActiveSessions();
 }
@@ -3389,9 +2303,14 @@ function setupDragAndDrop(container, getSessionId) {
 document.querySelectorAll('.sidebar-tab').forEach(tab => {
   tab.addEventListener('click', () => {
     const tabName = tab.dataset.tab;
-    if (tabName === activeTab) return;
+    // The more button shares the tab styling but opens a menu instead.
+    if (!tabName || tabName === activeTab) return;
+    // Leaving the Projects tab takes its page, strip and pane with it.
+    if (activeTab === 'projects' && typeof leaveProjectViews === 'function') leaveProjectViews();
     activeTab = tabName;
+    if (REMEMBERED_TABS.includes(tabName)) { try { localStorage.setItem(LAST_TAB_KEY, tabName); } catch {} }
     document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
+    updateMoreButton();
 
     // Clear search on tab switch
     searchInput.value = '';
@@ -3401,21 +2320,16 @@ document.querySelectorAll('.sidebar-tab').forEach(tab => {
 
     // Hide all sidebar content areas
     sidebarContent.style.display = 'none';
+    projectsContent.style.display = 'none';
     plansContent.style.display = 'none';
     statsContent.style.display = 'none';
     memoryContent.style.display = 'none';
     sessionFilters.style.display = 'none';
     searchBar.style.display = 'none';
 
-    const agentSelector = document.getElementById('agent-selector');
-    if (agentSelector) agentSelector.style.display = tabName === 'sessions' ? '' : 'none';
-
-    if (tabName === 'sessions') {
-      sessionFilters.style.display = '';
-      searchBar.style.display = '';
-      searchInput.placeholder = 'Search sessions...';
-      sidebarContent.style.display = '';
-      // Restore terminal area
+    // Sessions and Projects share the main area: the grid, the active
+    // terminal, or the placeholder.
+    function restoreTerminalArea() {
       hideAllViewers();
       if (gridViewActive) {
         // Grid is still set up — just re-show it and refit
@@ -3430,10 +2344,29 @@ document.querySelectorAll('.sidebar-tab').forEach(tab => {
       } else {
         placeholder.style.display = '';
       }
+    }
+
+    if (tabName === 'sessions') {
+      sessionFilters.style.display = '';
+      searchBar.style.display = '';
+      searchInput.placeholder = 'Search sessions...';
+      sidebarContent.style.display = '';
+      restoreTerminalArea();
       // Catch up on changes that happened while on another tab
       if (projectsChangedWhileAway) {
         projectsChangedWhileAway = false;
         loadProjects();
+      }
+    } else if (tabName === 'projects') {
+      searchBar.style.display = '';
+      searchInput.placeholder = 'Search projects...';
+      projectsContent.style.display = '';
+      if (projectsChangedWhileAway) {
+        projectsChangedWhileAway = false;
+        loadProjects().then(() => showProjectHome());
+      } else {
+        renderProjectList();
+        showProjectHome();
       }
     } else if (tabName === 'plans') {
       searchBar.style.display = '';
@@ -6524,668 +5457,28 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 
-// --- Agent selector initialization ---
-// Meta-views: special sidebar views that aggregate across CLIs
-const META_VIEWS = {
-  '_active': { label: 'Active', icon: '&#9679;', color: '#22c55e', title: 'All running sessions across every CLI' },
-  '_flagged': { label: 'Flagged', icon: '&#9873;', color: '#ef4444', title: 'Combined sessions from all flagged CLIs' },
-  '_pinned': { label: 'Pinned', icon: '&#9733;', color: '#eab308', title: 'Pinned sessions from all CLIs' },
-};
-
-async function loadMetaView(viewId) {
-  // Gather sessions from the relevant agent set. The "_flagged" view aggregates
-  // only the user's flagged CLIs; the other meta-views span all installed agents.
-  const allProjects = [];
-  let agentIds = Object.entries(installedAgents).filter(([, a]) => a.installed).map(([id]) => id);
-  if (viewId === '_flagged') {
-    agentIds = agentIds.filter(id => flaggedAgents.has(id));
-    // Always include claude if flagged even when not in installedAgents map
-    if (flaggedAgents.has('claude') && !agentIds.includes('claude')) agentIds.push('claude');
-  }
-
-  const results = await Promise.all(agentIds.map(async (id) => {
-    if (id === 'claude') {
-      const [def, all] = await Promise.all([window.api.getProjects(false), window.api.getProjects(true)]);
-      return { id, projects: all, defaults: def };
-    } else {
-      const projects = await window.api.getAgentSessions(id);
-      return { id, projects, defaults: projects };
-    }
-  }));
-
-  for (const { id, projects } of results) {
-    for (const proj of projects) {
-      // Tag each session with its agent for badge rendering
-      for (const s of proj.sessions) {
-        if (!s.agent) s.agent = id;
-        sessionAgentMap.set(s.sessionId, id);
-      }
-      allProjects.push(proj);
-    }
-  }
-
-  // Merge projects with same path
-  const merged = new Map();
-  for (const proj of allProjects) {
-    if (merged.has(proj.projectPath)) {
-      const existing = merged.get(proj.projectPath);
-      for (const s of proj.sessions) {
-        if (!existing.sessions.some(e => e.sessionId === s.sessionId)) {
-          existing.sessions.push(s);
-        }
-      }
-    } else {
-      merged.set(proj.projectPath, { ...proj, sessions: [...proj.sessions] });
-    }
-  }
-
-  let projects = Array.from(merged.values());
-
-  if (viewId === '_active') {
-    // Keep only projects with running sessions
-    projects = projects.map(p => ({
-      ...p,
-      sessions: p.sessions.filter(s => activePtyIds.has(s.sessionId)),
-    })).filter(p => p.sessions.length > 0);
-  } else if (viewId === '_pinned') {
-    // Keep only pinned sessions
-    projects = projects.map(p => ({
-      ...p,
-      sessions: p.sessions.filter(s => s.starred),
-    })).filter(p => p.sessions.length > 0);
-  }
-
-  cachedProjects = projects;
-  cachedAllProjects = projects;
-  refreshSidebar({ resort: true });
-  renderDefaultStatus();
-  startSessionFileWatchers(projects);
-}
-
-// Ordered list of selectable views (meta-views + per-CLI agents) — the order the
-// rotate arrows cycle through. Rebuilt whenever the selector is rebuilt.
-let orderedAgentViews = [];
-
-function setActiveAgentView(viewId) {
-  activeAgent = viewId;
-  localStorage.setItem('activeAgent', viewId);
-  showStarredOnly = false; showRunningOnly = false;
-  if (starToggle) starToggle.classList.remove('active');
-  if (runningToggle) runningToggle.classList.remove('active');
-  if (typeof rebuildAgentSelector === 'function') rebuildAgentSelector();
-  if (viewId.startsWith('_')) loadMetaView(viewId);
-  else loadProjectsForAgent();
-}
-
-// Rotate the active CLI to the previous/next view in the toolbar (arrow buttons).
-function rotateAgentView(dir) {
-  if (orderedAgentViews.length === 0) return;
-  let idx = orderedAgentViews.indexOf(activeAgent);
-  if (idx === -1) idx = 0;
-  idx = (idx + dir + orderedAgentViews.length) % orderedAgentViews.length;
-  setActiveAgentView(orderedAgentViews[idx]);
-}
-
-function rebuildAgentSelector() {
-  const container = document.getElementById('agent-selector');
-  if (!container) return;
-
-  const agentsToShow = Object.entries(installedAgents).filter(([, a]) => a.installed);
-  container.style.display = '';
-  container.innerHTML = '';
-  orderedAgentViews = [];
-
-  // Meta-view buttons first. The "_flagged" combined view is only shown once the
-  // user has flagged at least one CLI (otherwise it would always be empty).
-  for (const [viewId, meta] of Object.entries(META_VIEWS)) {
-    if (viewId === '_flagged' && flaggedAgents.size === 0) continue;
-    const btn = document.createElement('button');
-    btn.className = 'agent-selector-btn meta-view-btn' + (viewId === activeAgent ? ' active' : '');
-    btn.dataset.agent = viewId;
-    const extra = viewId === '_flagged' ? ` (${flaggedAgents.size})` : '';
-    btn.title = meta.title;
-    btn.innerHTML = `<span class="agent-dot meta-dot" style="background:${meta.color}">${meta.icon}</span><span class="agent-selector-label">${meta.label}${extra}</span>`;
-    btn.addEventListener('click', () => { if (viewId !== activeAgent) setActiveAgentView(viewId); });
-    container.appendChild(btn);
-    orderedAgentViews.push(viewId);
-  }
-
-  // Separator
-  const sep = document.createElement('span');
-  sep.className = 'agent-selector-sep';
-  container.appendChild(sep);
-
-  // Per-CLI agent buttons (flagged ones get a small flag marker)
-  for (const [id, agent] of agentsToShow) {
-    const btn = document.createElement('button');
-    btn.className = 'agent-selector-btn' + (id === activeAgent ? ' active' : '') + (flaggedAgents.has(id) ? ' flagged' : '');
-    btn.dataset.agent = id;
-    btn.title = agent.name + (agent.onPath === false ? ' (history only — not on PATH)' : '');
-    const flagMark = flaggedAgents.has(id) ? '<span class="agent-flag-mark">⚑</span>' : '';
-    btn.innerHTML = `<span class="agent-dot" style="background:${agent.color || AGENT_COLORS[id] || '#888'}"></span><span class="agent-selector-label">${agent.name.split(' ')[0]}</span>${flagMark}`;
-    btn.addEventListener('click', () => { if (id !== activeAgent) setActiveAgentView(id); });
-    // Right-click a CLI button to toggle its flag quickly
-    btn.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      if (flaggedAgents.has(id)) flaggedAgents.delete(id); else flaggedAgents.add(id);
-      saveFlaggedAgents();
-      rebuildAgentSelector();
-      if (activeAgent === '_flagged') loadMetaView('_flagged');
-    });
-    container.appendChild(btn);
-    orderedAgentViews.push(id);
-  }
-
-  // Rotate arrows at the bottom of the toolbar — cycle to prev/next CLI view.
-  const rotateRow = document.createElement('div');
-  rotateRow.className = 'agent-rotate-row';
-  const prevBtn = document.createElement('button');
-  prevBtn.className = 'agent-rotate-btn';
-  prevBtn.title = 'Previous CLI (rotate toolbar)';
-  prevBtn.innerHTML = '&#9664;';
-  prevBtn.addEventListener('click', () => rotateAgentView(-1));
-  const label = document.createElement('span');
-  label.className = 'agent-rotate-label';
-  const curMeta = META_VIEWS[activeAgent];
-  label.textContent = curMeta ? curMeta.label : (AGENT_LABELS[activeAgent] || activeAgent);
-  const nextBtn = document.createElement('button');
-  nextBtn.className = 'agent-rotate-btn';
-  nextBtn.title = 'Next CLI (rotate toolbar)';
-  nextBtn.innerHTML = '&#9654;';
-  nextBtn.addEventListener('click', () => rotateAgentView(1));
-  rotateRow.appendChild(prevBtn);
-  rotateRow.appendChild(label);
-  rotateRow.appendChild(nextBtn);
-  container.appendChild(rotateRow);
-}
-
-(async function initAgentSelector() {
-  try {
-    installedAgents = await window.api.detectAgents();
-  } catch { installedAgents = {}; }
-  rebuildAgentSelector();
-})();
-
-// Start file watchers for recently active sessions (last 24h) that have JSONL files.
-// This powers sparkline activity for PTY sessions across all CLIs.
-function startSessionFileWatchers(projects) {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000; // 24h ago
-  for (const proj of projects) {
-    for (const session of proj.sessions) {
-      if (!session.file) continue;
-      if (!session.file.endsWith('.jsonl')) continue;
-      // Only watch recently-modified sessions
-      const mod = session.modified ? new Date(session.modified).getTime() : 0;
-      if (mod < cutoff) continue;
-      // Skip headless sessions (they already get events via stream-json)
-      if (session.type === 'headless') continue;
-      const agentId = session.agent || sessionAgentMap.get(session.sessionId) || 'claude';
-      window.api.watchSessionFile(session.sessionId, session.file, agentId);
-    }
-  }
-}
-
-async function loadProjectsForAgent() {
-  // Meta-views (starts with _) use their own loader
-  if (activeAgent.startsWith('_')) {
-    await loadMetaView(activeAgent);
-    return;
-  }
-  if (activeAgent === 'claude') {
-    await loadProjects({ resort: true });
-  } else {
-    const projects = await window.api.getAgentSessions(activeAgent);
-    cachedAgentProjects.set(activeAgent, projects);
-    cachedProjects = projects;
-    cachedAllProjects = projects;
-    refreshSidebar({ resort: true });
-    renderDefaultStatus();
-    startSessionFileWatchers(projects);
-  }
-}
-
-// --- Multi-Agent Mode ---
-// Loads ALL installed agents' sessions and renders them stacked in the sidebar.
-async function loadAllAgentsData() {
-  const agentIds = Object.entries(installedAgents)
-    .filter(([, a]) => a.installed)
-    .map(([id]) => id);
-
-  // Build agent → projects map
-  const agentData = new Map();
-
-  for (const id of agentIds) {
-    let projects;
-    if (id === 'claude') {
-      const [, all] = await Promise.all([window.api.getProjects(false), window.api.getProjects(true)]);
-      projects = all;
-    } else {
-      try {
-        projects = await window.api.getAgentSessions(id);
-      } catch { projects = []; }
-    }
-    if (!projects) projects = [];
-    // Tag sessions with agent id
-    for (const proj of projects) {
-      for (const s of proj.sessions) {
-        if (!s.agent) s.agent = id;
-        sessionAgentMap.set(s.sessionId, id);
-        // Also populate sessionMap so openSession() can find them
-        if (!sessionMap.has(s.sessionId)) {
-          sessionMap.set(s.sessionId, s);
-        }
-      }
-    }
-    cachedAgentProjects.set(id, projects);
-    agentData.set(id, projects);
-  }
-
-  return agentData;
-}
-
-// Render all agents' sessions stacked in the sidebar with:
-//   1. Pinned section at top (all starred sessions across agents)
-//   2. Per-agent collapsible panels below
-function renderMultiSidebar(agentData) {
-  const container = document.createElement('div');
-  container.className = 'multi-agent-sidebar' + (multiSidebarLayout === 'columns' ? ' columns' : '');
-
-  // --- Controls bar: layout switch (stack / side-by-side columns) + recency gate ---
-  const controls = document.createElement('div');
-  controls.className = 'multi-controls';
-  controls.innerHTML = `
-    <div class="multi-layout-switch" role="group" aria-label="Sidebar layout">
-      <button class="multi-layout-btn ${multiSidebarLayout === 'stack' ? 'active' : ''}" data-layout="stack" title="Stacked (vertical)">&#9776;</button>
-      <button class="multi-layout-btn ${multiSidebarLayout === 'columns' ? 'active' : ''}" data-layout="columns" title="Side-by-side columns (ultrawide)">&#9707;&#9707;</button>
-    </div>
-    <label class="multi-recency" title="Only auto-show CLIs with a session this recent">active within
-      <input type="number" id="multi-recency-input" min="1" max="3650" value="${agentRecencyDays}"> days
-    </label>`;
-  container.appendChild(controls);
-
-  const recencyCutoff = agentRecencyDays > 0 ? Date.now() - agentRecencyDays * 86400000 : 0;
-
-  // --- Step 1: Pinned section at top ---
-  const pinnedSection = document.createElement('div');
-  pinnedSection.className = 'multi-pinned-section';
-
-  const pinnedHeader = document.createElement('div');
-  pinnedHeader.className = 'agent-panel-header pinned-header';
-  pinnedHeader.innerHTML = `
-    <span class="agent-panel-dot pinned-dot">&#9733;</span>
-    <span class="agent-panel-name">Flagged</span>
-    <span class="agent-panel-count"></span>
-    <span class="agent-panel-arrow">&#9660;</span>
-  `;
-
-  const pinnedBody = document.createElement('div');
-  pinnedBody.className = 'agent-panel-body';
-  pinnedBody.id = 'multi-pinned-body';
-
-  pinnedSection.appendChild(pinnedHeader);
-  pinnedSection.appendChild(pinnedBody);
-  container.appendChild(pinnedSection);
-
-  // --- Step 2: Per-agent panels ---
-  for (const [agentId, projects] of agentData) {
-    const agentInfo = installedAgents[agentId] || AGENT_COLORS[agentId] || {};
-    const color = agentInfo.color || AGENT_COLORS[agentId] || '#888';
-    const name = agentInfo.name || agentId.charAt(0).toUpperCase() + agentId.slice(1);
-
-    // Compute total sessions and active across projects
-    let totalSessions = 0;
-    let activeCount = 0;
-    let pinnedCount = 0;
-    for (const proj of projects) {
-      for (const s of proj.sessions) {
-        totalSessions++;
-        if (activePtyIds.has(s.sessionId)) activeCount++;
-        if (s.starred) pinnedCount++;
-      }
-    }
-
-    if (totalSessions === 0) continue; // skip agents with no data
-
-    // Recency gate: hide CLIs whose most-recent session is older than the cutoff.
-    const lastMod = projects.reduce((latest, p) => {
-      const last = p.sessions[0]?.modified;
-      return last && (!latest || new Date(last) > new Date(latest)) ? last : latest;
-    }, null);
-    if (recencyCutoff && lastMod && new Date(lastMod).getTime() < recencyCutoff) continue;
-
-    const panel = document.createElement('div');
-    panel.className = 'agent-panel';
-    panel.id = 'agent-panel-' + agentId;
-
-    const header = document.createElement('div');
-    header.className = 'agent-panel-header';
-    header.style.borderLeftColor = color;
-    header.innerHTML = `
-      <span class="agent-panel-dot" style="background:${color}"></span>
-      <span class="agent-panel-name">${name}</span>
-      <span class="agent-panel-count">${activeCount ? activeCount + ' \u25CF ' : ''}${totalSessions}</span>
-      <span class="agent-panel-arrow">&#9660;</span>
-    `;
-
-    const body = document.createElement('div');
-    body.className = 'agent-panel-body';
-
-    panel.appendChild(header);
-    panel.appendChild(body);
-    container.appendChild(panel);
-
-    // Build project groups into the agent panel body
-    buildAgentProjectsInto(projects, body, agentId);
-
-    // Collapse state: honor the user's remembered choice; otherwise default-collapse
-    // anything stale (> 3 days since last activity).
-    const isStale = lastMod && (Date.now() - new Date(lastMod)) > 3 * 86400000;
-    const explicit = multiAgentCollapseState[agentId];
-    const shouldCollapse = explicit ? explicit === 'collapsed' : !!isStale;
-    if (shouldCollapse) panel.classList.add('collapsed');
-  }
-
-  // --- Populate pinned section ---
-  populatePinnedSection(pinnedBody, agentData);
-
-  // Replace sidebar content
-  sidebarContent.innerHTML = '';
-  sidebarContent.appendChild(container);
-
-  // Bind collapse/expand toggles (remembering per-agent choice across restarts)
-  container.querySelectorAll('.agent-panel-header').forEach(hdr => {
-    hdr.addEventListener('click', (e) => {
-      if (e.target.closest('.agent-panel-header')) {
-        const panel = hdr.parentElement;
-        const collapsed = panel.classList.toggle('collapsed');
-        const agentId = (panel.id || '').replace('agent-panel-', '');
-        if (agentId) {
-          multiAgentCollapseState[agentId] = collapsed ? 'collapsed' : 'expanded';
-          saveMultiAgentCollapseState();
-        }
-      }
-    });
-  });
-
-  // Bind controls bar: layout switch + recency gate
-  controls.querySelectorAll('.multi-layout-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const layout = btn.dataset.layout;
-      if (layout === multiSidebarLayout) return;
-      multiSidebarLayout = layout;
-      localStorage.setItem('multiSidebarLayout', layout);
-      container.classList.toggle('columns', layout === 'columns');
-      controls.querySelectorAll('.multi-layout-btn').forEach(b =>
-        b.classList.toggle('active', b.dataset.layout === layout));
-    });
-  });
-  const recencyInput = controls.querySelector('#multi-recency-input');
-  if (recencyInput) {
-    recencyInput.addEventListener('change', () => {
-      const v = Math.max(1, Math.min(3650, parseInt(recencyInput.value) || 90));
-      agentRecencyDays = v;
-      recencyInput.value = v;
-      localStorage.setItem('agentRecencyDays', String(v));
-      refreshMultiSidebar(); // re-filter which CLI panes are shown
-    });
-  }
-
-  rebindMultiSidebarEvents();
-}
-
-// Build project group DOM into a container for multi-agent mode.
-// Reuses buildSessionItem from sidebar.js and builds project-group divs.
-function buildAgentProjectsInto(projects, container, agentId) {
-  const savedProjects = cachedProjects;
-  const savedAll = cachedAllProjects;
-  cachedProjects = projects;
-  cachedAllProjects = projects;
-  const savedAgent = activeAgent;
-  activeAgent = agentId;
-
-  // Process each project: filter, sort, slug-group
-  for (const project of projects) {
-    let filtered = project.sessions;
-    if (filtered.length === 0) continue;
-
-    // Sort: running first, then pinned, then by date
-    filtered = [...filtered].sort((a, b) => {
-      const aRunning = activePtyIds.has(a.sessionId);
-      const bRunning = activePtyIds.has(b.sessionId);
-      const aPri = (a.starred && aRunning ? 3 : aRunning ? 2 : a.starred ? 1 : 0);
-      const bPri = (b.starred && bRunning ? 3 : bRunning ? 2 : b.starred ? 1 : 0);
-      if (aPri !== bPri) return bPri - aPri;
-      return new Date(b.modified) - new Date(a.modified);
-    });
-
-    // Build project group
-    const fId = folderId(project.projectPath);
-    const group = document.createElement('div');
-    group.className = 'project-group';
-    group.id = fId;
-
-    const header = document.createElement('div');
-    header.className = 'project-header';
-    header.id = 'ph-' + fId;
-    const shortName = project.projectPath.split('/').filter(Boolean).slice(-2).join('/') || project.folder || 'unknown';
-    header.innerHTML = `<span class="arrow">&#9660;</span> <span class="project-name">${shortName}</span>`;
-    group.appendChild(header);
-
-    // Slug grouping
-    const slugMap = new Map();
-    const ungrouped = [];
-    for (const session of filtered) {
-      if (session.slug) {
-        if (!slugMap.has(session.slug)) slugMap.set(session.slug, []);
-        slugMap.get(session.slug).push(session);
-      } else {
-        ungrouped.push(session);
-      }
-    }
-
-    const sessionsList = document.createElement('div');
-    sessionsList.className = 'project-sessions';
-    sessionsList.id = 'sessions-' + fId;
-
-    for (const session of ungrouped) {
-      sessionsList.appendChild(buildSessionItem(session));
-    }
-    for (const [slug, sessions] of slugMap) {
-      const element = sessions.length === 1 ? buildSessionItem(sessions[0]) : buildSlugGroup(slug, sessions);
-      sessionsList.appendChild(element);
-    }
-
-    group.appendChild(sessionsList);
-    container.appendChild(group);
-
-    // Auto-collapse if stale
-    const mostRecent = filtered[0]?.modified;
-    if (mostRecent && (Date.now() - new Date(mostRecent)) > 3 * 86400000) {
-      header.classList.add('collapsed');
-    }
-  }
-
-  // Restore global state
-  cachedProjects = savedProjects;
-  cachedAllProjects = savedAll;
-  activeAgent = savedAgent;
-}
-
-function populatePinnedSection(body, agentData) {
-  // Gather all pinned sessions across all agents
-  const allPinned = [];
-  for (const [agentId, projects] of agentData) {
-    for (const proj of projects) {
-      for (const s of proj.sessions) {
-        if (s.starred) {
-          allPinned.push({ ...s, agent: s.agent || agentId });
-        }
-      }
-    }
-  }
-
-  if (allPinned.length === 0) {
-    body.innerHTML = '<div class="multi-empty">No pinned sessions</div>';
-    // Update count
-    const pinnedHeader = document.querySelector('.pinned-header .agent-panel-count');
-    if (pinnedHeader) pinnedHeader.textContent = '0';
-    return;
-  }
-
-  // Update count
-  const pinnedHeader = document.querySelector('.pinned-header .agent-panel-count');
-  if (pinnedHeader) pinnedHeader.textContent = String(allPinned.length);
-
-  // Build session items for pinned
-  const pinnedContainer = document.createElement('div');
-  pinnedContainer.className = 'multi-agent-pinned-sessions';
-  for (const session of allPinned) {
-    const item = buildSessionItem(session);
-    // Add agent badge
-    const info = item.querySelector('.session-info');
-    if (info) {
-      const agentBadge = document.createElement('span');
-      agentBadge.className = 'session-agent-badge';
-      const color = AGENT_COLORS[session.agent] || '#888';
-      agentBadge.style.color = color;
-      agentBadge.textContent = session.agent;
-      info.appendChild(agentBadge);
-    }
-    pinnedContainer.appendChild(item);
-  }
-  body.innerHTML = '';
-  body.appendChild(pinnedContainer);
-}
-
-function rebindMultiSidebarEvents() {
-  // Session item clicks
-  sidebarContent.querySelectorAll('.session-item').forEach(item => {
-    const sessionId = item.dataset.sessionId;
-    const session = sessionMap.get(sessionId);
-    if (!session) return;
-    item.onclick = () => openSession(session);
-
-    const pin = item.querySelector('.session-pin');
-    if (pin) {
-      pin.onclick = async (e) => {
-        e.stopPropagation();
-        const { starred } = await window.api.toggleStar(session.sessionId);
-        session.starred = starred;
-        // Refresh multi-agent view
-        if (multiAgentMode) {
-          const data = await loadAllAgentsData();
-          renderMultiSidebar(data);
-        }
-      };
-    }
-
-    const summaryEl = item.querySelector('.session-summary');
-    if (summaryEl) {
-      summaryEl.ondblclick = (e) => { e.stopPropagation(); startRename(summaryEl, session); };
-    }
-
-    const stopBtn = item.querySelector('.session-stop-btn');
-    if (stopBtn) {
-      stopBtn.onclick = (e) => {
-        e.stopPropagation();
-        confirmAndStopSession(session.sessionId);
-      };
-    }
-
-    // Other buttons: fork, jsonl, archive, launch config
-    const archiveBtn = item.querySelector('.session-archive-btn');
-    if (archiveBtn) {
-      archiveBtn.onclick = async (e) => {
-        e.stopPropagation();
-        const newVal = session.archived ? 0 : 1;
-        if (newVal && activePtyIds.has(session.sessionId)) {
-          await window.api.stopSession(session.sessionId);
-          pollActiveSessions();
-        }
-        await window.api.archiveSession(session.sessionId, newVal);
-        session.archived = newVal;
-        if (multiAgentMode) {
-          const data = await loadAllAgentsData();
-          renderMultiSidebar(data);
-        } else {
-          loadProjects();
-        }
-      };
-    }
-  });
-}
-
-// --- Detached window mode ---
-// When loaded with ?detached=<sessionId>, show just the terminal (no sidebar nav).
-const _detachedSessionId = new URLSearchParams(window.location.search).get('detached');
-if (_detachedSessionId) {
-  // Hide sidebar and filters — it's a focus terminal window
-  document.getElementById('sidebar').style.display = 'none';
-  document.getElementById('sidebar-resize-handle').style.display = 'none';
-  document.getElementById('main').style.borderLeft = 'none';
-
-  // Inject a compact detached-header above the terminal
-  const detachedHeader = document.createElement('div');
-  detachedHeader.id = 'detached-header';
-  detachedHeader.innerHTML = `
-    <span id="detached-title">Detached</span>
-    <div id="detached-controls">
-      <button id="detached-reattach-btn" title="Move session back to main window">Reattach</button>
-      <button id="detached-pin-btn" title="Toggle always-on-top">Pin</button>
-    </div>
-  `;
-  document.getElementById('main').insertBefore(detachedHeader, document.getElementById('main').firstChild);
-
-  const detachReattachBtn = document.getElementById('detached-reattach-btn');
-  const detachPinBtn = document.getElementById('detached-pin-btn');
-
-  detachReattachBtn.addEventListener('click', async () => {
-    await window.api.reattachSession(_detachedSessionId);
-  });
-
-  detachPinBtn.addEventListener('click', async () => {
-    const pinned = await window.api.toggleWindowPin();
-    detachPinBtn.textContent = pinned ? 'Unpin' : 'Pin';
-    detachPinBtn.classList.toggle('pinned', pinned);
-  });
-
-  // Load enough session data to open the terminal
-  loadProjects().then(() => {
-    const session = sessionMap.get(_detachedSessionId);
-    if (session) {
-      openSession(session);
-    } else {
-      // Session not in projects cache — build a minimal stub from active sessions
-      window.api.getActiveSessions().then(actives => {
-        const active = actives.find(s => s.sessionId === _detachedSessionId);
-        if (active) openSession({ sessionId: _detachedSessionId, name: active.name || _detachedSessionId, projectPath: active.projectPath || '', type: 'pty', sessions: [] });
-      });
-    }
-  });
-} else {
-
-// Initial load — respect saved meta-view, agent selection, or multi-agent mode
-if (multiAgentMode) {
-  loadAllAgentsData().then(agentData => {
-    renderMultiSidebar(agentData);
-    renderDefaultStatus();
-    // Sync multi-agent toggle state
-    const mat = document.getElementById('multi-agent-toggle');
-    if (mat) mat.classList.add('active');
-  });
-} else
-(activeAgent.startsWith('_') ? loadMetaView(activeAgent) : loadProjects()).then(() => {
-  // Sync filter button states for meta-views
-  if (activeAgent === '_active') { showRunningOnly = true; runningToggle.classList.add('active'); }
-  if (activeAgent === '_pinned') { showStarredOnly = true; starToggle.classList.add('active'); }
+loadProjects().then(async () => {
+  // Open the tab the user was last working in.
+  const lastTab = rememberedTab();
+  if (lastTab !== activeTab) document.querySelector(`.sidebar-tab[data-tab="${lastTab}"]`)?.click();
+  await restoreActiveTaskView();
+  await restorePersistedTerminalProcesses();
   // Restore grid view preference before opening sessions so they enter grid mode
-  if (localStorage.getItem('gridViewActive') === '1') {
+  if (!activeTaskView && localStorage.getItem('gridViewActive') === '1') {
     showGridView();
   }
-  // Restore active session after reload
-  if (activeSessionId && !openSessions.has(activeSessionId)) {
+  // Restore the active session after a renderer reload or full app restart.
+  // Raw terminals were reopened above but deliberately left hidden until this
+  // point, so an already-open entry still needs showSession().
+  if (activeSessionId) {
     const session = sessionMap.get(activeSessionId);
-    if (session) openSession(session);
+    if (session?.archived) {
+      setActiveSession(null);
+    } else if (session) {
+      if (openSessions.has(activeSessionId)) showSession(activeSessionId);
+      else openSession(session);
+    }
+    else setActiveSession(null);
   }
   // Start file watchers for recent sessions to power sidebar sparklines
   startSessionFileWatchers(cachedAllProjects);
@@ -7195,20 +5488,23 @@ if (multiAgentMode) {
 
 // Live-reload sidebar when filesystem changes are detected
 let projectsChangedTimer = null;
+// The strongest reason seen while the debounce window is open.
+let projectsChangedReason = 'sessions';
 let projectsChangedWhileAway = false;
-window.api.onProjectsChanged(() => {
+window.api.onProjectsChanged((reason) => {
   // Debounce to avoid rapid re-renders during bulk changes
   if (projectsChangedTimer) clearTimeout(projectsChangedTimer);
-  if (activeTab !== 'sessions') {
+  if (activeTab !== 'sessions' && activeTab !== 'projects') {
     projectsChangedWhileAway = true;
     return;
   }
+  // A batch that mixes both is a project change: the wider refresh covers both.
+  if (reason !== 'sessions') projectsChangedReason = 'project';
   projectsChangedTimer = setTimeout(() => {
     projectsChangedTimer = null;
-    loadProjects();
-    // Refresh caches so new sessions get cost + loop data
-    window.api.getAllSessionTokens().then(data => { if (data) tokenCache = data; });
-    window.api.getAllSessionLoops().then(data => { if (data) loopCache = data; });
+    const only = projectsChangedReason;
+    projectsChangedReason = 'sessions';
+    loadProjects({ reason: only });
   }, 300);
 });
 
@@ -7226,7 +5522,9 @@ function renderDefaultStatus() {
   const parts = [];
   if (running > 0) parts.push(`${running} running`);
   parts.push(`${totalSessions} sessions`);
-  parts.push(`${totalProjects} projects`);
+  parts.push(`${totalProjects} folders`);
+  const projectCount = (cachedProjectTreeAll?.projects || []).filter(p => p.status === 'active').length;
+  if (projectCount > 0) parts.push(`${projectCount} project${projectCount === 1 ? '' : 's'}`);
   statusBarInfo.textContent = parts.join(' \u00b7 ');
 }
 
@@ -7288,6 +5586,118 @@ const updaterHandler = (type, data) => {
   }
 };
 window.api.onUpdaterEvent(updaterHandler);
+
+// --- Quota gauges in status bar ---
+// One bar per limit window the usage API reports — a 5-hour session window, a
+// weekly all-models window, and a weekly window per model. Which one bites
+// first varies, and the 5-hour is usually the emptiest while resetting within
+// the day, so showing a single window would read as "plenty left" while a
+// weekly one is the one actually running out. Rows come from the API
+// self-describing, so a newly launched model gets a bar without a code change.
+const quotaGaugeEl = document.getElementById('status-bar-quota');
+
+// Full labels ("Week (all models)") are too long for a status bar; the tooltip
+// carries them in full.
+function shortQuotaLabel(row) {
+  // codex names its own windows by length, since it reports a duration in
+  // seconds rather than a named bucket like Claude does.
+  if (row.short) return row.short;
+  if (row.kind === 'session') return '5h';
+  if (row.kind === 'weekly_all') return 'Week';
+  return row.model || 'Week';
+}
+
+function buildQuotaBar(row) {
+  const wrap = document.createElement('span');
+  wrap.className = 'quota-item';
+
+  if (row.runtime) wrap.classList.add('quota-item-' + row.runtime);
+
+  const label = document.createElement('span');
+  label.className = 'quota-label';
+  label.textContent = shortQuotaLabel(row);
+  wrap.appendChild(label);
+
+  const track = document.createElement('span');
+  track.className = 'quota-track';
+  const fill = document.createElement('span');
+  const pct = row.percent;
+  fill.className = 'quota-fill' + (pct >= 80 ? ' quota-high' : pct >= 60 ? ' quota-mid' : '');
+  fill.style.width = Math.min(Math.max(pct, 1), 100) + '%';
+  track.appendChild(fill);
+  wrap.appendChild(track);
+
+  const pctEl = document.createElement('span');
+  pctEl.className = 'quota-pct';
+  pctEl.textContent = pct + '%';
+  wrap.appendChild(pctEl);
+
+  const who = row.runtime === 'codex' ? 'Codex' : 'Claude';
+  wrap.title = `${who} \u2014 ${row.label}: ${pct}%` + (row.reset ? ` \u2014 resets ${row.reset}` : '');
+  return wrap;
+}
+
+function quotaRowsFor(usage, runtime) {
+  // Prefer the API's self-describing rows; fall back to the flat 5-hour keys.
+  const rows = Array.isArray(usage?.limits) && usage.limits.length
+    ? usage.limits
+    : (usage?.session !== undefined
+      ? [{ kind: 'session', label: 'Current session', percent: usage.session, reset: usage.sessionReset }]
+      : []);
+  return rows.map(r => ({ runtime, ...r }));
+}
+
+/**
+ * One CLI's bars behind its logo.
+ *
+ * The logo goes on the group rather than each bar: with two CLIs on the bar a
+ * label like "Week" is ambiguous, but repeating the mark per bar is noise.
+ */
+function buildQuotaGroup(runtime, rows) {
+  const group = document.createElement('span');
+  group.className = 'quota-group quota-group-' + runtime;
+
+  const icon = document.createElement('span');
+  icon.className = 'quota-runtime-icon';
+  icon.innerHTML = runtime === 'codex' ? ICONS.codex(12) : ICONS.claude(12);
+  icon.title = runtime === 'codex' ? 'Codex' : 'Claude';
+  group.appendChild(icon);
+
+  for (const row of rows) group.appendChild(buildQuotaBar(row));
+  return group;
+}
+
+async function refreshQuotaGauge() {
+  try {
+    // Both CLIs, in parallel and independently: one being signed out or
+    // switched off must not cost the other its bars.
+    const [claudeUsage, codexUsage] = await Promise.all([
+      window.api.getUsage().catch(() => ({})),
+      window.api.getCodexUsage?.().catch(() => ({})) ?? {},
+    ]);
+    const groups = [];
+    for (const [runtime, usage] of [['claude', claudeUsage], ['codex', codexUsage]]) {
+      const rows = quotaRowsFor(usage, runtime);
+      if (rows.length) groups.push(buildQuotaGroup(runtime, rows));
+    }
+    if (!groups.length) { quotaGaugeEl.style.display = 'none'; return; }
+
+    quotaGaugeEl.replaceChildren(...groups);
+    quotaGaugeEl.style.display = '';
+  } catch {}
+}
+refreshQuotaGauge();
+setInterval(refreshQuotaGauge, 5 * 60 * 1000);
+
+// Switching a CLI on or off changes which bars belong on the gauge and which
+// sessions belong in the sidebar. Both are otherwise only refreshed on a timer.
+window.api.onHarnessesChanged?.(() => {
+  refreshQuotaGauge();
+  loadProjects({ resort: true });
+});
+quotaGaugeEl.addEventListener('click', () => {
+  document.querySelector('.sidebar-tab[data-tab="stats"]')?.click();
+});
 
 // --- Initialize file panel (MCP bridge UI) ---
 if (typeof initFilePanel === 'function') initFilePanel();

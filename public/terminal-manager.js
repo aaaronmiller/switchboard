@@ -13,7 +13,46 @@
 // Two layers needed:
 //   1. attachCustomKeyEventHandler returning false — blocks xterm's key pipeline (onKey/onData)
 //   2. preventDefault on capture-phase keydown — prevents browser inserting \n into textarea
-const isMac = window.api.platform === 'darwin';
+const isMac = typeof window !== 'undefined' && window.api && window.api.platform === 'darwin';
+
+// True when a keydown is being consumed by an IME (e.g. Korean/Japanese/Chinese)
+// to compose a character. Chromium reports keyCode 229 for such keydowns, and
+// sets isComposing while a composition is active. xterm's own _keyDown defers to
+// its composition helper in this state — but only if our custom handler lets the
+// event through (returns true) instead of intercepting it.
+function isImeComposing(e) {
+  return e.isComposing === true || e.keyCode === 229;
+}
+
+// Whether a Space keydown should be written straight to the PTY (the push-to-talk
+// key-repeat path from #22) rather than left to xterm. It must NOT fire during IME
+// composition: preventDefault-ing the Space there drops the in-progress syllable
+// (e.g. Korean "녕 " came out as " 녕" or lost the syllable entirely).
+function shouldSendSpaceDirectly(e) {
+  return e.key === ' '
+    && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey
+    && !isImeComposing(e);
+}
+
+// Decode an OSC 52 payload into the text the program wants on the clipboard.
+// Payload is "<selection>;<base64>", e.g. "c;aGVsbG8=".
+//
+// Returns null when there is nothing to write — an empty payload, or a read-back
+// query ("<selection>;?"). The read-back case is a deliberate refusal, not a gap:
+// answering it would write the user's clipboard contents back into the terminal,
+// letting any program running in the session exfiltrate whatever they last
+// copied. We consume the sequence and stay silent. Do not "finish" this by
+// implementing the query response.
+//
+// Throws on malformed base64 (atob), which the caller reports as unhandled.
+function decodeOsc52Payload(payload) {
+  const sep = payload.indexOf(';');
+  const b64 = sep === -1 ? payload : payload.slice(sep + 1);
+  if (!b64 || b64 === '?') return null;
+  const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
 function setupTerminalKeyBindings(terminal, container, getSessionId, { onFind } = {}) {
   terminal.attachCustomKeyEventHandler((e) => {
     // Cmd/Ctrl+F → open terminal search bar
@@ -63,7 +102,7 @@ function setupTerminalKeyBindings(terminal, container, getSessionId, { onFind } 
     if (!isMac && e.key === 'c' && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
       if (terminal.hasSelection()) {
         if (e.type === 'keydown') {
-          navigator.clipboard.writeText(terminal.getSelection()).catch(() => {});
+          window.api.writeClipboard(terminal.getSelection());
         }
         return false;
       }
@@ -76,7 +115,10 @@ function setupTerminalKeyBindings(terminal, container, getSessionId, { onFind } 
     // for key-repeat events. This fixes Claude Code's "Hold Space to record"
     // push-to-talk voice feature, which depends on rapid key-repeat characters
     // arriving at stdin to detect a held key.
-    if (e.key === ' ' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+    // Skips IME composition (isImeComposing): during Korean/Japanese/Chinese
+    // composition, Space commits the pending syllable, so it must fall through
+    // to xterm's composition helper instead of being sent raw.
+    if (shouldSendSpaceDirectly(e)) {
       if (e.type === 'keydown') {
         e.preventDefault();
         window.api.sendInput(getSessionId(), ' ');
@@ -118,10 +160,13 @@ function safeFit(entry) {
 function fitAndScroll(entry) {
   const wasAtBottom = isAtBottom(entry.terminal);
   requestAnimationFrame(() => {
-    safeFit(entry);
-    if (wasAtBottom) {
-      entry.terminal.scrollToBottom();
-    }
+    // A session stopped between the call and this frame has no renderer left;
+    // fitting or scrolling it then throws inside xterm.
+    if (!entry.element?.isConnected) return;
+    try {
+      safeFit(entry);
+      if (wasAtBottom) entry.terminal.scrollToBottom();
+    } catch {}
   });
 }
 
@@ -131,6 +176,188 @@ const ESC_SYNC_START = '\x1b[?2026h';
 const ESC_SYNC_END = '\x1b[?2026l';
 const SYNC_BUFFER_TIMEOUT = 500; // max ms to hold data waiting for sync end
 const terminalWriteBuffers = new Map(); // sessionId → { chunks, syncDepth, rafId, timerId }
+
+// A small, plain-text tail of each session's terminal survives a process/app
+// restart. It is deliberately not a terminal serialization: replaying old
+// cursor movement and alternate-screen escapes would let a stale TUI repaint
+// over the newly resumed one. Plain text can be shown safely in grey, then an
+// SGR reset hands color control back to live output.
+const TERMINAL_HISTORY_KEY = 'terminalHistory.v1';
+const TERMINAL_HISTORY_MAX_SESSIONS = 20;
+const TERMINAL_HISTORY_MAX_LINES = 120;
+const TERMINAL_HISTORY_MAX_CHARS = 48 * 1024;
+const TERMINAL_HISTORY_SAVE_DELAY = 1200;
+const PERSISTED_TERMINALS_KEY = 'persistedRawTerminals.v1';
+
+/** Extract the visible buffer tail as plain text, joining wrapped rows. */
+function terminalBufferText(buffer, maxLines = TERMINAL_HISTORY_MAX_LINES, maxChars = TERMINAL_HISTORY_MAX_CHARS) {
+  if (!buffer || !Number.isFinite(buffer.length) || typeof buffer.getLine !== 'function') return '';
+  const start = Math.max(0, buffer.length - Math.max(1, maxLines));
+  const logical = [];
+  for (let i = start; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    if (!line || typeof line.translateToString !== 'function') continue;
+    const text = line.translateToString(true);
+    if (line.isWrapped && logical.length) logical[logical.length - 1] += text;
+    else logical.push(text);
+  }
+  while (logical.length && !logical[0].trim()) logical.shift();
+  while (logical.length && !logical[logical.length - 1].trim()) logical.pop();
+  let text = logical.join('\n');
+  if (text.length > maxChars) {
+    text = text.slice(-maxChars);
+    const firstBreak = text.indexOf('\n');
+    if (firstBreak >= 0) text = text.slice(firstBreak + 1);
+  }
+  return text;
+}
+
+/** Grey restored text followed by an explicit reset, so live output is normal. */
+function restoredTerminalHistoryAnsi(text) {
+  if (!text) return '';
+  const safe = String(text).replace(/\x1b/g, '').replace(/\r?\n/g, '\r\n');
+  return `\x1b[90m${safe}\x1b[0m\r\n\x1b[2;90m── restored terminal history ──\x1b[0m\r\n`;
+}
+
+function readTerminalHistoryStore() {
+  try {
+    const value = JSON.parse(localStorage.getItem(TERMINAL_HISTORY_KEY) || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch { return {}; }
+}
+
+function writeTerminalHistoryStore(store) {
+  try { localStorage.setItem(TERMINAL_HISTORY_KEY, JSON.stringify(store)); } catch {}
+}
+
+/** Remove retained scrollback and cancel a delayed save for this session. */
+function forgetTerminalHistory(sessionId) {
+  if (!sessionId) return;
+  if (typeof openSessions !== 'undefined') {
+    const entry = openSessions.get(sessionId);
+    if (entry) {
+      clearTimeout(entry.historySaveTimer);
+      entry.historySaveTimer = null;
+    }
+  }
+  const store = readTerminalHistoryStore();
+  if (!Object.prototype.hasOwnProperty.call(store, sessionId)) return;
+  delete store[sessionId];
+  writeTerminalHistoryStore(store);
+}
+
+function saveTerminalHistory(entry) {
+  if (!entry) return;
+  clearTimeout(entry.historySaveTimer);
+  entry.historySaveTimer = null;
+  const sessionId = entry.session?.sessionId;
+  if (entry.session?.archived) {
+    forgetTerminalHistory(sessionId);
+    return;
+  }
+  const text = terminalBufferText(entry.terminal?.buffer?.active);
+  if (!sessionId || !text) return;
+  const store = readTerminalHistoryStore();
+  store[sessionId] = { text, savedAt: Date.now() };
+  const keep = Object.entries(store)
+    .sort((a, b) => Number(b[1]?.savedAt || 0) - Number(a[1]?.savedAt || 0))
+    .slice(0, TERMINAL_HISTORY_MAX_SESSIONS);
+  writeTerminalHistoryStore(Object.fromEntries(keep));
+}
+
+function scheduleTerminalHistorySave(entry) {
+  if (!entry) return;
+  if (entry.session?.archived) {
+    forgetTerminalHistory(entry.session.sessionId);
+    return;
+  }
+  clearTimeout(entry.historySaveTimer);
+  entry.historySaveTimer = setTimeout(() => saveTerminalHistory(entry), TERMINAL_HISTORY_SAVE_DELAY);
+}
+
+function restoreTerminalHistory(entry) {
+  if (!entry) return;
+  // A renderer reload reattaches to a still-live main-process PTY, whose own
+  // buffer is replayed in full. Only add the persisted tail when a new PTY is
+  // about to resume the session, otherwise the same output appears twice.
+  if (activePtyIds.has(entry.session.sessionId)) return;
+  const saved = readTerminalHistoryStore()[entry.session.sessionId];
+  if (!saved?.text) return;
+  entry.terminal.write(restoredTerminalHistoryAnsi(saved.text));
+  entry.historyRestored = true;
+}
+
+/** The durable subset needed to reopen a raw shell after the app exits. */
+function persistedTerminalRecord(session) {
+  if (!session || session.type !== 'terminal' || !session.sessionId || !session.projectPath) return null;
+  return {
+    sessionId: String(session.sessionId),
+    summary: 'Terminal',
+    firstPrompt: '',
+    projectPath: String(session.projectPath),
+    projectId: session.projectId ? String(session.projectId) : null,
+    trackId: session.trackId ? String(session.trackId) : null,
+    formerTrackName: session.formerTrackName || null,
+    name: null,
+    starred: 0,
+    archived: 0,
+    messageCount: 0,
+    modified: session.modified || new Date().toISOString(),
+    created: session.created || session.modified || new Date().toISOString(),
+    type: 'terminal',
+  };
+}
+
+function parsePersistedTerminalSessions(raw) {
+  let rows;
+  try { rows = JSON.parse(raw || '[]'); } catch { return []; }
+  if (!Array.isArray(rows)) return [];
+  const seen = new Set();
+  const sessions = [];
+  for (const row of rows) {
+    const session = persistedTerminalRecord(row);
+    if (!session || seen.has(session.sessionId)) continue;
+    seen.add(session.sessionId);
+    sessions.push(session);
+  }
+  return sessions;
+}
+
+function persistedTerminalSessions() {
+  try { return parsePersistedTerminalSessions(localStorage.getItem(PERSISTED_TERMINALS_KEY)); }
+  catch { return []; }
+}
+
+function writePersistedTerminalSessions(sessions) {
+  try { localStorage.setItem(PERSISTED_TERMINALS_KEY, JSON.stringify(sessions)); } catch {}
+}
+
+function persistTerminalSession(session) {
+  const record = persistedTerminalRecord(session);
+  if (!record) return;
+  const sessions = persistedTerminalSessions().filter(item => item.sessionId !== record.sessionId);
+  sessions.push(record);
+  writePersistedTerminalSessions(sessions);
+}
+
+function forgetPersistedTerminalSession(sessionId) {
+  if (!sessionId) return;
+  const sessions = persistedTerminalSessions();
+  const kept = sessions.filter(session => session.sessionId !== sessionId);
+  if (kept.length !== sessions.length) writePersistedTerminalSessions(kept);
+}
+
+/** Move early output saved under a temporary Codex/fork id to its real id. */
+function rekeyTerminalHistory(oldId, newId) {
+  if (!oldId || !newId || oldId === newId) return;
+  const store = readTerminalHistoryStore();
+  if (!store[oldId]) return;
+  if (!store[newId] || Number(store[oldId].savedAt || 0) > Number(store[newId].savedAt || 0)) {
+    store[newId] = store[oldId];
+  }
+  delete store[oldId];
+  writeTerminalHistoryStore(store);
+}
 
 function flushTerminalBuffer(sessionId) {
   const buf = terminalWriteBuffers.get(sessionId);
@@ -146,6 +373,7 @@ function flushTerminalBuffer(sessionId) {
   const wasAtBottom = isAtBottom(entry.terminal);
   const savedViewportY = entry.terminal.buffer.active.viewportY;
   entry.terminal.write(data, () => {
+    scheduleTerminalHistorySave(entry);
     if (sessionId !== activeSessionId) return;
     if (wasAtBottom) {
       entry.terminal.scrollToBottom();
@@ -171,6 +399,20 @@ function createTerminalEntry(session) {
   container.className = 'terminal-container';
   terminalsEl.appendChild(container);
 
+  const linkTooltip = TerminalFileLinks.createTooltip(container);
+  const linkActions = {
+    resolve: references => window.api.resolveTerminalFiles(references),
+    showTooltip: linkTooltip.show,
+    hideTooltip: linkTooltip.hide,
+    openFile: (...args) => openFileInPanel(...args),
+    openExternal: uri => window.api.openExternal(uri),
+  };
+  // Read the entry at click time: Codex replaces a provisional session ID
+  // after launch, and a fork can re-key an existing terminal too.
+  const linkHandler = TerminalFileLinks.createLinkHandler({ getSession: () => entry.session, ...linkActions });
+  const activateLink = (event, uri) => linkHandler.activate(event, uri)
+    .catch(err => console.warn('[terminal] Could not open link:', err));
+
   const terminal = new Terminal({
     fontSize: 12,
     fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
@@ -179,27 +421,42 @@ function createTerminalEntry(session) {
     scrollback: 10000,
     convertEol: true,
     allowProposedApi: true,
+    // A TUI that turns on full mouse tracking (CSI ?1003h) makes xterm forward every
+    // drag to the application, so normal text selection is dead. Terminal.app and
+    // iTerm2 let you hold Option to override that; xterm.js requires opting in.
+    // Without this, selecting (and therefore copying) inside such a session is
+    // impossible on macOS and Cmd+C silently leaves the previous clipboard contents
+    // in place. Windows/Linux get the same escape hatch via Shift, which needs no flag.
+    macOptionClickForcesSelection: true,
     linkHandler: {
-      activate: (_event, uri) => {
-        if (uri.startsWith('file://') && typeof openFileInPanel === 'function') {
-          try { openFileInPanel(sessionId, decodeURIComponent(new URL(uri).pathname)); } catch {}
-        } else {
-          window.api.openExternal(uri);
-        }
-      },
+      activate: activateLink,
+      hover: linkHandler.hover,
+      leave: linkHandler.leave,
       allowNonHttpProtocols: true,
     },
   });
 
+  // OSC 52 — let the program inside the terminal set the system clipboard (this is how
+  // Claude Code copies). xterm doesn't wire this up itself, so we do.
+  // Route through the main process — see writeClipboard — because the renderer clipboard
+  // is unreliable on Wayland.
+  terminal.parser.registerOscHandler(52, (payload) => {
+    let text;
+    try {
+      text = decodeOsc52Payload(payload);
+    } catch {
+      return false;
+    }
+    // null = read-back query or empty payload: consumed, and deliberately not
+    // answered. See decodeOsc52Payload.
+    if (text === null) return true;
+    window.api.writeClipboard(text).catch(() => {});
+    return true;
+  });
+
   const fitAddon = new FitAddon.FitAddon();
   terminal.loadAddon(fitAddon);
-  terminal.loadAddon(new WebLinksAddon.WebLinksAddon((_event, url) => {
-    if (url.startsWith('file://') && typeof openFileInPanel === 'function') {
-      try { openFileInPanel(sessionId, decodeURIComponent(new URL(url).pathname)); } catch {}
-    } else {
-      window.api.openExternal(url);
-    }
-  }));
+  terminal.loadAddon(new WebLinksAddon.WebLinksAddon(activateLink, { hover: linkHandler.hover, leave: linkHandler.leave }));
   const searchAddon = new SearchAddon.SearchAddon();
   terminal.loadAddon(searchAddon);
   terminal.loadAddon(new UnicodeGraphemesAddon.UnicodeGraphemesAddon());
@@ -262,6 +519,28 @@ function createTerminalEntry(session) {
 
   const entry = { terminal, element: container, fitAddon, searchAddon, openSearchBar, closeSearchBar, session, closed: false };
   openSessions.set(sessionId, entry);
+  // OSC 8 and web links retain precedence over detected filesystem paths.
+  const fileLinks = TerminalFileLinks.createFileLinkProvider(terminal, {
+    getSession: () => entry.session, ...linkActions,
+  });
+  const fileLinkRegistration = terminal.registerLinkProvider(fileLinks);
+  const linkScroll = terminal.onScroll(linkHandler.leave);
+  const linkResize = terminal.onResize(linkHandler.leave);
+  container.addEventListener('mouseleave', linkHandler.leave);
+  container.addEventListener('wheel', linkHandler.leave, { passive: true });
+  window.addEventListener('blur', linkHandler.leave);
+  terminal.loadAddon({
+    activate() {},
+    dispose() {
+      fileLinks.dispose(); fileLinkRegistration.dispose();
+      linkScroll.dispose(); linkResize.dispose();
+      container.removeEventListener('mouseleave', linkHandler.leave);
+      container.removeEventListener('wheel', linkHandler.leave);
+      window.removeEventListener('blur', linkHandler.leave);
+      linkHandler.dispose(); linkTooltip.dispose();
+    },
+  });
+  restoreTerminalHistory(entry);
 
   // Wire up IPC (use entry.session.sessionId so fork re-keying works)
   terminal.onData(data => {
@@ -277,23 +556,50 @@ function createTerminalEntry(session) {
     entry.ptyTitle = title;
     if (activeSessionId === entry.session.sessionId) updatePtyTitle();
   });
-  terminal.onBell(() => {
-    trackActivity(entry.session.sessionId, '\x07');
-  });
-
   return entry;
 }
 
+// Did the user end this session, or did it die on its own? An exit the user
+// asked for tears the session down; anything else keeps the terminal mounted
+// behind an exit banner so the error output stays readable.
+//
+// `userStopped` covers the UI stop button (main marks the kill as requested).
+// A clean code-0 exit with no signal covers `/exit` and ctrl-D. Everything
+// else — a non-zero code, or a signal we didn't send (SIGSEGV, an OOM kill) —
+// is a death. The exit code alone can't decide this: node-pty reports a
+// signal kill as code 0, so the stop button would look exactly like a crash.
+function wasIntentionalExit({ exitCode, signal, userStopped }) {
+  if (userStopped) return true;
+  return exitCode === 0 && !signal;
+}
+
 // Clean up a closed session entry (dispose terminal, remove DOM, remove from maps).
-function destroySession(sessionId) {
+function destroySession(sessionId, { forgetPersisted = true, preserveHistory = false } = {}) {
   const entry = openSessions.get(sessionId);
+  const session = entry?.session || sessionMap.get(sessionId);
+  if (preserveHistory) {
+    if (entry) saveTerminalHistory(entry);
+  } else {
+    forgetTerminalHistory(sessionId);
+  }
+  if (forgetPersisted && session?.type === 'terminal') forgetPersistedTerminalSession(sessionId);
   if (!entry) return;
   window.api.closeTerminal(sessionId);
   entry.terminal.dispose();
   entry.element.remove();
   openSessions.delete(sessionId);
+  if (typeof forgetProjectSessionState === 'function') forgetProjectSessionState(sessionId);
   const card = gridCards.get(sessionId);
   if (card) { card.remove(); gridCards.delete(sessionId); }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    for (const entry of openSessions.values()) {
+      saveTerminalHistory(entry);
+      if (entry.session?.type === 'terminal' && !entry.closed) persistTerminalSession(entry.session);
+    }
+  });
 }
 
 // Make a session visible in the current view mode (grid or single).
@@ -301,6 +607,7 @@ function destroySession(sessionId) {
 function showSession(sessionId) {
   const entry = openSessions.get(sessionId);
   const session = sessionMap.get(sessionId) || (entry && entry.session);
+  if (typeof leaveTaskLogView === 'function') leaveTaskLogView();
 
   // Update sidebar active state
   document.querySelectorAll('.session-item.active').forEach(el => el.classList.remove('active'));
@@ -336,6 +643,8 @@ function showSession(sessionId) {
       fitAndScroll(entry);
     }
   }
+  // The Projects tab keeps the project around the terminal (projects-view.js).
+  if (typeof onSessionShown === 'function') onSessionShown(sessionId);
 }
 
 function setupDragAndDrop(container, getSessionId) {
@@ -365,4 +674,14 @@ function setupDragAndDrop(container, getSessionId) {
     const paths = Array.from(files).map(f => shellEscape(window.api.getPathForFile(f)));
     window.api.sendInput(getSessionId(), paths.join(' '));
   });
+}
+
+// Expose pure key-handling predicates to Node for unit testing. No-op in the
+// browser, where this file is loaded as a plain <script> and `module` is undefined.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    isImeComposing, shouldSendSpaceDirectly, decodeOsc52Payload, wasIntentionalExit,
+    terminalBufferText, restoredTerminalHistoryAnsi,
+    persistedTerminalRecord, parsePersistedTerminalSessions, forgetTerminalHistory,
+  };
 }

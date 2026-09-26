@@ -1,8 +1,11 @@
-// schedule-runner.js — Scan schedule-*.md files, match cron, build commands
+// schedule-runner.js — Scan the old schedule-*.md files.
+// Only the scan survives: main imports what it finds as folder schedules
+// (projects.importLegacySchedules) once per file, retrying missed files at startup.
+// cronMatches stays for tests and for parity with public/schedule-time.js.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const crypto = require('crypto');
+const { readHead } = require('./jsonl-scan');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
@@ -74,6 +77,46 @@ function cronMatches(cronExpr, now) {
   );
 }
 
+/**
+ * Resolve a project folder name to its project path from the SQLite cache.
+ * Returns a Map<folder, projectPath>, or an empty Map if the cache is
+ * unavailable (e.g. in tests that don't load the native DB binding).
+ */
+function loadFolderMetaMap() {
+  try {
+    // Lazy require so requiring schedule-runner.js never forces the native
+    // better-sqlite3 binding to load (keeps the module test-friendly).
+    const { getAllFolderMeta } = require('./db');
+    const meta = getAllFolderMeta();
+    const map = new Map();
+    for (const [folder, row] of meta) {
+      if (row && row.projectPath) map.set(folder, row.projectPath);
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+/** Read a project folder's first JSONL just enough to extract its cwd. */
+function readProjectPathFromJsonl(folderPath) {
+  try {
+    const jsonlFiles = fs.readdirSync(folderPath).filter(f => f.endsWith('.jsonl'));
+    for (const jf of jsonlFiles) {
+      // Head only: legacy schedule import scans every project folder, and a
+      // session .jsonl can be hundreds of MB.
+      const head = readHead(path.join(folderPath, jf), 4096);
+      for (const line of head.split('\n').filter(Boolean)) {
+        try {
+          const entry = JSON.parse(line);
+          if (entry.cwd) return entry.cwd;
+        } catch {}
+      }
+    }
+  } catch {}
+  return null;
+}
+
 /** Scan all projects for schedule-*.md files and return parsed schedule objects. */
 function scanSchedules(log) {
   const schedules = [];
@@ -82,22 +125,17 @@ function scanSchedules(log) {
     const folders = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true })
       .filter(d => d.isDirectory());
 
+    // Prefer the cached folder→projectPath mapping; only read JSONLs for
+    // folders genuinely missing from the cache. This avoids re-reading 4KB of
+    // every JSONL of every project during import.
+    const folderMeta = loadFolderMetaMap();
+
     for (const folder of folders) {
       const folderPath = path.join(PROJECTS_DIR, folder.name);
-      let projectPath = null;
-      try {
-        const jsonlFiles = fs.readdirSync(folderPath).filter(f => f.endsWith('.jsonl'));
-        for (const jf of jsonlFiles) {
-          const head = fs.readFileSync(path.join(folderPath, jf), 'utf8').slice(0, 4000);
-          for (const line of head.split('\n').filter(Boolean)) {
-            try {
-              const entry = JSON.parse(line);
-              if (entry.cwd) { projectPath = entry.cwd; break; }
-            } catch {}
-          }
-          if (projectPath) break;
-        }
-      } catch {}
+      let projectPath = folderMeta.get(folder.name) || null;
+      if (!projectPath) {
+        projectPath = readProjectPathFromJsonl(folderPath);
+      }
       if (!projectPath) continue;
 
       const commandsDir = path.join(projectPath, '.claude', 'commands');
@@ -109,11 +147,11 @@ function scanSchedules(log) {
             const content = fs.readFileSync(path.join(commandsDir, file), 'utf8');
             const { meta, body } = parseFrontmatter(content);
             if (!meta.cron || !body) continue;
-            if (meta.enabled === 'false') continue;
+            // Disabled files are imported too, as schedules that are off.
             schedules.push({
               file, filePath: path.join(commandsDir, file),
               projectPath, folder: folder.name,
-              name: meta.name || file, cron: meta.cron,
+              name: meta.name || file, cron: meta.cron, enabled: meta.enabled !== 'false',
               slug: meta.slug || file.replace(/^schedule-/, '').replace(/\.md$/, ''),
               cli: meta.cli || {}, prompt: body,
             });
@@ -129,93 +167,4 @@ function scanSchedules(log) {
   return schedules;
 }
 
-/** Create a pre-seeded JSONL session file with user message and slug for grouping. */
-function createScheduleSession(schedule) {
-  const sessionId = crypto.randomUUID();
-  const timestamp = new Date().toISOString();
-  const claudeProjectDir = path.join(PROJECTS_DIR, schedule.folder);
-
-  fs.mkdirSync(claudeProjectDir, { recursive: true });
-  const jsonlPath = path.join(claudeProjectDir, `${sessionId}.jsonl`);
-
-  const msgId = crypto.randomUUID();
-  const lines = [
-    JSON.stringify({ type: 'user', parentUuid: null, uuid: msgId, sessionId, cwd: schedule.projectPath, slug: schedule.slug, timestamp, message: { role: 'user', content: 'Scheduled Task: ' + schedule.prompt } }),
-  ];
-  fs.writeFileSync(jsonlPath, lines.join('\n') + '\n');
-  return { sessionId, jsonlPath };
-}
-
-/** Build a claude CLI command string for a scheduled task. */
-function buildScheduleCommand(sessionId, schedule) {
-  let cmd = `claude --resume "${sessionId}" -p "Run the scheduled task"`;
-
-  const cli = schedule.cli;
-  cmd += ` --permission-mode "${cli['permission-mode'] || 'acceptEdits'}"`;
-  if (cli.model) cmd += ` --model "${cli.model}"`;
-  if (cli['max-budget-usd']) cmd += ` --max-budget-usd ${cli['max-budget-usd']}`;
-  const allowedTools = cli['allowed-tools'] || 'Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch';
-  cmd += ` --allowedTools "${allowedTools}"`;
-  if (cli['append-system-prompt']) cmd += ` --append-system-prompt "${cli['append-system-prompt'].replace(/"/g, '\\"')}"`;
-  if (cli['add-dirs']) {
-    for (const dir of cli['add-dirs'].split(',').map(d => d.trim()).filter(Boolean)) {
-      cmd += ` --add-dir "${dir}"`;
-    }
-  }
-
-  return cmd;
-}
-
-/**
- * Start the cron loop. Checks every 60 seconds.
- * @param {object} log - Logger
- * @param {function} runCommand - Function to spawn a shell command: runCommand(cmd, cwd, name)
- * @returns {function} stop - Call to stop the scheduler
- */
-function startScheduler(log, runCommand) {
-  let running = true;
-  const runningTasks = new Set();
-
-  function tick() {
-    if (!running) return;
-    const now = new Date();
-    const schedules = scanSchedules(log);
-
-    for (const schedule of schedules) {
-      if (!cronMatches(schedule.cron, now)) continue;
-      const taskKey = `${schedule.folder}:${schedule.slug}`;
-      if (runningTasks.has(taskKey)) {
-        log.info(`[schedule] Skipping ${schedule.name} — still running from previous trigger`);
-        continue;
-      }
-
-      log.info(`[schedule] Triggering: ${schedule.name} (${schedule.cron})`);
-      try {
-        const { sessionId } = createScheduleSession(schedule);
-        const cmd = buildScheduleCommand(sessionId, schedule);
-
-        runningTasks.add(taskKey);
-        runCommand(cmd, schedule.projectPath, schedule.name, () => {
-          runningTasks.delete(taskKey);
-        });
-      } catch (err) {
-        log.error(`[schedule] Failed to run ${schedule.name}:`, err);
-      }
-    }
-  }
-
-  const msUntilNextMinute = (60 - new Date().getSeconds()) * 1000;
-  const initialTimer = setTimeout(() => {
-    tick();
-    const interval = setInterval(tick, 60 * 1000);
-    initialTimer._interval = interval;
-  }, msUntilNextMinute);
-
-  return function stop() {
-    running = false;
-    clearTimeout(initialTimer);
-    if (initialTimer._interval) clearInterval(initialTimer._interval);
-  };
-}
-
-module.exports = { parseFrontmatter, cronMatches, scanSchedules, startScheduler, createScheduleSession, buildScheduleCommand };
+module.exports = { parseFrontmatter, cronMatches, scanSchedules };

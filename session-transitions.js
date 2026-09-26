@@ -5,7 +5,7 @@ const fs = require('fs');
  * Fork / plan-accept detection for active PTY sessions.
  * Call init(ctx) once with shared context.
  */
-let PROJECTS_DIR, activeSessions, getMainWindow, log, rekeyMcpServer;
+let PROJECTS_DIR, activeSessions, getMainWindow, log, rekeyMcpServer, copySessionAssignment;
 
 // Module-scope so detectSessionTransitions() can reference it (it closes over the
 // module-level getMainWindow/log bindings that init() assigns).
@@ -27,6 +27,9 @@ function init(ctx) {
   getMainWindow = ctx.getMainWindow;
   log = ctx.log;
   rekeyMcpServer = ctx.rekeyMcpServer;
+  // A fork inherits its parent's project and track (db.js). Optional so the
+  // tests that exercise detection alone need not provide it.
+  copySessionAssignment = ctx.copySessionAssignment || null;
 }
 
 // --- Fork / plan-accept detection ---
@@ -99,6 +102,9 @@ function detectSessionTransitions(folder) {
   } catch { return; }
 
   for (const [sessionId, session] of [...activeSessions]) {
+    // A session whose real id has already been adopted (by the launch matcher,
+    // which claims forks) must not be transitioned a second time.
+    if (session.realSessionId) continue;
     if (session.exited || session.isPlainTerminal || !session.knownJsonlFiles || session.projectFolder !== folder) {
       if (!session.exited && !session.isPlainTerminal && session.forkFrom) {
         log.info(`[fork-detect] skipped session=${sessionId} forkFrom=${session.forkFrom||'none'} reason=${session.exited ? 'exited' : session.isPlainTerminal ? 'terminal' : !session.knownJsonlFiles ? 'noKnown' : 'folderMismatch('+session.projectFolder+' vs '+folder+')'}`);
@@ -193,7 +199,18 @@ function detectSessionTransitions(folder) {
         activeSessions.set(newId, session);
         // Re-key MCP server to match new session ID
         rekeyMcpServer(sessionId, newId);
-        safeSend('session-forked', sessionId, newId);
+        if (copySessionAssignment) {
+          // The launch id carries the filing when the session was started from
+          // a project; otherwise a fork inherits the filing of its source.
+          try {
+            const copied = copySessionAssignment(sessionId, newId);
+            if (!copied && session.forkFrom) copySessionAssignment(session.forkFrom, newId);
+          } catch (err) { log.error?.('[session-transition] assignment copy failed', err); }
+        }
+        const mainWindow = getMainWindow();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('session-forked', sessionId, newId);
+        }
         break; // Only one transition per session per flush
       }
     }
