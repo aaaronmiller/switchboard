@@ -42,6 +42,9 @@ const projectsUi = {
   working: false,
   doneOpen: false,
   snoozedOpen: false,
+  // `${projectId}:${trackKey}` → true while a done track's card is expanded.
+  // Done cards collapse to their heading; this is the user peeking inside.
+  doneCardsOpen: {},
   // Ids of the projects the list last showed as snoozed. The session poll
   // compares against it to notice a snoozed project raising its hand.
   snoozedKey: '',
@@ -1341,7 +1344,9 @@ function renderOverviewBody(project, body) {
     </div>`;
   const cards = body.querySelector('#ws-cards');
   cards.appendChild(buildTrackCard(project, null));
-  for (const track of tracks) cards.appendChild(buildTrackCard(project, track));
+  // Finished tracks sit below the live ones, each keeping its own order.
+  const byDoneLast = [...tracks.filter(t => t.status !== 'done'), ...tracks.filter(t => t.status === 'done')];
+  for (const track of byDoneLast) cards.appendChild(buildTrackCard(project, track));
   if (!tracks.length && !project.sessions.length) {
     const hint = document.createElement('div');
     hint.className = 'ws-hint';
@@ -1370,8 +1375,12 @@ function buildCardSessionRow(project, session) {
 function buildTrackCard(project, track) {
   const key = track ? track.id : 'general';
   const sessions = sessionsOfTrack(project, key);
+  const done = track?.status === 'done';
+  // A done track is finished work: just its heading, unless the user opens it.
+  const doneKey = `${project.id}:${key}`;
+  const collapsed = done && !projectsUi.doneCardsOpen[doneKey];
   const card = document.createElement('div');
-  card.className = 'tcard' + (track ? '' : ' tcard--general') + (track?.status === 'done' ? ' tcard--done' : '');
+  card.className = 'tcard' + (track ? '' : ' tcard--general') + (done ? ' tcard--done' : '') + (collapsed ? ' tcard--collapsed' : '');
   card.dataset.trackKey = key;
   card.dataset.projectId = project.id;
   // What this card is showing, so a session-only refresh can tell whether it
@@ -1382,14 +1391,31 @@ function buildTrackCard(project, track) {
   const head = document.createElement('div');
   head.className = 'tcard-h';
   const colors = trackColors(project, track);
-  head.innerHTML = stateDot(state) +
-    `<span class="tcard-name" style="color:${colors.fg}">${escapeHtml(track ? track.name : 'General')}${track?.status === 'done' ? '<span class="project-done-chip">done</span>' : ''}</span>` +
+  head.innerHTML = (done ? `<span class="tcard-chevron">${collapsed ? PICONS.chevronRight(10) : PICONS.chevronDown(10)}</span>` : '') +
+    stateDot(state) +
+    `<span class="tcard-name" style="color:${colors.fg}">${escapeHtml(track ? track.name : 'General')}${done ? '<span class="project-done-chip">done</span>' : ''}</span>` +
     `<span class="tcard-meta mono">${track ? escapeHtml(cwdLabel) : 'sessions not in a track'}</span>` +
+    (collapsed && sessions.length ? `<span class="tcard-meta">${sessions.length} session${sessions.length === 1 ? '' : 's'}</span>` : '') +
     `<span class="ws-flex"></span>` +
     (track?.cli ? `<span class="ws-chip ws-chip--cli ${track.cli}" title="${escapeHtml(track.cli === 'codex' ? 'Codex' : 'Claude')}">${track.cli === 'codex' ? ICONS.codex(12) : ICONS.claude(12)}</span>` : '') +
     `<button type="button" class="ws-ghost ws-ghost--sm tcard-new">${PICONS.plus(11)}<span>New session</span></button>` +
     (track ? `<button type="button" class="tcard-more" title="Track menu">${PICONS.dots(13)}</button>` : '');
   card.appendChild(head);
+
+  if (done) {
+    // The heading toggles the card open; its buttons keep their own jobs.
+    head.classList.add('tcard-h--toggle');
+    head.onclick = (e) => {
+      if (e.target.closest('button')) return;
+      if (collapsed) projectsUi.doneCardsOpen[doneKey] = true; else delete projectsUi.doneCardsOpen[doneKey];
+      card.replaceWith(buildTrackCard(project, track));
+    };
+  }
+  head.querySelector('.tcard-new').onclick = (e) => launchFromTrack(project, track, e.currentTarget);
+  const moreBtn = head.querySelector('.tcard-more');
+  if (moreBtn) moreBtn.onclick = (e) => { e.stopPropagation(); showContextMenu(trackMenuItems(project, track), { anchor: e.currentTarget }); };
+  if (track) card.oncontextmenu = (e) => { e.preventDefault(); showContextMenu(trackMenuItems(project, track), { x: e.clientX, y: e.clientY }); };
+  if (collapsed) return card;
 
   const shown = sessions.slice(0, visibleSessionCount);
   for (const s of shown) card.appendChild(buildCardSessionRow(project, s));
@@ -1432,12 +1458,8 @@ function buildTrackCard(project, track) {
 
   // Nothing left to show in the foot once New session moved up to the head.
   if (!foot.querySelector('button')) foot.remove();
-  head.querySelector('.tcard-new').onclick = (e) => launchFromTrack(project, track, e.currentTarget);
   const more = foot.querySelector('.tcard-more-sessions');
   if (more) more.onclick = () => openTrackInPanes(project, key);
-  const moreBtn = head.querySelector('.tcard-more');
-  if (moreBtn) moreBtn.onclick = (e) => { e.stopPropagation(); showContextMenu(trackMenuItems(project, track), { anchor: e.currentTarget }); };
-  if (track) card.oncontextmenu = (e) => { e.preventDefault(); showContextMenu(trackMenuItems(project, track), { x: e.clientX, y: e.clientY }); };
   return card;
 }
 

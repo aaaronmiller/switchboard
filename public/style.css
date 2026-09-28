@@ -5033,6 +5033,17 @@ body { display: flex; flex-direction: column; }
 .tcard--done { opacity: 0.6; }
 .tcard--done:hover { opacity: 1; }
 
+/* A done track shows only its heading until the heading is clicked. */
+.tcard-h--toggle { cursor: pointer; user-select: none; }
+.tcard--collapsed .tcard-h { border-bottom: none; border-radius: 9px; }
+.tcard-chevron {
+  display: inline-flex;
+  align-items: center;
+  color: #6a6a80;
+  flex: none;
+  margin-right: -2px;
+}
+
 .tcard-h {
   display: flex;
   align-items: center;
