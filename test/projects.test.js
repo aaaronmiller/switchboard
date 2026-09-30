@@ -239,7 +239,6 @@ test('updateProject, attach/detach, deleteProject keep the folder on disk', asyn
     assert.equal(updated.project.sharedBranch, false);
     assert.equal(updated.project.branchName, 'auth');
     assert.equal(updated.project.slug, 'auth-refactor', 'slug does not follow a rename');
-    assert.deepEqual(updated.worktrees, [], 'marking done reports the worktrees to remove');
 
     const attached = (await projects.attachFolder(project.id, { path: os.tmpdir() })).project;
     assert.equal(attached.folders.length, 1);
@@ -619,9 +618,10 @@ test('project instructions stay in the project root and leave worktree instructi
     assert.ok(!fs.existsSync(wt.path), 'checkout removed');
     assert.equal(gitIn(repo, 'rev-parse', '--verify', 'refs/heads/feature-x').length, 40, 'branch kept');
 
-    // Marking done reports the remaining worktree; detaching without removal keeps it on disk.
+    // Marking done leaves worktrees alone; detaching without removal keeps it on disk.
     const done = projects.updateProject(project.id, { status: 'done' });
-    assert.deepEqual(done.worktrees, [wt2.path]);
+    assert.equal(done.project.status, 'done');
+    assert.ok(fs.existsSync(wt2.path), 'marking done keeps the worktree');
     fs.writeFileSync(path.join(wt2.path, 'AGENTS.override.md'), userOverride);
     const kept = await projects.detachFolder(project.id, wt2.path, {});
     assert.equal(kept.worktreeRemoved, false);

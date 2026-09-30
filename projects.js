@@ -721,13 +721,7 @@ function updateProject(id, patch) {
   // The brief's title comes from the project name, so a rename rewrites it.
   if (clean.name) syncProjectBrief(id).catch(err => log.error?.('[projects] could not retitle the brief', err));
   notifyRendererProjectsChanged();
-  const result = { ok: true, project: loadProjectNode(id) };
-  // Finishing a project is the moment to offer removing its worktrees; the
-  // renderer asks, then detaches each one with removeWorktree.
-  if (clean.status === 'done') {
-    result.worktrees = db.listProjectFolders(id).filter(f => f.mode === 'worktree').map(f => f.path);
-  }
-  return result;
+  return { ok: true, project: loadProjectNode(id) };
 }
 
 /**

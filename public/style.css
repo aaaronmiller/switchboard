@@ -6044,6 +6044,15 @@ body { display: flex; flex-direction: column; }
 /* The running-work list in "mark as done": long titles stay inside the dialog. */
 .done-running-list { max-height: 150px; overflow-y: auto; }
 .done-running-list .np-tree-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "Mark as done": keep or delete the worktrees, decided in the same dialog. */
+.done-choice { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.done-choice-opt { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; cursor: pointer; font-size: 12.5px; color: #c8c8dc; }
+.done-choice-opt:hover { background: rgba(255,255,255,0.03); }
+.done-choice-opt:has(input:checked) { border-color: rgba(120,130,255,0.4); background: rgba(120,130,255,0.08); }
+.done-choice-opt input { margin: 2px 0 0; accent-color: #8088ff; cursor: pointer; }
+.done-choice-opt b { font-weight: 600; display: block; }
+.done-choice-help { display: block; margin-top: 2px; font-size: 11.5px; color: #6a6a80; line-height: 1.4; }
+.done-choice-warn { margin-top: 10px; font-size: 12px; color: #e05070; line-height: 1.4; }
 .ws-prompt .folder-input-row input { width: 100%; }
 
 /* Thin scrollbars on the project pages, matching the sidebar. */

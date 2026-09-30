@@ -3410,23 +3410,34 @@ async function deleteTrackFlow(project, track) {
   await loadProjects();
 }
 
-/** After marking a project done: offer to remove its worktrees, one confirm each for dirty ones. */
-async function offerWorktreeRemoval(project, worktrees) {
-  const n = worktrees.length;
-  if (!confirm(`Remove ${n} worktree${n === 1 ? '' : 's'} for ${project.name}?\n\n${worktrees.join('\n')}\n\nThe branches stay. Cancel keeps the checkouts on disk.`)) return;
-  for (const p of worktrees) {
-    let result = await window.api.detachProjectFolder(project.id, p, { removeWorktree: true });
-    if (result?.dirty && confirm(`${p} has uncommitted changes.\n\n${result.error}\n\nRemove it anyway and lose them?`)) {
-      result = await window.api.detachProjectFolder(project.id, p, { removeWorktree: true, force: true });
-    }
-    if (result?.error) alert(result.error);
+/** A project's worktrees, each marked dirty when git reports uncommitted changes right now. */
+async function projectWorktreesWithState(project) {
+  const worktrees = (project.folders || []).filter(f => f.mode === 'worktree');
+  if (!worktrees.length) return [];
+  let byPath = {};
+  try { byPath = (await window.api.getProjectGitStatus(project.id, { force: true }))?.byPath || {}; } catch {}
+  return worktrees.map(f => ({ path: f.path, branch: f.branch || '', dirty: !!(byPath[f.path]?.git && byPath[f.path].dirty) }));
+}
+
+/**
+ * Delete the checkouts of a finished project's worktrees. Only the ones the
+ * dialog showed as having uncommitted changes are forced, so a checkout that
+ * picked up changes after the user looked is kept rather than wiped.
+ * Resolves the ones that stay, with why.
+ */
+async function deleteProjectWorktrees(project, worktrees) {
+  const kept = [];
+  for (const wt of worktrees) {
+    const result = await window.api.detachProjectFolder(project.id, wt.path, { removeWorktree: true, force: wt.dirty });
+    if (result?.error) kept.push(`${wt.path}\n  ${result.dirty ? 'It has uncommitted changes.' : result.error}`);
   }
+  return kept;
 }
 
 /**
  * What is still alive in a project: its running sessions, and the tasks
- * running in any folder it works in. Marking a project done leaves both
- * running, so the user is asked first.
+ * running in any folder it works in. Marking a project done stops both, so
+ * the user is asked first.
  */
 function runningWorkInProject(project) {
   const sessions = projectSessionsAll(project).filter(s => isSessionRunning(s.sessionId));
@@ -3454,36 +3465,33 @@ async function stopRunningWork(running) {
   pollActiveSessions();
 }
 
-/**
- * Warn before stopping a project's running work, either on its own ("Stop
- * all") or as part of marking the project done. Mid-turn sessions are called
- * out, since stopping those interrupts work in progress. Resolves true to go
- * ahead, false to leave everything as it is.
- */
-function confirmStopWork(project, running, { schedules = [], markDone = false } = {}) {
+/** Running sessions (mid-turn ones marked) and tasks, one line each. */
+function runningWorkLines(running) {
+  const busyIds = new Set((running.busy || []).map(s => s.sessionId));
+  return [
+    ...running.sessions.map(s => busyIds.has(s.sessionId) ? `${sessionTitle(s)}  · working` : sessionTitle(s)),
+    ...running.tasks.map(t => t.label),
+  ];
+}
+
+/** Mid-turn sessions are called out, since stopping those interrupts work in progress. */
+function busyNote(running) {
+  const n = (running.busy || []).length;
+  return n ? `${n} session${n === 1 ? ' is' : 's are'} mid-turn; stopping interrupts work in progress.` : '';
+}
+
+/** A short scrolling list for a dialog, capped at `max` lines. */
+function dialogListHtml(lines, max = 8) {
+  const shown = lines.slice(0, max);
+  const more = lines.length - shown.length;
+  return `<div class="np-tree mono done-running-list">${shown.map(n => `<span class="np-tree-item">${escapeHtml(n)}</span>`).join('')}${more > 0 ? `<span class="np-tree-item"><em>+ ${more} more</em></span>` : ''}</div>`;
+}
+
+/** Warn before "Stop all" stops a project's running work. Resolves true to go ahead. */
+function confirmStopWork(project, running) {
   const parts = [];
   if (running.sessions.length) parts.push(`${running.sessions.length} running session${running.sessions.length === 1 ? '' : 's'}`);
   if (running.tasks.length) parts.push(`${running.tasks.length} running task${running.tasks.length === 1 ? '' : 's'}`);
-  const stopping = parts.length > 0;
-  const busyIds = new Set((running.busy || []).map(s => s.sessionId));
-  const all = [
-    ...running.sessions.map(s => busyIds.has(s.sessionId) ? `${sessionTitle(s)}  · working` : sessionTitle(s)),
-    ...running.tasks.map(t => t.label),
-    ...schedules.map(s => `${s.name} (scheduled, will pause)`),
-  ];
-  const busyNote = busyIds.size
-    ? ` ${busyIds.size} session${busyIds.size === 1 ? ' is' : 's are'} mid-turn; stopping interrupts work in progress.`
-    : '';
-  const scheduleNote = schedules.length
-    ? ` ${schedules.length} scheduled task${schedules.length === 1 ? '' : 's'} will pause until the project is reopened.`
-    : '';
-  const lead = markDone ? 'Marking the project done stops all of it.' : '';
-  const names = all.slice(0, 8);
-  const more = all.length - names.length;
-  const title = stopping
-    ? `Stop ${parts.join(' and ')} in ${project.name}?`
-    : `Mark ${project.name} as done?`;
-  const confirmLabel = markDone ? (stopping ? 'Stop and mark as done' : 'Mark as done') : 'Stop all';
   return new Promise(resolve => {
     const overlay = document.createElement('div');
     overlay.className = 'add-project-overlay';
@@ -3491,19 +3499,89 @@ function confirmStopWork(project, running, { schedules = [], markDone = false } 
     dialog.className = 'add-project-dialog ws-prompt';
     dialog.setAttribute('role', 'dialog');
     dialog.setAttribute('aria-modal', 'true');
-    dialog.setAttribute('aria-labelledby', 'done-running-title');
+    dialog.setAttribute('aria-labelledby', 'stop-running-title');
     dialog.innerHTML = `
-      <h3 id="done-running-title">${escapeHtml(title)}</h3>
-      <div class="add-project-hint">${escapeHtml(lead + busyNote + scheduleNote)}</div>
-      <div class="np-tree mono done-running-list">${names.map(n => `<span class="np-tree-item">${escapeHtml(n)}</span>`).join('')}${more > 0 ? `<span class="np-tree-item"><em>+ ${more} more</em></span>` : ''}</div>
+      <h3 id="stop-running-title">${escapeHtml(`Stop ${parts.join(' and ')} in ${project.name}?`)}</h3>
+      <div class="add-project-hint">${escapeHtml(busyNote(running))}</div>
+      ${dialogListHtml(runningWorkLines(running))}
       <div class="add-project-actions">
         <button class="add-project-cancel-btn" type="button">Cancel</button>
-        <button class="add-project-add-btn" type="button">${escapeHtml(confirmLabel)}</button>
+        <button class="add-project-add-btn" type="button">Stop all</button>
       </div>`;
     const finish = value => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(value); };
     const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); finish(false); } };
     dialog.querySelector('.add-project-cancel-btn').onclick = () => finish(false);
     dialog.querySelector('.add-project-add-btn').onclick = () => finish(true);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKey);
+    dialog.querySelector('.add-project-cancel-btn').focus();
+  });
+}
+
+/**
+ * The one question before a project is marked done: what stops, what pauses,
+ * and whether to keep or delete its worktrees. Keep is the default, so a
+ * project can be reopened later exactly as it was. Cancel changes nothing.
+ * Resolves { deleteWorktrees } to go ahead, or null.
+ */
+function confirmMarkDone(project, { running, schedules, worktrees }) {
+  const stopLines = runningWorkLines(running);
+  const dirty = worktrees.filter(w => w.dirty);
+  const n = worktrees.length;
+  const plural = n === 1 ? 'worktree' : 'worktrees';
+  const sections = [];
+  if (stopLines.length) {
+    sections.push(`
+      <label class="new-project-label">Stops now</label>
+      ${busyNote(running) ? `<div class="add-project-hint">${escapeHtml(busyNote(running))}</div>` : ''}
+      ${dialogListHtml(stopLines)}`);
+  }
+  if (schedules.length) {
+    sections.push(`
+      <label class="new-project-label">Pauses until reopened</label>
+      ${dialogListHtml(schedules.map(s => s.name))}`);
+  }
+  if (n) {
+    const wtLines = worktrees.map(w => `${pathBasename(w.path)}${w.branch ? ` · ${w.branch}` : ''}${w.dirty ? '  · uncommitted changes' : ''}`);
+    sections.push(`
+      <label class="new-project-label">${n === 1 ? 'Worktree' : `${n} worktrees`}</label>
+      ${dialogListHtml(wtLines)}
+      <div class="done-choice" role="radiogroup">
+        <label class="done-choice-opt"><input type="radio" name="done-wt" value="keep" checked><span><b>Keep on disk</b><span class="done-choice-help">Reopen the project any time and pick up where you left off.</span></span></label>
+        <label class="done-choice-opt"><input type="radio" name="done-wt" value="delete"><span><b>Delete the ${plural}</b><span class="done-choice-help">Removes the ${n === 1 ? 'checkout' : 'checkouts'}. Branches and their commits stay.</span></span></label>
+      </div>
+      ${dirty.length ? `<div class="done-choice-warn" hidden>${dirty.length === n && n === 1 ? 'It has' : `${dirty.length} of them ${dirty.length === 1 ? 'has' : 'have'}`} uncommitted changes. Deleting loses them.</div>` : ''}`);
+  }
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'add-project-overlay';
+    const dialog = document.createElement('div');
+    dialog.className = 'add-project-dialog ws-prompt';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', 'mark-done-title');
+    dialog.innerHTML = `
+      <h3 id="mark-done-title">${escapeHtml(`Mark ${project.name} as done?`)}</h3>
+      <div class="add-project-hint">It moves to the Done list. Reopen it any time.</div>
+      ${sections.join('')}
+      <div class="add-project-actions">
+        <button class="add-project-cancel-btn" type="button">Cancel</button>
+        <button class="add-project-add-btn" type="button">Mark as done</button>
+      </div>`;
+    const confirmBtn = dialog.querySelector('.add-project-add-btn');
+    const warn = dialog.querySelector('.done-choice-warn');
+    const deleting = () => dialog.querySelector('input[name="done-wt"]:checked')?.value === 'delete';
+    dialog.querySelectorAll('input[name="done-wt"]').forEach(input => {
+      input.onchange = () => {
+        confirmBtn.textContent = deleting() ? `Mark as done and delete ${plural}` : 'Mark as done';
+        if (warn) warn.hidden = !deleting();
+      };
+    });
+    const finish = value => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(value); };
+    const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); finish(null); } };
+    dialog.querySelector('.add-project-cancel-btn').onclick = () => finish(null);
+    confirmBtn.onclick = () => finish({ deleteWorktrees: deleting() });
     overlay.appendChild(dialog);
     document.body.appendChild(overlay);
     document.addEventListener('keydown', onKey);
@@ -3524,21 +3602,35 @@ async function toggleTrackDone(project, track, patch) {
   await patch({ status: toDone ? 'done' : 'active' });
 }
 
+/**
+ * Reopening is one click. Marking done asks once, and only when there is
+ * something to ask about: running work, schedules, or worktrees. Everything
+ * is decided in that dialog; nothing happens until the user confirms.
+ */
 async function toggleProjectDone(project) {
-  const isDone = project.status === 'done';
-  if (!isDone) {
-    const running = runningWorkInProject(project);
-    // Schedules do not need stopping — a done project simply stops firing
-    // them — but the user should hear that before it happens.
-    const schedules = schedulesForProject(project).filter(s => s.enabled);
-    if (anyRunningWork(running) || schedules.length) {
-      if (!await confirmStopWork(project, running, { schedules, markDone: true })) return;
-      await stopRunningWork(running);
-    }
+  if (project.status === 'done') {
+    const result = await window.api.updateProject(project.id, { status: 'active' });
+    if (result?.error) { alert(result.error); return; }
+    loadProjects();
+    return;
   }
-  const result = await window.api.updateProject(project.id, { status: isDone ? 'active' : 'done' });
+  const running = runningWorkInProject(project);
+  // Schedules do not need stopping — a done project simply stops firing
+  // them — but the user should hear that before it happens.
+  const schedules = schedulesForProject(project).filter(s => s.enabled);
+  const worktrees = await projectWorktreesWithState(project);
+  let choice = { deleteWorktrees: false };
+  if (anyRunningWork(running) || schedules.length || worktrees.length) {
+    choice = await confirmMarkDone(project, { running, schedules, worktrees });
+    if (!choice) return;
+  }
+  if (anyRunningWork(running)) await stopRunningWork(running);
+  const result = await window.api.updateProject(project.id, { status: 'done' });
   if (result?.error) { alert(result.error); return; }
-  if (!isDone && result.worktrees?.length) await offerWorktreeRemoval(project, result.worktrees);
+  if (choice.deleteWorktrees) {
+    const kept = await deleteProjectWorktrees(project, worktrees);
+    if (kept.length) alert(`${project.name} is done, but ${kept.length === 1 ? 'one worktree was' : `${kept.length} worktrees were`} not deleted and ${kept.length === 1 ? 'stays' : 'stay'} on disk:\n\n${kept.join('\n\n')}`);
+  }
   loadProjects();
 }
 
