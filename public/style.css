@@ -6052,6 +6052,8 @@ body { display: flex; flex-direction: column; }
 .done-choice-opt input { margin: 2px 0 0; accent-color: #8088ff; cursor: pointer; }
 .done-choice-opt b { font-weight: 600; display: block; }
 .done-choice-help { display: block; margin-top: 2px; font-size: 11.5px; color: #6a6a80; line-height: 1.4; }
+.done-choice-paths { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; font-size: 11px; color: #9090a8; word-break: break-all; }
+.done-choice-paths em { font-style: normal; color: #e05070; }
 .done-choice-warn { margin-top: 10px; font-size: 12px; color: #e05070; line-height: 1.4; }
 .ws-prompt .folder-input-row input { width: 100%; }
 

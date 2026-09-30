@@ -3549,7 +3549,8 @@ function confirmMarkDone(project, { running, schedules, worktrees }) {
       ${dialogListHtml(wtLines)}
       <div class="done-choice" role="radiogroup">
         <label class="done-choice-opt"><input type="radio" name="done-wt" value="keep" checked><span><b>Keep on disk</b><span class="done-choice-help">Reopen the project any time and pick up where you left off.</span></span></label>
-        <label class="done-choice-opt"><input type="radio" name="done-wt" value="delete"><span><b>Delete the ${plural}</b><span class="done-choice-help">Removes the ${n === 1 ? 'checkout' : 'checkouts'}. Branches and their commits stay.</span></span></label>
+        <label class="done-choice-opt"><input type="radio" name="done-wt" value="delete"><span><b>Delete the ${plural}</b><span class="done-choice-help">Removes ${n === 1 ? 'this folder' : 'these folders'}. Branches and their commits stay.</span>
+          <span class="done-choice-paths mono">${worktrees.map(w => `<span title="${escapeHtml(w.path)}">${escapeHtml(shortPathLabel(w.path))}${w.dirty ? '<em> · uncommitted changes</em>' : ''}</span>`).join('')}</span></span></label>
       </div>
       ${dirty.length ? `<div class="done-choice-warn" hidden>${dirty.length === n && n === 1 ? 'It has' : `${dirty.length} of them ${dirty.length === 1 ? 'has' : 'have'}`} uncommitted changes. Deleting loses them.</div>` : ''}`);
   }
