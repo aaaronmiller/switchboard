@@ -6,20 +6,25 @@
   "author": "Doctly <support@doctly.ai>",
   "main": "main.js",
   "scripts": {
-    "start": "npm run bundle:codemirror && electron .",
+    "start": "npm run bundle && electron .",
     "test": "node --test",
     "electron": "electron .",
+    "electron-dev": "SWITCHBOARD_DATA_DIR=\"$HOME/.switchboard-dev\" electron .",
     "bundle:codemirror": "esbuild public/codemirror-setup.js --bundle --outfile=public/codemirror-bundle.js --format=iife --platform=browser --minify",
     "generate-icons": "node scripts/generate-icons.js && node scripts/generate-dmg-background.js",
-    "build": "npm run bundle:codemirror && electron-builder",
-    "build:mac": "npm run bundle:codemirror && electron-builder --mac && node scripts/postinstall.js && codesign --sign - --force --deep dist/mac-arm64/Switchboard.app 2>/dev/null; true",
-    "build:mac:arm64": "electron-builder --mac --arm64 2>/dev/null; true",
-    "build:win": "npm run bundle:codemirror && electron-builder --win",
-    "build:linux": "npm run bundle:codemirror && electron-builder --linux",
-    "release": "npm run bundle:codemirror && electron-builder --publish always",
-    "postinstall": "node scripts/postinstall.js"
+    "build": "npm run bundle && electron-builder",
+    "build:mac": "npm run bundle && electron-builder --mac && node scripts/postinstall.js",
+    "build:mac:arm64": "npm run bundle && electron-builder --mac --arm64 && node scripts/postinstall.js",
+    "build:win": "npm run bundle && electron-builder --win",
+    "build:linux": "npm run bundle && electron-builder --linux",
+    "release": "npm run bundle && electron-builder --publish always",
+    "postinstall": "node scripts/postinstall.js",
+    "bundle": "npm run bundle:codemirror && npm run bundle:pptx && npm run bundle:jsonc",
+    "bundle:pptx": "esbuild public/pptx-preview.js --bundle --outfile=public/pptx-preview-bundle.js --format=iife --platform=browser --minify",
+    "bundle:jsonc": "esbuild node_modules/jsonc-parser/lib/esm/main.js --bundle --outfile=public/jsonc-parser-bundle.js --format=iife --global-name=JsoncParser --platform=browser --minify"
   },
   "dependencies": {
+    "@aiden0z/pptx-renderer": "1.2.4",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/addon-unicode-graphemes": "^0.4.0",
@@ -27,12 +32,14 @@
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "better-sqlite3": "^12.0.0",
+    "dotenv": "^17.4.2",
     "electron-log": "^5.3.0",
-    "electron-updater": "^6.3.0",
+    "electron-updater": "^6.8.9",
+    "jsonc-parser": "^3.3.1",
     "marked": "^17.0.4",
     "morphdom": "^2.7.8",
     "node-pty": "^1.0.0",
-    "ws": "^8.18.0"
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@codemirror/commands": "^6.10.2",
@@ -56,6 +63,7 @@
     "productName": "Switchboard",
     "files": [
       "*.js",
+      "harnesses/**/*",
       "workers/**/*",
       "public/**/*",
       "node_modules/**/*"
@@ -86,6 +94,7 @@
           ]
         }
       ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "hardenedRuntime": true,
@@ -106,9 +115,24 @@
     "linux": {
       "target": [
         "AppImage",
-        "deb"
+        "deb",
+        "pacman"
       ],
+      "icon": "build/icons",
       "category": "Development"
+    },
+    "pacman": {
+      "packageName": "switchboard-doctly",
+      "artifactName": "switchboard-doctly-${version}.${ext}",
+      "depends": [
+        "gtk3",
+        "nss",
+        "libnotify",
+        "libxtst",
+        "libxss",
+        "xdg-utils",
+        "libsecret"
+      ]
     },
     "dmg": {
       "background": "build/dmg-background.png",

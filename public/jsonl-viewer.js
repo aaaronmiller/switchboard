@@ -1,6 +1,7 @@
 // --- JSONL Message History Viewer ---
-// Depends on globals: escapeHtml (utils.js), hideAllViewers, placeholder,
-// terminalArea, jsonlViewer, jsonlViewerTitle, jsonlViewerSessionId, jsonlViewerBody (app.js)
+// Depends on globals: escapeHtml (utils.js), hideAllViewers, setActiveSession,
+// placeholder, terminalArea, jsonlViewer, jsonlViewerTitle,
+// jsonlViewerSessionId, jsonlViewerBody (app.js)
 
 function renderJsonlText(text) {
   if (window.marked) {
@@ -552,8 +553,30 @@ function renderJsonlEntry(entry, toolResultMap) {
   return div;
 }
 
+let jsonlSearch = null;
+document.addEventListener('keydown', event => {
+  const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? event.metaKey : event.ctrlKey;
+  if (!mod || event.altKey || event.shiftKey || event.key.toLowerCase() !== 'f' || !jsonlViewer.getClientRects().length) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (!jsonlSearch) jsonlSearch = createMessageSearch(jsonlViewer, jsonlViewerBody);
+  jsonlSearch.open();
+}, true);
+
+let jsonlViewRequest = 0;
+
 async function showJsonlViewer(session) {
-  const result = await window.api.readSessionJsonl(session.sessionId);
+  jsonlSearch?.close(false);
+  const request = ++jsonlViewRequest;
+  if (typeof leaveTaskLogView === 'function') leaveTaskLogView();
+  // Viewing a transcript is another way of navigating to a session. Keep the
+  // sidebar highlight and persisted selection in sync even though the action
+  // button stops the session row's normal click handler.
+  document.querySelectorAll('.session-item.active').forEach(el => el.classList.remove('active'));
+  const item = document.querySelector(`.session-item[data-session-id="${session.sessionId}"]`);
+  if (item) item.classList.add('active');
+  setActiveSession(session.sessionId);
+
   hideAllViewers();
   placeholder.style.display = 'none';
   terminalArea.style.display = 'none';
@@ -562,10 +585,22 @@ async function showJsonlViewer(session) {
   const displayName = session.name || session.aiTitle || session.summary || session.sessionId;
   jsonlViewerTitle.textContent = displayName;
   jsonlViewerSessionId.textContent = session.sessionId;
+  jsonlViewerBody.innerHTML = '<div class="plans-empty">Loading messages…</div>';
+  if (typeof onMessagesShown === 'function') onMessagesShown(session);
+
+  let result;
+  try {
+    result = await window.api.readSessionJsonl(session.sessionId);
+  } catch (error) {
+    result = { error: error.message };
+  }
+  // A slow transcript must not reopen the viewer or replace a newer selection.
+  if (request !== jsonlViewRequest || activeSessionId !== session.sessionId || jsonlViewer.style.display === 'none') return;
   jsonlViewerBody.innerHTML = '';
 
   if (result.error) {
     jsonlViewerBody.innerHTML = '<div class="plans-empty">Error loading messages: ' + escapeHtml(result.error) + '</div>';
+    jsonlSearch?.refresh();
     return;
   }
 
@@ -614,4 +649,5 @@ async function showJsonlViewer(session) {
 
   // Scroll to the bottom so the most recent messages are visible
   jsonlViewerBody.scrollTop = jsonlViewerBody.scrollHeight;
+  jsonlSearch?.refresh();
 }
