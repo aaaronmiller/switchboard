@@ -1,5 +1,20 @@
 // --- Utility functions (shared across renderer modules) ---
 
+/**
+ * Shorten a project path for display: its last two segments.
+ *
+ * Splits on both separators. projectPath comes from a session's `cwd`, which on
+ * Windows is backslash-separated — splitting on '/' alone finds no separator, so
+ * every "short" label rendered the entire path.
+ */
+function shortProjectPath(projectPath) {
+  if (!projectPath) return '';
+  return projectPath.split(/[\\/]/).filter(Boolean).slice(-2).join('/');
+}
+
+// Session dialogs, schedules and global settings share the same CLI choices.
+const { PERMISSION_MODES, CODEX_SANDBOX_MODES, CODEX_APPROVAL_POLICIES } = SessionConfig;
+
 // Mirror Claude CLI's project-folder naming. Must stay in sync with
 // encode-project-path.js (main process). Reverse-engineered from claude CLI 2.1.126.
 function encodeProjectPath(projectPath) {
