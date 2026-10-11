@@ -1,0 +1,7 @@
+virtualStoreType: global
+onlyBuiltDependencies:
+  - esbuild
+  - better-sqlite3
+  - node-pty
+  - sharp
+  - prisma
