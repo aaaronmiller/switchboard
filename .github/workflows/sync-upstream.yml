@@ -66,7 +66,7 @@ jobs:
           MAIN_SHA=$(git rev-parse HEAD)
 
           # Try clean merge first (without auto-committing)
-          git merge --no-commit --no-ff upstream/main || true
+          git merge --no-commit --no-ff --allow-unrelated-histories upstream/main || true
 
           # Always restore fork's own workflow files — never let upstream overwrite them
           git checkout HEAD -- .github/workflows/ 2>/dev/null || true
@@ -88,7 +88,7 @@ jobs:
             git checkout -b "$BRANCH"
 
             # Force-resolve conflicts in upstream's favour; restore our workflows
-            git merge -X theirs upstream/main \
+            git merge --allow-unrelated-histories -X theirs upstream/main \
               -m "chore: sync upstream $TAG (conflicts resolved: theirs)"
             git checkout HEAD@{1} -- .github/workflows/ 2>/dev/null || true
             git diff --cached --quiet || git commit -m "chore: restore fork workflows after sync"
