@@ -82,10 +82,10 @@ jobs:
           else
             # Conflicts in code files — create a review PR
             echo "::warning::Conflicts in: $(echo $CONFLICTS | tr '\n' ' ')"
-            git merge --abort
+            git merge --abort 2>/dev/null || true
 
             BRANCH="sync/upstream-$TAG"
-            git checkout -b "$BRANCH"
+            git checkout -B "$BRANCH"
 
             # Force-resolve conflicts in upstream's favour; restore our workflows
             git merge --allow-unrelated-histories -X theirs upstream/main \
@@ -134,10 +134,12 @@ jobs:
 
       - name: Setup Node.js
         if: steps.merge.outputs.mode == 'direct'
+        uses: pnpm/action-setup@v4
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
+          cache: pnpm
 
       - name: Install setuptools (node-gyp distutils fix)
         if: steps.merge.outputs.mode == 'direct'
@@ -148,11 +150,11 @@ jobs:
         run: sudo apt-get install -y rpm 2>/dev/null || echo "rpm-build not available, skipping RPM"
       - name: Install dependencies
         if: steps.merge.outputs.mode == 'direct'
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Bundle CodeMirror
         if: steps.merge.outputs.mode == 'direct'
-        run: npm run bundle:codemirror
+        run: pnpm run bundle:codemirror
 
       - name: Build Linux packages
         if: steps.merge.outputs.mode == 'direct'
